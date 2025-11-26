@@ -132,10 +132,24 @@ export const getKnowledgeById = async (token: string, id: string) => {
 	return res;
 };
 
+type RagSettings = {
+	top_k?: number | null;
+	top_k_reranker?: number | null;
+	relevance_threshold?: number | null;
+	enable_hybrid_search?: boolean | null;
+	hybrid_bm25_weight?: number | null;
+	full_context?: boolean | null;
+};
+
+type KnowledgeMeta = {
+	rag_settings?: RagSettings;
+};
+
 type KnowledgeUpdateForm = {
 	name?: string;
 	description?: string;
 	data?: object;
+	meta?: KnowledgeMeta | null;
 	access_control?: null | object;
 };
 
@@ -153,6 +167,7 @@ export const updateKnowledgeById = async (token: string, id: string, form: Knowl
 			name: form?.name ? form.name : undefined,
 			description: form?.description ? form.description : undefined,
 			data: form?.data ? form.data : undefined,
+			meta: form?.meta !== undefined ? form.meta : undefined,
 			access_control: form.access_control
 		})
 	})

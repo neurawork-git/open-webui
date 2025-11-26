@@ -49,7 +49,9 @@
 	import ChevronLeft from '$lib/components/icons/ChevronLeft.svelte';
 	import LockClosed from '$lib/components/icons/LockClosed.svelte';
 	import AccessControlModal from '../common/AccessControlModal.svelte';
+	import RagSettingsModal from '$lib/components/common/RagSettingsModal.svelte';
 	import Search from '$lib/components/icons/Search.svelte';
+	import AdjustmentsHorizontal from '$lib/components/icons/AdjustmentsHorizontal.svelte';
 	import Textarea from '$lib/components/common/Textarea.svelte';
 	import FilesOverlay from '$lib/components/chat/MessageInput/FilesOverlay.svelte';
 
@@ -59,6 +61,15 @@
 	let showSidepanel = true;
 	let minSize = 0;
 
+	type RagSettings = {
+		top_k?: number | null;
+		top_k_reranker?: number | null;
+		relevance_threshold?: number | null;
+		enable_hybrid_search?: boolean | null;
+		hybrid_bm25_weight?: number | null;
+		full_context?: boolean | null;
+	};
+
 	type Knowledge = {
 		id: string;
 		name: string;
@@ -66,7 +77,11 @@
 		data: {
 			file_ids: string[];
 		};
+		meta?: {
+			rag_settings?: RagSettings;
+		} | null;
 		files: any[];
+		access_control?: any;
 	};
 
 	let id = null;
@@ -76,6 +91,7 @@
 	let showAddTextContentModal = false;
 	let showSyncConfirmModal = false;
 	let showAccessControlModal = false;
+	let showRagSettingsModal = false;
 
 	let inputFiles = null;
 
@@ -717,6 +733,32 @@
 			}}
 			accessRoles={['read', 'write']}
 		/>
+		<RagSettingsModal
+			bind:show={showRagSettingsModal}
+			ragSettings={knowledge.meta?.rag_settings ?? {}}
+			on:save={async (e) => {
+				const newRagSettings = e.detail;
+				// Update knowledge meta with new RAG settings
+				knowledge.meta = {
+					...(knowledge.meta ?? {}),
+					rag_settings: Object.keys(newRagSettings).length > 0 ? newRagSettings : undefined
+				};
+				// Trigger save
+				const res = await updateKnowledgeById(localStorage.token, id, {
+					name: knowledge.name,
+					description: knowledge.description,
+					meta: knowledge.meta,
+					access_control: knowledge.access_control
+				}).catch((err) => {
+					toast.error(`${err}`);
+					return null;
+				});
+				if (res) {
+					toast.success($i18n.t('RAG settings updated'));
+					_knowledge.set(await getKnowledgeBases(localStorage.token));
+				}
+			}}
+		/>
 		<div class="w-full mb-2.5">
 			<div class=" flex w-full">
 				<div class="flex-1">
@@ -733,7 +775,21 @@
 							/>
 						</div>
 
-						<div class="self-center shrink-0">
+						<div class="self-center shrink-0 flex gap-1">
+							<button
+								class="bg-gray-50 hover:bg-gray-100 text-black dark:bg-gray-850 dark:hover:bg-gray-800 dark:text-white transition px-2 py-1 rounded-full flex gap-1 items-center"
+								type="button"
+								on:click={() => {
+									showRagSettingsModal = true;
+								}}
+								title={$i18n.t('RAG Settings')}
+							>
+								<AdjustmentsHorizontal strokeWidth="2.5" className="size-3.5" />
+
+								<div class="text-sm font-medium shrink-0">
+									{$i18n.t('RAG')}
+								</div>
+							</button>
 							<button
 								class="bg-gray-50 hover:bg-gray-100 text-black dark:bg-gray-850 dark:hover:bg-gray-800 dark:text-white transition px-2 py-1 rounded-full flex gap-1 items-center"
 								type="button"

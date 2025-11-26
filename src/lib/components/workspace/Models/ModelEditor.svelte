@@ -23,6 +23,7 @@
 	import DefaultFiltersSelector from './DefaultFiltersSelector.svelte';
 	import DefaultFeatures from './DefaultFeatures.svelte';
 	import PromptSuggestions from './PromptSuggestions.svelte';
+	import RagSettingsModal from '$lib/components/common/RagSettingsModal.svelte';
 
 	const i18n = getContext('i18n');
 
@@ -103,6 +104,17 @@
 
 	let actionIds = [];
 	let accessControl = {};
+
+	// RAG Settings
+	let showRagSettingsModal = false;
+	let ragSettings: {
+		top_k?: number | null;
+		top_k_reranker?: number | null;
+		relevance_threshold?: number | null;
+		enable_hybrid_search?: boolean | null;
+		hybrid_bm25_weight?: number | null;
+		full_context?: boolean | null;
+	} = {};
 
 	const addUsage = (base_model_id) => {
 		const baseModel = $models.find((m) => m.id === base_model_id);
@@ -203,6 +215,15 @@
 			}
 		}
 
+		// Save RAG settings
+		if (Object.keys(ragSettings).length > 0) {
+			info.meta.rag_settings = ragSettings;
+		} else {
+			if (info.meta.rag_settings) {
+				delete info.meta.rag_settings;
+			}
+		}
+
 		info.params.system = system.trim() === '' ? null : system;
 		info.params.stop = params.stop ? params.stop.split(',').filter((s) => s.trim()) : null;
 		Object.keys(info.params).forEach((key) => {
@@ -285,6 +306,7 @@
 
 			capabilities = { ...capabilities, ...(model?.meta?.capabilities ?? {}) };
 			defaultFeatureIds = model?.meta?.defaultFeatureIds ?? [];
+			ragSettings = model?.meta?.rag_settings ?? {};
 
 			if ('access_control' in model) {
 				accessControl = model.access_control;
@@ -689,6 +711,31 @@
 					</div>
 
 					<div class="my-2">
+						<div class="flex w-full justify-between items-center">
+							<div class="flex items-center gap-2">
+								<div class="text-sm font-medium">{$i18n.t('RAG Settings')}</div>
+								{#if Object.keys(ragSettings).length > 0}
+									<span class="text-xs text-green-500 dark:text-green-400">
+										({$i18n.t('Custom')})
+									</span>
+								{/if}
+							</div>
+							<button
+								class="p-1 px-3 text-xs flex rounded-sm transition"
+								type="button"
+								on:click={() => {
+									showRagSettingsModal = true;
+								}}
+							>
+								<span class="ml-2 self-center">{$i18n.t('Configure')}</span>
+							</button>
+						</div>
+						<div class="text-xs text-gray-500 mt-1">
+							{$i18n.t('Override global RAG settings for this model')}
+						</div>
+					</div>
+
+					<div class="my-2">
 						<ToolsSelector bind:selectedToolIds={toolIds} tools={$tools} />
 					</div>
 
@@ -803,3 +850,11 @@
 		{/if}
 	</div>
 {/if}
+
+<RagSettingsModal
+	bind:show={showRagSettingsModal}
+	{ragSettings}
+	on:save={(e) => {
+		ragSettings = e.detail;
+	}}
+/>
