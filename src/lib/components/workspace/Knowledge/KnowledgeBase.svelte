@@ -28,6 +28,7 @@
 		addFileToKnowledgeById,
 		getKnowledgeById,
 		getKnowledgeBases,
+		reindexKnowledgeById,
 		removeFileFromKnowledgeById,
 		resetKnowledgeById,
 		updateFileFromKnowledgeById,
@@ -52,6 +53,7 @@
 	import RagSettingsModal from '$lib/components/common/RagSettingsModal.svelte';
 	import Search from '$lib/components/icons/Search.svelte';
 	import AdjustmentsHorizontal from '$lib/components/icons/AdjustmentsHorizontal.svelte';
+	import ArrowPath from '$lib/components/icons/ArrowPath.svelte';
 	import Textarea from '$lib/components/common/Textarea.svelte';
 	import FilesOverlay from '$lib/components/chat/MessageInput/FilesOverlay.svelte';
 
@@ -92,6 +94,8 @@
 	let showSyncConfirmModal = false;
 	let showAccessControlModal = false;
 	let showRagSettingsModal = false;
+	let showReindexConfirmModal = false;
+	let isReindexing = false;
 
 	let inputFiles = null;
 
@@ -416,6 +420,35 @@
 		}
 	};
 
+	const reindexHandler = async () => {
+		isReindexing = true;
+		try {
+			const res = await reindexKnowledgeById(localStorage.token, id);
+			if (res && res.success) {
+				toast.success(
+					$i18n.t('Reindex completed: {{processed}}/{{total}} files processed', {
+						processed: res.processed_files,
+						total: res.total_files
+					})
+				);
+				if (res.failed_files && res.failed_files.length > 0) {
+					toast.warning(
+						$i18n.t('{{count}} files failed to reindex', { count: res.failed_files.length })
+					);
+				}
+				// Refresh the knowledge base data
+				knowledge = await getKnowledgeById(localStorage.token, id);
+				_knowledge.set(await getKnowledgeBases(localStorage.token));
+			} else {
+				toast.error($i18n.t('Reindex failed'));
+			}
+		} catch (e) {
+			toast.error(`${e}`);
+		} finally {
+			isReindexing = false;
+		}
+	};
+
 	const addFileHandler = async (fileId) => {
 		const updatedKnowledge = await addFileToKnowledgeById(localStorage.token, id, fileId).catch(
 			(e) => {
@@ -689,6 +722,16 @@
 	}}
 />
 
+<SyncConfirmDialog
+	bind:show={showReindexConfirmModal}
+	message={$i18n.t(
+		'This will delete and re-create all vector embeddings for this knowledge base. This may take a while for large collections. Do you wish to continue?'
+	)}
+	on:confirm={() => {
+		reindexHandler();
+	}}
+/>
+
 <AddTextContentModal
 	bind:show={showAddTextContentModal}
 	on:submit={(e) => {
@@ -801,6 +844,25 @@
 
 								<div class="text-sm font-medium shrink-0">
 									{$i18n.t('Access')}
+								</div>
+							</button>
+							<button
+								class="bg-gray-50 hover:bg-gray-100 text-black dark:bg-gray-850 dark:hover:bg-gray-800 dark:text-white transition px-2 py-1 rounded-full flex gap-1 items-center disabled:opacity-50 disabled:cursor-not-allowed"
+								type="button"
+								disabled={isReindexing}
+								on:click={() => {
+									showReindexConfirmModal = true;
+								}}
+								title={$i18n.t('Re-index all files in this knowledge base')}
+							>
+								{#if isReindexing}
+									<Spinner className="size-3.5" />
+								{:else}
+									<ArrowPath strokeWidth="2.5" className="size-3.5" />
+								{/if}
+
+								<div class="text-sm font-medium shrink-0">
+									{$i18n.t('Reindex')}
 								</div>
 							</button>
 						</div>
