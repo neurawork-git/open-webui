@@ -71,7 +71,8 @@ from open_webui.models.users import UserModel
 from open_webui.models.functions import Functions
 from open_webui.models.models import Models
 
-from open_webui.retrieval.utils import get_sources_from_items
+from open_webui.retrieval.utils import get_sources_from_items, merge_rag_settings
+from open_webui.models.knowledge import Knowledges
 
 
 from open_webui.utils.sanitize import sanitize_code
@@ -1922,6 +1923,72 @@ async def chat_completion_files_handler(
         if len(queries) == 0:
             queries = [get_last_user_message(body['messages'])]
 
+        # Collect RAG settings from knowledge bases (per-level override support)
+        knowledge_rag_settings = None
+        knowledge_ids = [
+            item.get("id")
+            for item in files
+            if item.get("type") == "collection" and item.get("id")
+        ]
+        if knowledge_ids:
+            # Use the first knowledge base's settings that has them configured
+            for kid in knowledge_ids:
+                kb = Knowledges.get_knowledge_by_id(kid)
+                if kb and kb.meta and isinstance(kb.meta, dict):
+                    kb_rag = kb.meta.get("rag_settings")
+                    if kb_rag:
+                        knowledge_rag_settings = kb_rag
+                        log.debug(
+                            f"Using per-knowledge RAG settings from {kb.name}: {kb_rag}"
+                        )
+                        break
+
+        # Build global settings dict
+        global_settings = {
+            "top_k": request.app.state.config.TOP_K,
+            "top_k_reranker": request.app.state.config.TOP_K_RERANKER,
+            "relevance_threshold": request.app.state.config.RELEVANCE_THRESHOLD,
+            "enable_hybrid_search": request.app.state.config.ENABLE_RAG_HYBRID_SEARCH,
+            "hybrid_bm25_weight": request.app.state.config.HYBRID_BM25_WEIGHT,
+            "full_context": request.app.state.config.RAG_FULL_CONTEXT,
+        }
+
+        # Get user RAG settings if available
+        user_rag_settings = None
+        if user and hasattr(user, "settings") and user.settings:
+            user_settings = (
+                user.settings
+                if isinstance(user.settings, dict)
+                else user.settings.model_dump()
+            )
+            user_rag_settings = user_settings.get("rag_settings")
+            if user_rag_settings:
+                log.debug(f"Using per-user RAG settings: {user_rag_settings}")
+
+        # Get model RAG settings if available
+        model_rag_settings = None
+        model_id = body.get("model")
+        if model_id:
+            model = Models.get_model_by_id(model_id)
+            if model and model.meta:
+                model_meta = (
+                    model.meta
+                    if isinstance(model.meta, dict)
+                    else model.meta.model_dump()
+                )
+                model_rag_settings = model_meta.get("rag_settings")
+                if model_rag_settings:
+                    log.debug(
+                        f"Using per-model RAG settings from {model_id}: {model_rag_settings}"
+                    )
+
+        # Merge with cascade priority: global < user < model < knowledge
+        # Later arguments override earlier ones
+        effective_settings = merge_rag_settings(
+            global_settings, user_rag_settings, model_rag_settings, knowledge_rag_settings
+        )
+        log.debug(f"Effective RAG settings after merge: {effective_settings}")
+
         try:
             # Directly await async get_sources_from_items (no thread needed - fully async now)
             sources = await get_sources_from_items(
@@ -1931,17 +1998,29 @@ async def chat_completion_files_handler(
                 embedding_function=lambda query, prefix: request.app.state.EMBEDDING_FUNCTION(
                     query, prefix=prefix, user=user
                 ),
-                k=request.app.state.config.TOP_K,
+                k=effective_settings.get("top_k", request.app.state.config.TOP_K),
                 reranking_function=(
                     (lambda query, documents: request.app.state.RERANKING_FUNCTION(query, documents, user=user))
                     if request.app.state.RERANKING_FUNCTION
                     else None
                 ),
-                k_reranker=request.app.state.config.TOP_K_RERANKER,
-                r=request.app.state.config.RELEVANCE_THRESHOLD,
-                hybrid_bm25_weight=request.app.state.config.HYBRID_BM25_WEIGHT,
-                hybrid_search=request.app.state.config.ENABLE_RAG_HYBRID_SEARCH,
-                full_context=all_full_context or request.app.state.config.RAG_FULL_CONTEXT,
+                k_reranker=effective_settings.get(
+                    "top_k_reranker", request.app.state.config.TOP_K_RERANKER
+                ),
+                r=effective_settings.get(
+                    "relevance_threshold", request.app.state.config.RELEVANCE_THRESHOLD
+                ),
+                hybrid_bm25_weight=effective_settings.get(
+                    "hybrid_bm25_weight", request.app.state.config.HYBRID_BM25_WEIGHT
+                ),
+                hybrid_search=effective_settings.get(
+                    "enable_hybrid_search",
+                    request.app.state.config.ENABLE_RAG_HYBRID_SEARCH,
+                ),
+                full_context=all_full_context
+                or effective_settings.get(
+                    "full_context", request.app.state.config.RAG_FULL_CONTEXT
+                ),
                 user=user,
             )
         except Exception as e:

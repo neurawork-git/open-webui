@@ -384,8 +384,98 @@ class KnowledgeFilesResponse(KnowledgeResponse):
     write_access: Optional[bool] = False
 
 
-@router.get('/{id}', response_model=Optional[KnowledgeFilesResponse])
-async def get_knowledge_by_id(id: str, user=Depends(get_verified_user), db: Session = Depends(get_session)):
+def sync_knowledge_files_with_vector_db(knowledge_id: str) -> Optional[set]:
+    """
+    Sync knowledge.data.file_ids with actual file_ids in the vector database.
+
+    This repairs inconsistencies where files were embedded into the vector DB
+    but the knowledge.data.file_ids array was not updated (e.g., due to
+    interrupted uploads or failed DB updates).
+
+    Returns the set of file_ids found in vector DB, or None if collection doesn't exist.
+    Works with any vector DB backend (ChromaDB, Qdrant, Milvus, etc.) via the
+    standard GetResult interface.
+    """
+    try:
+        # Check if collection exists and get all documents
+        collection_exists = VECTOR_DB_CLIENT.has_collection(collection_name=knowledge_id)
+        if not collection_exists:
+            return None
+
+        # Get all file_ids from the vector DB collection
+        # GetResult is a Pydantic model with metadatas: Optional[List[List[Any]]]
+        results = VECTOR_DB_CLIENT.get(collection_name=knowledge_id)
+        if not results or not results.metadatas or not results.metadatas[0]:
+            return set()
+
+        # Extract unique file_ids from metadata
+        # metadatas is List[List[dict]] - we need the first (and only) inner list
+        vector_file_ids = set()
+        for metadata in results.metadatas[0]:
+            if metadata and "file_id" in metadata:
+                vector_file_ids.add(metadata["file_id"])
+
+        return vector_file_ids
+    except Exception as e:
+        log.warning(f"Failed to sync knowledge files with vector DB: {e}")
+        return None
+
+
+def repair_knowledge_file_ids(knowledge) -> bool:
+    """
+    Repair knowledge.data.file_ids if it's out of sync with the vector database.
+
+    This is database-agnostic - works with ChromaDB, Qdrant, Milvus, etc.
+    Returns True if repair was performed, False otherwise.
+    """
+    try:
+        vector_file_ids = sync_knowledge_files_with_vector_db(knowledge.id)
+        if vector_file_ids is None:
+            return False
+
+        # Get current file_ids from knowledge.data
+        current_file_ids = set(
+            knowledge.data.get("file_ids", []) if knowledge.data else []
+        )
+
+        # Check if there's a mismatch
+        if vector_file_ids != current_file_ids:
+            # Only add file_ids that actually exist in the Files table
+            valid_file_ids = []
+            for file_id in vector_file_ids:
+                if Files.get_file_by_id(file_id):
+                    valid_file_ids.append(file_id)
+                else:
+                    log.warning(
+                        f"Knowledge {knowledge.id}: file_id {file_id} found in vector DB "
+                        f"but not in Files table - skipping"
+                    )
+
+            # Update knowledge.data with repaired file_ids
+            data = knowledge.data or {}
+            data["file_ids"] = valid_file_ids
+
+            updated = Knowledges.update_knowledge_data_by_id(id=knowledge.id, data=data)
+            if updated:
+                log.info(
+                    f"Repaired knowledge {knowledge.id}: "
+                    f"synced {len(valid_file_ids)} file_ids from vector DB "
+                    f"(was {len(current_file_ids)})"
+                )
+                return True
+            else:
+                log.error(f"Failed to update knowledge {knowledge.id} data during repair")
+
+        return False
+    except Exception as e:
+        log.error(f"Error repairing knowledge file_ids: {e}")
+        return False
+
+
+@router.get("/{id}", response_model=Optional[KnowledgeFilesResponse])
+async def get_knowledge_by_id(
+    id: str, user=Depends(get_verified_user), db: Session = Depends(get_session)
+):
     knowledge = Knowledges.get_knowledge_by_id(id=id, db=db)
 
     if knowledge:
@@ -400,6 +490,11 @@ async def get_knowledge_by_id(id: str, user=Depends(get_verified_user), db: Sess
                 db=db,
             )
         ):
+            # Repair any inconsistencies between knowledge.data.file_ids and ChromaDB
+            if repair_knowledge_file_ids(knowledge):
+                # Reload knowledge after repair
+                knowledge = Knowledges.get_knowledge_by_id(id=id)
+
             return KnowledgeFilesResponse(
                 **knowledge.model_dump(),
                 write_access=(
