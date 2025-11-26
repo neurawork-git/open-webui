@@ -10,6 +10,7 @@
 
 	import AdvancedParams from './Advanced/AdvancedParams.svelte';
 	import Textarea from '$lib/components/common/Textarea.svelte';
+	import RagSettingsModal from '$lib/components/common/RagSettingsModal.svelte';
 	export let saveSettings: Function;
 	export let getModels: Function;
 
@@ -23,6 +24,17 @@
 	let system = '';
 
 	let showAdvanced = false;
+
+	// RAG Settings
+	let showRagSettingsModal = false;
+	let ragSettings: {
+		top_k?: number | null;
+		top_k_reranker?: number | null;
+		relevance_threshold?: number | null;
+		enable_hybrid_search?: boolean | null;
+		hybrid_bm25_weight?: number | null;
+		full_context?: boolean | null;
+	} = {};
 
 	const toggleNotification = async () => {
 		const permission = await Notification.requestPermission();
@@ -70,6 +82,7 @@
 	const saveHandler = async () => {
 		saveSettings({
 			system: system !== '' ? system : undefined,
+			rag_settings: Object.keys(ragSettings).length > 0 ? ragSettings : undefined,
 			params: {
 				stream_response: params.stream_response !== null ? params.stream_response : undefined,
 				stream_delta_chunk_size:
@@ -118,6 +131,7 @@
 
 		notificationEnabled = $settings.notificationEnabled ?? false;
 		system = $settings.system ?? '';
+		ragSettings = $settings.rag_settings ?? {};
 
 		params = { ...params, ...$settings.params };
 		params.stop = $settings?.params?.stop ? ($settings?.params?.stop ?? []).join(',') : null;
@@ -320,6 +334,33 @@
 				{/if}
 			</div>
 		{/if}
+
+		<hr class="border-gray-100/50 dark:border-gray-850 my-3" />
+
+		<div class="mt-2 space-y-3 pr-1.5">
+			<div class="flex justify-between items-center text-sm">
+				<div class="flex items-center gap-2">
+					<div class="font-medium">{$i18n.t('RAG Settings')}</div>
+					{#if Object.keys(ragSettings).length > 0}
+						<span class="text-xs text-green-500 dark:text-green-400">
+							({$i18n.t('Custom')})
+						</span>
+					{/if}
+				</div>
+				<button
+					class="text-xs font-medium {($settings?.highContrastMode ?? false)
+						? 'text-gray-800 dark:text-gray-100'
+						: 'text-gray-400 dark:text-gray-500'}"
+					type="button"
+					on:click={() => {
+						showRagSettingsModal = true;
+					}}>{$i18n.t('Configure')}</button
+				>
+			</div>
+			<div class="text-xs {($settings?.highContrastMode ?? false) ? 'text-gray-700 dark:text-gray-200' : 'text-gray-400 dark:text-gray-500'}">
+				{$i18n.t('Override global RAG settings for your account')}
+			</div>
+		</div>
 	</div>
 
 	<div class="flex justify-end pt-3 text-sm font-medium">
@@ -333,3 +374,11 @@
 		</button>
 	</div>
 </div>
+
+<RagSettingsModal
+	bind:show={showRagSettingsModal}
+	{ragSettings}
+	on:save={(e) => {
+		ragSettings = e.detail;
+	}}
+/>

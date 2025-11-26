@@ -117,9 +117,42 @@ class KnowledgeUserResponse(KnowledgeUserModel):
     pass
 
 
+####################
+# RAG Settings Models
+####################
+
+
+class RagSettings(BaseModel):
+    """Per-level RAG settings that can override global defaults."""
+
+    top_k: Optional[int] = None
+    top_k_reranker: Optional[int] = None
+    relevance_threshold: Optional[float] = None
+    enable_hybrid_search: Optional[bool] = None
+    hybrid_bm25_weight: Optional[float] = None
+    full_context: Optional[bool] = None
+
+    model_config = ConfigDict(extra="ignore")
+
+
+class KnowledgeMeta(BaseModel):
+    """Metadata for Knowledge including RAG settings overrides."""
+
+    rag_settings: Optional[RagSettings] = None
+
+    model_config = ConfigDict(extra="allow")
+
+
+####################
+# Forms
+####################
+
+
 class KnowledgeForm(BaseModel):
     name: str
     description: str
+    data: Optional[dict] = None
+    meta: Optional[dict] = None
     access_grants: Optional[list[dict]] = None
 
 
