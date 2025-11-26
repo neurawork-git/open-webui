@@ -613,8 +613,10 @@ class SPAStaticFiles(StaticFiles):
                 raise ex
 
 
-if LOG_FORMAT != 'json':
-    print(rf"""
+if LOG_FORMAT != "json":
+    try:
+        print(
+            rf"""
  ██████╗ ██████╗ ███████╗███╗   ██╗    ██╗    ██╗███████╗██████╗ ██╗   ██╗██╗
 ██╔═══██╗██╔══██╗██╔════╝████╗  ██║    ██║    ██║██╔════╝██╔══██╗██║   ██║██║
 ██║   ██║██████╔╝█████╗  ██╔██╗ ██║    ██║ █╗ ██║█████╗  ██████╔╝██║   ██║██║
@@ -626,7 +628,19 @@ if LOG_FORMAT != 'json':
 v{VERSION} - building the best AI user interface.
 {f'Commit: {WEBUI_BUILD_HASH}' if WEBUI_BUILD_HASH != 'dev-build' else ''}
 https://github.com/open-webui/open-webui
-""")
+"""
+        )
+    except UnicodeEncodeError:
+        # Fallback for Windows terminals that don't support Unicode box-drawing characters
+        print(
+            rf"""
+OPEN WEBUI
+
+v{VERSION} - building the best AI user interface.
+{f"Commit: {WEBUI_BUILD_HASH}" if WEBUI_BUILD_HASH != "dev-build" else ""}
+https://github.com/open-webui/open-webui
+"""
+        )
 
 
 @asynccontextmanager

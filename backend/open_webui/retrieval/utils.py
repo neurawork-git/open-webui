@@ -41,6 +41,45 @@ from open_webui.retrieval.web.utils import get_web_loader
 from open_webui.retrieval.loaders.youtube import YoutubeLoader
 
 
+####################
+# RAG Settings Merge
+####################
+
+
+def merge_rag_settings(*settings_dicts: Optional[dict]) -> dict:
+    """
+    Merge RAG settings from multiple sources with priority cascade.
+    Later arguments override earlier ones. None values are skipped.
+
+    Priority order (pass in this order): global, user, model, chat, knowledge
+    The last non-None value for each key wins.
+
+    Args:
+        *settings_dicts: Variable number of settings dictionaries
+
+    Returns:
+        Merged settings dict with all populated fields
+    """
+    merged = {}
+    rag_keys = [
+        "top_k",
+        "top_k_reranker",
+        "relevance_threshold",
+        "enable_hybrid_search",
+        "hybrid_bm25_weight",
+        "full_context",
+    ]
+
+    for settings in settings_dicts:
+        if settings is None:
+            continue
+        for key in rag_keys:
+            if key in settings and settings[key] is not None:
+                merged[key] = settings[key]
+
+    return merged
+
+
 from open_webui.env import (
     AIOHTTP_CLIENT_TIMEOUT,
     OFFLINE_MODE,
