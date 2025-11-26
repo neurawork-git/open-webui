@@ -167,6 +167,13 @@ class VectorSearchRetriever(BaseRetriever):
             limit=self.top_k,
         )
 
+        if result is None:
+            log.warning(
+                f"VectorSearchRetriever: search returned None for collection '{self.collection_name}'. "
+                "This may indicate the collection doesn't exist, is empty, or has a dimension mismatch."
+            )
+            return []
+
         ids = result.ids[0]
         metadatas = result.metadatas[0]
         documents = result.documents[0]
