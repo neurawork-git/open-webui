@@ -1923,25 +1923,24 @@ async def chat_completion_files_handler(
         if len(queries) == 0:
             queries = [get_last_user_message(body['messages'])]
 
-        # Collect RAG settings from knowledge bases (per-level override support)
-        knowledge_rag_settings = None
+        # Collect RAG settings from ALL knowledge bases (per-KB override support)
+        # Build a dict mapping knowledge_id -> rag_settings for per-collection filtering
+        per_knowledge_rag_settings = {}
         knowledge_ids = [
             item.get("id")
             for item in files
             if item.get("type") == "collection" and item.get("id")
         ]
         if knowledge_ids:
-            # Use the first knowledge base's settings that has them configured
             for kid in knowledge_ids:
                 kb = Knowledges.get_knowledge_by_id(kid)
                 if kb and kb.meta and isinstance(kb.meta, dict):
                     kb_rag = kb.meta.get("rag_settings")
                     if kb_rag:
-                        knowledge_rag_settings = kb_rag
+                        per_knowledge_rag_settings[kid] = kb_rag
                         log.debug(
-                            f"Using per-knowledge RAG settings from {kb.name}: {kb_rag}"
+                            f"Found per-knowledge RAG settings for {kb.name} ({kid}): {kb_rag}"
                         )
-                        break
 
         # Build global settings dict
         global_settings = {
@@ -1982,15 +1981,18 @@ async def chat_completion_files_handler(
                         f"Using per-model RAG settings from {model_id}: {model_rag_settings}"
                     )
 
-        # Merge with cascade priority: global < user < model < knowledge
-        # Later arguments override earlier ones
-        effective_settings = merge_rag_settings(
-            global_settings, user_rag_settings, model_rag_settings, knowledge_rag_settings
+        # Build base settings (global < user < model cascade, WITHOUT per-KB overrides)
+        # Per-KB settings are applied independently inside get_sources_from_items()
+        # This ensures each KB's settings ONLY affect that KB's queries
+        base_settings = merge_rag_settings(
+            global_settings, user_rag_settings, model_rag_settings
         )
-        log.debug(f"Effective RAG settings after merge: {effective_settings}")
+        log.debug(f"Base RAG settings (global < user < model): {base_settings}")
 
         try:
             # Directly await async get_sources_from_items (no thread needed - fully async now)
+            # Use base_settings (global < user < model) as defaults.
+            # Per-KB settings override base_settings independently inside get_sources_from_items()
             sources = await get_sources_from_items(
                 request=request,
                 items=files,
@@ -1998,30 +2000,33 @@ async def chat_completion_files_handler(
                 embedding_function=lambda query, prefix: request.app.state.EMBEDDING_FUNCTION(
                     query, prefix=prefix, user=user
                 ),
-                k=effective_settings.get("top_k", request.app.state.config.TOP_K),
+                k=base_settings.get("top_k", request.app.state.config.TOP_K),
                 reranking_function=(
                     (lambda query, documents: request.app.state.RERANKING_FUNCTION(query, documents, user=user))
                     if request.app.state.RERANKING_FUNCTION
                     else None
                 ),
-                k_reranker=effective_settings.get(
+                k_reranker=base_settings.get(
                     "top_k_reranker", request.app.state.config.TOP_K_RERANKER
                 ),
-                r=effective_settings.get(
+                r=base_settings.get(
                     "relevance_threshold", request.app.state.config.RELEVANCE_THRESHOLD
                 ),
-                hybrid_bm25_weight=effective_settings.get(
+                hybrid_bm25_weight=base_settings.get(
                     "hybrid_bm25_weight", request.app.state.config.HYBRID_BM25_WEIGHT
                 ),
-                hybrid_search=effective_settings.get(
+                hybrid_search=base_settings.get(
                     "enable_hybrid_search",
                     request.app.state.config.ENABLE_RAG_HYBRID_SEARCH,
                 ),
                 full_context=all_full_context
-                or effective_settings.get(
+                or base_settings.get(
                     "full_context", request.app.state.config.RAG_FULL_CONTEXT
                 ),
                 user=user,
+                # Pass per-KB settings for independent filtering per collection
+                per_knowledge_settings=per_knowledge_rag_settings,
+                base_settings=base_settings,
             )
         except Exception as e:
             log.exception(e)
