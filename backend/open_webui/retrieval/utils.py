@@ -79,6 +79,45 @@ def merge_rag_settings(*settings_dicts: Optional[dict]) -> dict:
     return merged
 
 
+####################
+# BM25 Tokenization
+####################
+
+
+def tokenize_for_bm25(text: str) -> list[str]:
+    """
+    Tokenize text for BM25 scoring with proper punctuation handling.
+
+    - Converts to lowercase
+    - Removes punctuation from word boundaries
+    - Preserves German umlauts and internal hyphens/periods
+    - Filters empty tokens
+
+    Args:
+        text: The text to tokenize
+
+    Returns:
+        List of cleaned lowercase tokens
+    """
+    # Lowercase
+    text = text.lower()
+
+    # Split on whitespace
+    tokens = text.split()
+
+    # Strip punctuation from token boundaries
+    # Keep internal characters (e.g., hyphenated words, decimal numbers)
+    cleaned = []
+    for token in tokens:
+        # Remove leading/trailing non-word chars but keep internal ones
+        # \w matches [a-zA-Z0-9_] plus Unicode letters (umlauts etc.)
+        cleaned_token = re.sub(r'^[^\w]+|[^\w]+$', '', token, flags=re.UNICODE)
+        if cleaned_token:
+            cleaned.append(cleaned_token)
+
+    return cleaned
+
+
 from open_webui.env import (
     AIOHTTP_CLIENT_TIMEOUT,
     OFFLINE_MODE,
@@ -159,6 +198,8 @@ class VectorSearchRetriever(BaseRetriever):
         *,
         run_manager: CallbackManagerForRetrieverRun,
     ) -> list[Document]:
+        log.debug(f"[HYBRID_DEBUG] VectorSearchRetriever: query='{query[:100]}...' collection={self.collection_name}")
+
         embedding = await self.embedding_function(query, RAG_EMBEDDING_QUERY_PREFIX)
         result = VECTOR_DB_CLIENT.search(
             collection_name=self.collection_name,
@@ -176,6 +217,14 @@ class VectorSearchRetriever(BaseRetriever):
         ids = result.ids[0]
         metadatas = result.metadatas[0]
         documents = result.documents[0]
+
+        # Log vector search results with distances
+        log.debug(f"[HYBRID_DEBUG] VectorSearch returned {len(ids)} results:")
+        for idx in range(min(len(ids), 10)):  # Log top 10
+            doc_preview = documents[idx][:80].replace('\n', ' ') if documents[idx] else 'N/A'
+            distance = result.distances[0][idx] if hasattr(result, 'distances') and result.distances else 'N/A'
+            source = metadatas[idx].get('source', metadatas[idx].get('name', 'unknown'))
+            log.debug(f"[HYBRID_DEBUG]   Vector #{idx+1}: distance={distance}, source={source}, preview='{doc_preview}...'")
 
         results = []
         for idx in range(len(ids)):
@@ -295,11 +344,43 @@ async def query_doc_with_hybrid_search(
             for idx, meta in enumerate(collection_result.metadatas[0])
         ]
 
-        bm25_texts = get_enriched_texts(collection_result) if enable_enriched_texts else original_texts
+        log.debug(f"[HYBRID_DEBUG] === HYBRID SEARCH START ===")
+        log.debug(f"[HYBRID_DEBUG] Query: '{query}'")
+        log.debug(f"[HYBRID_DEBUG] Collection: {collection_name}")
+        log.debug(f"[HYBRID_DEBUG] Parameters: k={k}, k_reranker={k_reranker}, r={r}, bm25_weight={hybrid_bm25_weight}")
+        log.debug(f"[HYBRID_DEBUG] Enriched texts: {enable_enriched_texts}")
+        log.debug(f"[HYBRID_DEBUG] Total docs in collection: {len(collection_result.documents[0])}")
+
+        bm25_texts = (
+            get_enriched_texts(collection_result)
+            if enable_enriched_texts
+            else original_texts
+        )
+
+        # Create a custom BM25Retriever that logs results
+        from rank_bm25 import BM25Okapi
+
+        # Manually compute BM25 scores for logging
+        # Use smart tokenization that strips punctuation from word boundaries
+        tokenized_docs = [tokenize_for_bm25(doc) for doc in bm25_texts]
+        bm25_index = BM25Okapi(tokenized_docs)
+        query_tokens = tokenize_for_bm25(query)
+        bm25_scores = bm25_index.get_scores(query_tokens)
+
+        # Log BM25 scores for all docs
+        log.debug(f"[HYBRID_DEBUG] BM25 Scoring (query tokens: {query_tokens}):")
+        scored_docs = list(zip(bm25_scores, bm25_texts, collection_result.metadatas[0]))
+        scored_docs_sorted = sorted(scored_docs, key=lambda x: x[0], reverse=True)
+
+        for idx, (score, text, meta) in enumerate(scored_docs_sorted[:10]):  # Top 10
+            doc_preview = text[:80].replace('\n', ' ') if text else 'N/A'
+            source = meta.get('source', meta.get('name', 'unknown'))
+            log.debug(f"[HYBRID_DEBUG]   BM25 #{idx+1}: score={score:.4f}, source={source}, preview='{doc_preview}...'")
 
         bm25_retriever = BM25Retriever.from_texts(
             texts=bm25_texts,
             metadatas=bm25_metadatas,
+            preprocess_func=tokenize_for_bm25,
         )
         bm25_retriever.k = k
 
@@ -311,18 +392,21 @@ async def query_doc_with_hybrid_search(
 
         # Use CHUNK_HASH_KEY for dedup so enriched BM25 texts don't defeat RRF
         if hybrid_bm25_weight <= 0:
+            log.debug(f"[HYBRID_DEBUG] Mode: VECTOR ONLY (bm25_weight={hybrid_bm25_weight})")
             ensemble_retriever = EnsembleRetriever(
                 retrievers=[vector_search_retriever],
                 weights=[1.0],
                 id_key=CHUNK_HASH_KEY,
             )
         elif hybrid_bm25_weight >= 1:
+            log.debug(f"[HYBRID_DEBUG] Mode: BM25 ONLY (bm25_weight={hybrid_bm25_weight})")
             ensemble_retriever = EnsembleRetriever(
                 retrievers=[bm25_retriever],
                 weights=[1.0],
                 id_key=CHUNK_HASH_KEY,
             )
         else:
+            log.debug(f"[HYBRID_DEBUG] Mode: HYBRID (BM25={hybrid_bm25_weight:.2f}, Vector={1.0-hybrid_bm25_weight:.2f})")
             ensemble_retriever = EnsembleRetriever(
                 retrievers=[bm25_retriever, vector_search_retriever],
                 weights=[hybrid_bm25_weight, 1.0 - hybrid_bm25_weight],
@@ -391,20 +475,24 @@ def merge_get_results(get_results: list[dict]) -> dict:
 
 
 def merge_and_sort_query_results(query_results: list[dict], k: int) -> dict:
+    log.info(f"[HYBRID_DEBUG] === MERGE START: {len(query_results)} query results, k={k} ===")
+
     # Initialize lists to store combined data
     combined = dict()  # To store documents with unique document hashes
 
-    for data in query_results:
+    for idx, data in enumerate(query_results):
         if (
             len(data.get('distances', [])) == 0
             or len(data.get('documents', [])) == 0
             or len(data.get('metadatas', [])) == 0
         ):
+            log.info(f"[HYBRID_DEBUG]   Query {idx+1}: EMPTY result, skipping")
             continue
 
-        distances = data['distances'][0]
-        documents = data['documents'][0]
-        metadatas = data['metadatas'][0]
+        distances = data["distances"][0]
+        documents = data["documents"][0]
+        metadatas = data["metadatas"][0]
+        log.info(f"[HYBRID_DEBUG]   Query {idx+1}: {len(distances)} docs to merge")
 
         for distance, document, metadata in zip(distances, documents, metadatas):
             if isinstance(document, str):
@@ -422,8 +510,18 @@ def merge_and_sort_query_results(query_results: list[dict], k: int) -> dict:
     # Sort the list based on distances
     combined.sort(key=lambda x: x[0], reverse=True)
 
+    log.info(f"[HYBRID_DEBUG]   After dedup: {len(combined)} unique docs")
+
     # Slice to keep only the top k elements
     sorted_distances, sorted_documents, sorted_metadatas = zip(*combined[:k]) if combined else ([], [], [])
+
+    # Log final merged results
+    log.info(f"[HYBRID_DEBUG] === MERGE FINAL RESULTS (top {k}) ===")
+    for i, (dist, doc, meta) in enumerate(zip(sorted_distances, sorted_documents, sorted_metadatas)):
+        doc_preview = doc[:80].replace('\n', ' ') if doc else 'N/A'
+        source = meta.get('source', meta.get('name', 'unknown')) if meta else 'unknown'
+        score_str = f"{dist:.4f}" if isinstance(dist, (int, float)) else str(dist)
+        log.info(f"[HYBRID_DEBUG]   Final #{i+1}: score={score_str} ({float(dist)*100:.2f}%), source={source}, preview='{doc_preview}...'")
 
     # Create and return the output dictionary
     return {
@@ -1440,6 +1538,19 @@ class RerankCompressor(BaseDocumentCompressor):
     ) -> Sequence[Document]:
         reranking = self.reranking_function is not None
 
+        log.debug(f"[HYBRID_DEBUG] === RERANKING/SCORING START ===")
+        log.debug(f"[HYBRID_DEBUG] Reranking function: {'YES' if reranking else 'NO (using cosine similarity)'}")
+        log.debug(f"[HYBRID_DEBUG] Documents to score: {len(documents)}")
+        log.debug(f"[HYBRID_DEBUG] Top N to return: {self.top_n}")
+        log.debug(f"[HYBRID_DEBUG] Relevance threshold (r_score): {self.r_score}")
+
+        # Log incoming documents from ensemble (before reranking)
+        log.debug(f"[HYBRID_DEBUG] Documents from Ensemble (before reranking):")
+        for idx, doc in enumerate(documents[:10]):
+            doc_preview = doc.page_content[:80].replace('\n', ' ') if doc.page_content else 'N/A'
+            source = doc.metadata.get('source', doc.metadata.get('name', 'unknown'))
+            log.debug(f"[HYBRID_DEBUG]   Ensemble #{idx+1}: source={source}, preview='{doc_preview}...'")
+
         scores = None
         if reranking:
             scores = await asyncio.to_thread(self.reranking_function, query, documents)
@@ -1459,8 +1570,22 @@ class RerankCompressor(BaseDocumentCompressor):
                     scores.tolist() if not isinstance(scores, list) else scores,
                 )
             )
+
+            # Log all scores before filtering
+            log.debug(f"[HYBRID_DEBUG] Reranking/Similarity Scores (before r_score filter):")
+            sorted_for_log = sorted(docs_with_scores, key=lambda x: x[1], reverse=True)
+            for idx, (doc, score) in enumerate(sorted_for_log[:10]):
+                doc_preview = doc.page_content[:80].replace('\n', ' ') if doc.page_content else 'N/A'
+                source = doc.metadata.get('source', doc.metadata.get('name', 'unknown'))
+                log.debug(f"[HYBRID_DEBUG]   Rerank #{idx+1}: score={score:.4f}, source={source}, preview='{doc_preview}...'")
+
             if self.r_score:
-                docs_with_scores = [(d, s) for d, s in docs_with_scores if s >= self.r_score]
+                before_count = len(docs_with_scores)
+                docs_with_scores = [
+                    (d, s) for d, s in docs_with_scores if s >= self.r_score
+                ]
+                after_count = len(docs_with_scores)
+                log.debug(f"[HYBRID_DEBUG] Relevance filter: {before_count} -> {after_count} docs (threshold={self.r_score})")
 
             result = sorted(docs_with_scores, key=operator.itemgetter(1), reverse=True)
             final_results = []
@@ -1472,6 +1597,16 @@ class RerankCompressor(BaseDocumentCompressor):
                     metadata=metadata,
                 )
                 final_results.append(doc)
+
+            # Log final results
+            log.debug(f"[HYBRID_DEBUG] === FINAL RESULTS ({len(final_results)} docs) ===")
+            for idx, doc in enumerate(final_results):
+                doc_preview = doc.page_content[:80].replace('\n', ' ') if doc.page_content else 'N/A'
+                source = doc.metadata.get('source', doc.metadata.get('name', 'unknown'))
+                score = doc.metadata.get('score', 'N/A')
+                score_str = f"{score:.4f}" if isinstance(score, (int, float)) else str(score)
+                log.debug(f"[HYBRID_DEBUG]   Final #{idx+1}: score={score_str}, source={source}, preview='{doc_preview}...'")
+
             return final_results
         else:
             log.warning('No valid scores found, check your reranking function. Returning original documents.')
