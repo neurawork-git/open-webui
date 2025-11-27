@@ -692,6 +692,51 @@ def merge_and_sort_query_results(query_results: list[dict], k: int) -> dict:
     }
 
 
+def filter_results_by_relevance(query_result: dict, relevance_threshold: float) -> dict:
+    """
+    Filter query results by relevance threshold.
+    Only keeps documents with distance/score >= relevance_threshold.
+
+    Args:
+        query_result: Dict with 'distances', 'documents', 'metadatas' keys
+        relevance_threshold: Minimum score to keep (0.0-1.0)
+
+    Returns:
+        Filtered query result dict
+    """
+    if not query_result or not relevance_threshold or relevance_threshold <= 0:
+        return query_result
+
+    distances = query_result.get("distances", [[]])[0]
+    documents = query_result.get("documents", [[]])[0]
+    metadatas = query_result.get("metadatas", [[]])[0]
+
+    if not distances:
+        return query_result
+
+    # Filter by threshold
+    filtered = [
+        (d, doc, meta)
+        for d, doc, meta in zip(distances, documents, metadatas)
+        if d >= relevance_threshold
+    ]
+
+    if not filtered:
+        return {
+            "distances": [[]],
+            "documents": [[]],
+            "metadatas": [[]],
+        }
+
+    filtered_distances, filtered_documents, filtered_metadatas = zip(*filtered)
+
+    return {
+        "distances": [list(filtered_distances)],
+        "documents": [list(filtered_documents)],
+        "metadatas": [list(filtered_metadatas)],
+    }
+
+
 def get_all_items_from_collections(collection_names: list[str]) -> dict:
     results = []
 
@@ -1482,6 +1527,8 @@ async def get_sources_from_items(
     hybrid_search,
     full_context=False,
     user: Optional[UserModel] = None,
+    per_knowledge_settings: Optional[dict] = None,
+    base_settings: Optional[dict] = None,
 ):
     log.debug(
         f"items: {items} {queries} {embedding_function} {reranking_function} {full_context}"
@@ -1632,8 +1679,9 @@ async def get_sources_from_items(
                     collection_names.append(f"file-{item['id']}")
 
         elif item.get('type') == 'collection':
-            # Manual Full Mode Toggle for Collection
-            knowledge_base = await Knowledges.get_knowledge_by_id(item.get('id'))
+            # Knowledge Base Collection
+            knowledge_id = item.get('id')
+            knowledge_base = await Knowledges.get_knowledge_by_id(knowledge_id)
 
             if knowledge_base and (
                 user.role == "admin"
@@ -1645,7 +1693,47 @@ async def get_sources_from_items(
                     permission="read",
                 )
             ):
-                if item.get('context') == 'full' or request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL:
+                # Get per-KB settings FIRST - BEFORE deciding which branch to take
+                # This ensures each KB's full_context setting is respected independently
+                kb_settings = {}
+                if per_knowledge_settings and knowledge_id in per_knowledge_settings:
+                    kb_settings = per_knowledge_settings[knowledge_id]
+                    log.debug(f"Using per-KB settings for {knowledge_id}: {kb_settings}")
+
+                # Determine effective full_context for THIS KB specifically:
+                # Priority: UI toggle > per-KB setting > function parameter default
+                ui_full_context = item.get("context") == "full"
+                kb_full_context = kb_settings.get("full_context")  # None if not set
+
+                # UI toggle overrides everything; otherwise use KB setting; otherwise use default
+                if ui_full_context:
+                    effective_full_context = True
+                elif kb_full_context is not None:
+                    effective_full_context = kb_full_context
+                else:
+                    effective_full_context = full_context
+
+                # Compute ALL effective parameters for this KB
+                effective_r = kb_settings.get("relevance_threshold", r)
+                effective_k = kb_settings.get("top_k", k)
+                effective_k_reranker = kb_settings.get("top_k_reranker", k_reranker)
+                effective_hybrid_search = kb_settings.get("enable_hybrid_search", hybrid_search)
+                effective_hybrid_bm25_weight = kb_settings.get("hybrid_bm25_weight", hybrid_bm25_weight)
+
+                # Log ALL retrieval parameters for this KB
+                log.info(
+                    f"=== KB RETRIEVAL START: {knowledge_base.name} ({knowledge_id}) ===\n"
+                    f"  FULL_CONTEXT: ui_toggle={ui_full_context}, kb_setting={kb_full_context}, "
+                    f"global_param={full_context}, EFFECTIVE={effective_full_context}\n"
+                    f"  OTHER PARAMS: k={effective_k}, k_reranker={effective_k_reranker}, "
+                    f"r={effective_r}, hybrid={effective_hybrid_search}, bm25_weight={effective_hybrid_bm25_weight}\n"
+                    f"  RAW kb_settings={kb_settings}"
+                )
+
+                if (
+                    effective_full_context
+                    or request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL
+                ):
                     if knowledge_base and (
                         user.role == "admin"
                         or knowledge_base.user_id == user.id
@@ -1675,11 +1763,56 @@ async def get_sources_from_items(
                             "metadatas": [metadatas],
                         }
                 else:
-                    # Fallback to collection names
-                    if item.get('legacy'):
-                        collection_names = item.get('collection_names', [])
+                    # Vector search mode - query this KB independently with its own settings
+                    if item.get("legacy"):
+                        kb_collection_names = item.get("collection_names", [])
                     else:
-                        collection_names.append(item['id'])
+                        kb_collection_names = [knowledge_id]
+
+                    # Query this KB's collections with its own settings
+                    kb_collection_names_set = set(kb_collection_names).difference(extracted_collections)
+                    if kb_collection_names_set:
+                        try:
+                            if effective_hybrid_search:
+                                try:
+                                    query_result = await query_collection_with_hybrid_search(
+                                        collection_names=list(kb_collection_names_set),
+                                        queries=queries,
+                                        embedding_function=embedding_function,
+                                        k=effective_k,
+                                        reranking_function=reranking_function,
+                                        k_reranker=effective_k_reranker,
+                                        r=effective_r,
+                                        hybrid_bm25_weight=effective_hybrid_bm25_weight,
+                                        enable_enriched_texts=request.app.state.config.ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS,
+                                    )
+                                except Exception as e:
+                                    log.debug(
+                                        f"Error in hybrid search for KB {knowledge_id}, using non-hybrid fallback: {e}"
+                                    )
+                                    query_result = None
+
+                            if not effective_hybrid_search or query_result is None:
+                                query_result = await query_collection(
+                                    collection_names=list(kb_collection_names_set),
+                                    queries=queries,
+                                    embedding_function=embedding_function,
+                                    k=effective_k,
+                                )
+                                # Apply relevance filtering for non-hybrid search
+                                if query_result and effective_r and effective_r > 0:
+                                    query_result = filter_results_by_relevance(query_result, effective_r)
+
+                            extracted_collections.extend(kb_collection_names_set)
+                        except Exception as e:
+                            log.exception(f"Error querying KB {knowledge_id}: {e}")
+
+                    # Skip the generic collection processing below since we handled it here
+                    if query_result:
+                        if "data" in item:
+                            del item["data"]
+                        query_results.append({**query_result, "file": item})
+                    continue
 
         elif item.get("docs"):
             # BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL
