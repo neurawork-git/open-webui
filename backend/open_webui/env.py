@@ -151,6 +151,11 @@ else:
 
 VERSION = PACKAGE_DATA['version']
 
+# Fork version suffix - allows forks to append a custom suffix without modifying package.json
+# Example: FORK_VERSION_SUFFIX="neurawork.1" results in version "0.6.40-neurawork.1"
+FORK_VERSION_SUFFIX = os.environ.get("FORK_VERSION_SUFFIX", "")
+if FORK_VERSION_SUFFIX:
+    VERSION = f"{VERSION}-{FORK_VERSION_SUFFIX}"
 
 DEPLOYMENT_ID = os.environ.get('DEPLOYMENT_ID', '')
 INSTANCE_ID = os.environ.get('INSTANCE_ID', str(uuid4()))
