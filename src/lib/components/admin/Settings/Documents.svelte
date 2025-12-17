@@ -1232,6 +1232,24 @@
 								</div>
 							{/if}
 
+							{#if RAGConfig.ENABLE_RAG_HYBRID_SEARCH === true}
+								<div class="mb-2.5 flex w-full justify-between">
+									<div class="self-center text-xs font-medium">
+										<Tooltip
+											content={$i18n.t(
+												'When disabled, shows raw hybrid (BM25 + vector) ensemble scores without reranking. Useful for debugging search quality.'
+											)}
+											placement="top-start"
+										>
+											{$i18n.t('Enable Reranking')}
+										</Tooltip>
+									</div>
+									<div class="flex items-center relative">
+										<Switch bind:state={RAGConfig.ENABLE_RAG_RERANKING} />
+									</div>
+								</div>
+							{/if}
+
 							<div class="  mb-2.5 flex flex-col w-full justify-between">
 								<div class=" flex w-full justify-between">
 									<div class=" self-center text-xs font-medium">

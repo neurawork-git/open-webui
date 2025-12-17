@@ -114,6 +114,7 @@
 		top_k_reranker?: number | null;
 		relevance_threshold?: number | null;
 		enable_hybrid_search?: boolean | null;
+		enable_reranking?: boolean | null;
 		hybrid_bm25_weight?: number | null;
 		full_context?: boolean | null;
 	} = {};

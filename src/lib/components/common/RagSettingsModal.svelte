@@ -12,6 +12,7 @@
 		top_k_reranker?: number | null;
 		relevance_threshold?: number | null;
 		enable_hybrid_search?: boolean | null;
+		enable_reranking?: boolean | null;
 		hybrid_bm25_weight?: number | null;
 		full_context?: boolean | null;
 	} = {};
@@ -26,6 +27,7 @@
 			top_k_reranker: ragSettings?.top_k_reranker ?? null,
 			relevance_threshold: ragSettings?.relevance_threshold ?? null,
 			enable_hybrid_search: ragSettings?.enable_hybrid_search ?? null,
+			enable_reranking: ragSettings?.enable_reranking ?? null,
 			hybrid_bm25_weight: ragSettings?.hybrid_bm25_weight ?? null,
 			full_context: ragSettings?.full_context ?? null
 		};
@@ -47,6 +49,9 @@
 		if (localSettings.enable_hybrid_search !== null && localSettings.enable_hybrid_search !== undefined) {
 			cleanedSettings.enable_hybrid_search = localSettings.enable_hybrid_search;
 		}
+		if (localSettings.enable_reranking !== null && localSettings.enable_reranking !== undefined) {
+			cleanedSettings.enable_reranking = localSettings.enable_reranking;
+		}
 		if (localSettings.hybrid_bm25_weight !== null && localSettings.hybrid_bm25_weight !== undefined) {
 			cleanedSettings.hybrid_bm25_weight = localSettings.hybrid_bm25_weight;
 		}
@@ -64,6 +69,7 @@
 			top_k_reranker: null,
 			relevance_threshold: null,
 			enable_hybrid_search: null,
+			enable_reranking: null,
 			hybrid_bm25_weight: null,
 			full_context: null
 		};
@@ -175,6 +181,24 @@
 						<select
 							class="px-2 py-1 text-sm border rounded dark:bg-gray-800 dark:border-gray-700"
 							bind:value={localSettings.enable_hybrid_search}
+						>
+							<option value={null}>{$i18n.t('Global')}</option>
+							<option value={true}>{$i18n.t('Enabled')}</option>
+							<option value={false}>{$i18n.t('Disabled')}</option>
+						</select>
+					</div>
+				</div>
+
+				<!-- Enable Reranking -->
+				<div class="flex justify-between items-center">
+					<div class="flex flex-col">
+						<div class="text-sm font-medium">{$i18n.t('Reranking')}</div>
+						<div class="text-xs text-gray-500">{$i18n.t('Apply reranking model to results')}</div>
+					</div>
+					<div class="flex items-center gap-2">
+						<select
+							class="px-2 py-1 text-sm border rounded dark:bg-gray-800 dark:border-gray-700"
+							bind:value={localSettings.enable_reranking}
 						>
 							<option value={null}>{$i18n.t('Global')}</option>
 							<option value={true}>{$i18n.t('Enabled')}</option>

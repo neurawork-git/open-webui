@@ -17,13 +17,16 @@ from langchain_classic.retrievers import (
     ContextualCompressionRetriever,
     EnsembleRetriever,
 )
-from langchain_community.retrievers import BM25Retriever
+# Note: We use custom ScoringBM25Retriever instead of langchain's BM25Retriever
+# to expose normalized BM25 scores in document metadata for thresholds and display
 from langchain_core.documents import Document
 
 from open_webui.config import VECTOR_DB
 from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
 from open_webui.retrieval.vector.factory import VECTOR_DB_CLIENT
 
+# Import the unified RAG settings model
+from open_webui.retrieval.models import RAGQuerySettings
 
 from open_webui.models.users import UserModel
 from open_webui.models.files import Files
@@ -117,6 +120,34 @@ def tokenize_for_bm25(text: str) -> list[str]:
             cleaned.append(cleaned_token)
 
     return cleaned
+
+
+def extract_matched_keywords(query: str, document_text: str) -> list[str]:
+    """
+    Extract which BM25 query tokens matched in the document.
+
+    This is used for keyword highlighting in the citation UI.
+
+    Args:
+        query: User query string
+        document_text: Document content to check against
+
+    Returns:
+        List of matched keyword tokens (lowercased), in original query order
+    """
+    query_tokens = tokenize_for_bm25(query)
+    document_tokens = set(tokenize_for_bm25(document_text))
+
+    # Find query tokens that appear in document
+    # Return in original query order for consistent coloring
+    matched = []
+    seen = set()
+    for token in query_tokens:
+        if token in document_tokens and token not in seen:
+            matched.append(token)
+            seen.add(token)
+
+    return matched
 
 
 from open_webui.env import (
@@ -474,8 +505,11 @@ class VectorSearchRetriever(BaseRetriever):
 
         results = []
         for idx in range(len(ids)):
-            metadata = metadatas[idx]
+            metadata = metadatas[idx].copy()
             metadata[CHUNK_HASH_KEY] = _content_hash(documents[idx])
+            # Include vector distance as score in metadata for downstream use
+            if hasattr(result, 'distances') and result.distances and len(result.distances[0]) > idx:
+                metadata["score"] = result.distances[0][idx]
             results.append(
                 Document(
                     metadata=metadata,
@@ -485,7 +519,113 @@ class VectorSearchRetriever(BaseRetriever):
         return results
 
 
-def query_doc(collection_name: str, query_embedding: list[float], k: int, user: UserModel = None):
+class ScoringBM25Retriever(BaseRetriever):
+    """
+    A BM25 retriever that stores normalized BM25 scores in document metadata.
+
+    Unlike langchain's BM25Retriever which doesn't expose scores, this retriever
+    normalizes BM25 scores to 0-1 range and stores them in metadata["score"]
+    for compatibility with relevance thresholds and display.
+    """
+    texts: list[str]
+    metadatas: list[dict]
+    bm25_scores: list[float]  # Pre-computed BM25 scores for all documents
+    k: int = 4
+
+    class Config:
+        arbitrary_types_allowed = True
+
+    def _get_relevant_documents(
+        self, query: str, *, run_manager: CallbackManagerForRetrieverRun
+    ) -> list[Document]:
+        """Sync version - returns empty as we use async."""
+        return []
+
+    async def _aget_relevant_documents(
+        self,
+        query: str,
+        *,
+        run_manager: CallbackManagerForRetrieverRun,
+    ) -> list[Document]:
+        """
+        Return top-k documents with normalized BM25 scores in metadata.
+
+        BM25 scores are normalized to 0-1 range using min-max normalization
+        to be comparable with vector similarity scores for threshold filtering.
+        """
+        # Pair documents with their BM25 scores
+        scored_docs = list(zip(self.bm25_scores, self.texts, self.metadatas))
+
+        # Sort by BM25 score descending and take top k
+        scored_docs_sorted = sorted(scored_docs, key=lambda x: x[0], reverse=True)
+        top_k_docs = scored_docs_sorted[:self.k]
+
+        if not top_k_docs:
+            return []
+
+        # Normalize scores to 0-1 range
+        # Use min-max normalization based on the top-k results
+        scores_in_topk = [doc[0] for doc in top_k_docs]
+        max_score = max(scores_in_topk) if scores_in_topk else 1.0
+        min_score = min(scores_in_topk) if scores_in_topk else 0.0
+        score_range = max_score - min_score if max_score > min_score else 1.0
+
+        results = []
+        for bm25_score, text, metadata in top_k_docs:
+            meta_copy = metadata.copy() if metadata else {}
+
+            # Normalize BM25 score to 0-1 range (0% to 100%)
+            # No match = 0%, best match = 100%
+            if bm25_score <= 0:
+                normalized_score = 0.0
+            elif max_score > 0:
+                normalized_score = bm25_score / max_score
+            else:
+                normalized_score = 0.0
+
+            meta_copy["score"] = normalized_score
+            meta_copy["bm25_raw_score"] = bm25_score  # Keep raw score for debugging
+
+            log.debug(
+                f"[HYBRID_DEBUG] ScoringBM25: raw={bm25_score:.4f}, "
+                f"normalized={normalized_score:.4f}, text='{text[:50]}...'"
+            )
+
+            results.append(Document(
+                page_content=text,
+                metadata=meta_copy,
+            ))
+
+        return results
+
+    @classmethod
+    def from_texts_and_scores(
+        cls,
+        texts: list[str],
+        metadatas: list[dict],
+        bm25_scores: list[float],
+        k: int = 4,
+    ) -> "ScoringBM25Retriever":
+        """
+        Create a ScoringBM25Retriever from texts, metadata, and pre-computed BM25 scores.
+
+        Args:
+            texts: Document texts
+            metadatas: Document metadata dicts
+            bm25_scores: Pre-computed BM25 scores (from BM25Okapi.get_scores())
+            k: Number of documents to retrieve
+        """
+        return cls(
+            texts=texts,
+            metadatas=metadatas,
+            bm25_scores=bm25_scores,
+            k=k,
+        )
+
+
+def query_doc(
+    collection_name: str, query_embedding: list[float], k: int, user: UserModel = None
+):
     try:
         log.debug(f"query_doc:doc {collection_name}")
         result = VECTOR_DB_CLIENT.search(
@@ -566,6 +706,7 @@ async def query_doc_with_hybrid_search(
     r: float,
     hybrid_bm25_weight: float,
     enable_enriched_texts: bool = False,
+    enable_reranking: bool = True,
 ) -> dict:
     try:
         # First check if collection_result has the required attributes
@@ -607,7 +748,7 @@ async def query_doc_with_hybrid_search(
             else original_texts
         )
 
-        # Create a custom BM25Retriever that logs results
+        # Compute BM25 scores using rank_bm25
         from rank_bm25 import BM25Okapi
 
         # Manually compute BM25 scores for logging
@@ -627,12 +768,14 @@ async def query_doc_with_hybrid_search(
             source = meta.get('source', meta.get('name', 'unknown'))
             log.debug(f"[HYBRID_DEBUG]   BM25 #{idx+1}: score={score:.4f}, source={source}, preview='{doc_preview}...'")
 
-        bm25_retriever = BM25Retriever.from_texts(
+        # Use ScoringBM25Retriever which stores normalized BM25 scores in metadata
+        # This ensures BM25-matched documents have proper scores for thresholds and display
+        bm25_retriever = ScoringBM25Retriever.from_texts_and_scores(
             texts=bm25_texts,
             metadatas=bm25_metadatas,
-            preprocess_func=tokenize_for_bm25,
+            bm25_scores=list(bm25_scores),
+            k=k,
         )
-        bm25_retriever.k = k
 
         vector_search_retriever = VectorSearchRetriever(
             collection_name=collection_name,
@@ -668,6 +811,7 @@ async def query_doc_with_hybrid_search(
             top_n=k_reranker,
             reranking_function=reranking_function,
             r_score=r,
+            enable_reranking=enable_reranking,
         )
 
         compression_retriever = ContextualCompressionRetriever(
@@ -676,7 +820,18 @@ async def query_doc_with_hybrid_search(
 
         result = await compression_retriever.ainvoke(query)
 
-        distances = [d.metadata.get('score') for d in result]
+        # Add BM25 matched keywords to each document's metadata for highlighting
+        keywords_added_count = 0
+        for doc in result:
+            matched_keywords = extract_matched_keywords(query, doc.page_content)
+            if matched_keywords:
+                doc.metadata["bm25_matched_keywords"] = matched_keywords
+                keywords_added_count += 1
+
+        if keywords_added_count > 0:
+            log.info(f"[BM25_KEYWORDS] Added matched keywords to {keywords_added_count}/{len(result)} docs for query: '{query}'")
+
+        distances = [d.metadata.get("score") for d in result]
         documents = [d.page_content for d in result]
         metadatas = [d.metadata for d in result]
 
@@ -688,7 +843,7 @@ async def query_doc_with_hybrid_search(
             sorted_items = sorted_items[:k]
 
             if sorted_items:
-                distances, documents, metadatas = map(list, zip(*sorted_items))
+                distances, metadatas, documents = map(list, zip(*sorted_items))
             else:
                 distances, documents, metadatas = [], [], []
 
@@ -706,6 +861,46 @@ async def query_doc_with_hybrid_search(
     except Exception as e:
         log.exception(f"Error querying doc {collection_name} with hybrid search: {e}")
         raise e
+
+
+async def query_doc_with_hybrid_search_settings(
+    collection_name: str,
+    collection_result: GetResult,
+    query: str,
+    embedding_function,
+    reranking_function,
+    settings: RAGQuerySettings,
+) -> dict:
+    """
+    Query a document collection using hybrid search with unified RAGQuerySettings.
+
+    This is the new interface that accepts a RAGQuerySettings object instead of
+    individual parameters. It delegates to the existing implementation.
+
+    Args:
+        collection_name: Name of the vector collection
+        collection_result: Pre-fetched collection data
+        query: Search query string
+        embedding_function: Function to generate embeddings
+        reranking_function: Function to rerank results (can be None)
+        settings: Unified RAG query settings
+
+    Returns:
+        Dict with 'documents', 'metadatas', 'distances' keys
+    """
+    return await query_doc_with_hybrid_search(
+        collection_name=collection_name,
+        collection_result=collection_result,
+        query=query,
+        embedding_function=embedding_function,
+        k=settings.top_k,
+        reranking_function=reranking_function,
+        k_reranker=settings.top_k_reranker,
+        r=settings.relevance_threshold,
+        hybrid_bm25_weight=settings.hybrid_bm25_weight,
+        enable_enriched_texts=settings.enable_enriched_texts,
+        enable_reranking=settings.enable_reranking,
+    )
 
 
 def merge_get_results(get_results: list[dict]) -> dict:
@@ -756,16 +951,38 @@ def merge_and_sort_query_results(query_results: list[dict], k: int) -> dict:
                 ).hexdigest()  # Compute a hash for uniqueness
 
                 if doc_hash not in combined.keys():
-                    combined[doc_hash] = (distance, document, metadata)
+                    # Make a copy of metadata to avoid mutating the original
+                    combined[doc_hash] = (distance, document, dict(metadata) if metadata else {})
                     continue  # if doc is new, no further comparison is needed
 
-                # if doc is alredy in, but new distance is better, update
-                if distance > combined[doc_hash][0]:
-                    combined[doc_hash] = (distance, document, metadata)
+                existing_distance, existing_doc, existing_metadata = combined[doc_hash]
+
+                # Merge bm25_matched_keywords regardless of which has higher score
+                # Keywords come from hybrid search; we want to preserve them even if
+                # vector search has a higher score for the same document
+                keywords_to_preserve = None
+                if metadata and metadata.get("bm25_matched_keywords"):
+                    keywords_to_preserve = metadata["bm25_matched_keywords"]
+                elif existing_metadata and existing_metadata.get("bm25_matched_keywords"):
+                    keywords_to_preserve = existing_metadata["bm25_matched_keywords"]
+
+                # if doc is already in, but new distance is better, update
+                # Handle None distances (e.g., from pure BM25 search) by treating as 0
+                dist_val = distance if distance is not None else 0
+                existing_dist_val = existing_distance if existing_distance is not None else 0
+
+                if dist_val > existing_dist_val:
+                    merged_metadata = dict(metadata) if metadata else {}
+                    if keywords_to_preserve and not merged_metadata.get("bm25_matched_keywords"):
+                        merged_metadata["bm25_matched_keywords"] = keywords_to_preserve
+                    combined[doc_hash] = (distance, document, merged_metadata)
+                elif keywords_to_preserve and not existing_metadata.get("bm25_matched_keywords"):
+                    # Keep existing (higher score) but add keywords from new result
+                    existing_metadata["bm25_matched_keywords"] = keywords_to_preserve
 
     combined = list(combined.values())
-    # Sort the list based on distances
-    combined.sort(key=lambda x: x[0], reverse=True)
+    # Sort the list based on distances (treat None as 0 for sorting)
+    combined.sort(key=lambda x: x[0] if x[0] is not None else 0, reverse=True)
 
     log.info(f"[HYBRID_DEBUG]   After dedup: {len(combined)} unique docs")
 
@@ -779,8 +996,13 @@ def merge_and_sort_query_results(query_results: list[dict], k: int) -> dict:
     for i, (dist, doc, meta) in enumerate(zip(sorted_distances, sorted_documents, sorted_metadatas)):
         doc_preview = doc[:80].replace('\n', ' ') if doc else 'N/A'
         source = meta.get('source', meta.get('name', 'unknown')) if meta else 'unknown'
-        score_str = f"{dist:.4f}" if isinstance(dist, (int, float)) else str(dist)
-        log.info(f"[HYBRID_DEBUG]   Final #{i+1}: score={score_str} ({float(dist)*100:.2f}%), source={source}, preview='{doc_preview}...'")
+        if dist is not None and isinstance(dist, (int, float)):
+            score_str = f"{dist:.4f}"
+            pct_str = f"{float(dist)*100:.2f}%"
+        else:
+            score_str = str(dist)
+            pct_str = "N/A"
+        log.info(f"[HYBRID_DEBUG]   Final #{i+1}: score={score_str} ({pct_str}), source={source}, preview='{doc_preview}...'")
 
     # Create and return the output dictionary
     return {
@@ -920,6 +1142,7 @@ async def query_collection_with_hybrid_search(
     r: float,
     hybrid_bm25_weight: float,
     enable_enriched_texts: bool = False,
+    enable_reranking: bool = True,
 ) -> dict:
     results = []
     error = False
@@ -956,6 +1179,7 @@ async def query_collection_with_hybrid_search(
                 r=r,
                 hybrid_bm25_weight=hybrid_bm25_weight,
                 enable_enriched_texts=enable_enriched_texts,
+                enable_reranking=enable_reranking,
             )
             return result, None
         except Exception as e:
@@ -1019,6 +1243,43 @@ async def query_collection_with_hybrid_search(
         # Clean up memory after hybrid search to prevent accumulation
         # This is especially important for BM25 which builds indexes in memory
         cleanup_memory()
+
+
+async def query_collection_with_hybrid_search_settings(
+    collection_names: list[str],
+    queries: list[str],
+    embedding_function,
+    reranking_function,
+    settings: RAGQuerySettings,
+) -> dict:
+    """
+    Query multiple collections using hybrid search with unified RAGQuerySettings.
+
+    This is the new interface that accepts a RAGQuerySettings object instead of
+    individual parameters. It delegates to the existing implementation.
+
+    Args:
+        collection_names: List of vector collection names
+        queries: List of search queries
+        embedding_function: Function to generate embeddings
+        reranking_function: Function to rerank results (can be None)
+        settings: Unified RAG query settings
+
+    Returns:
+        Dict with 'documents', 'metadatas', 'distances' keys
+    """
+    return await query_collection_with_hybrid_search(
+        collection_names=collection_names,
+        queries=queries,
+        embedding_function=embedding_function,
+        k=settings.top_k,
+        reranking_function=reranking_function,
+        k_reranker=settings.top_k_reranker,
+        r=settings.relevance_threshold,
+        hybrid_bm25_weight=settings.hybrid_bm25_weight,
+        enable_enriched_texts=settings.enable_enriched_texts,
+        enable_reranking=settings.enable_reranking,
+    )
 
 
 def generate_openai_batch_embeddings(
@@ -1624,6 +1885,7 @@ async def get_sources_from_items(
     hybrid_bm25_weight,
     hybrid_search,
     full_context=False,
+    enable_reranking=True,
     user: Optional[UserModel] = None,
     per_knowledge_settings: Optional[dict] = None,
     base_settings: Optional[dict] = None,
@@ -1817,6 +2079,7 @@ async def get_sources_from_items(
                 effective_k_reranker = kb_settings.get("top_k_reranker", k_reranker)
                 effective_hybrid_search = kb_settings.get("enable_hybrid_search", hybrid_search)
                 effective_hybrid_bm25_weight = kb_settings.get("hybrid_bm25_weight", hybrid_bm25_weight)
+                effective_enable_reranking = kb_settings.get("enable_reranking", enable_reranking)
 
                 # Log ALL retrieval parameters for this KB
                 log.info(
@@ -1824,7 +2087,8 @@ async def get_sources_from_items(
                     f"  FULL_CONTEXT: ui_toggle={ui_full_context}, kb_setting={kb_full_context}, "
                     f"global_param={full_context}, EFFECTIVE={effective_full_context}\n"
                     f"  OTHER PARAMS: k={effective_k}, k_reranker={effective_k_reranker}, "
-                    f"r={effective_r}, hybrid={effective_hybrid_search}, bm25_weight={effective_hybrid_bm25_weight}\n"
+                    f"r={effective_r}, hybrid={effective_hybrid_search}, bm25_weight={effective_hybrid_bm25_weight}, "
+                    f"reranking={effective_enable_reranking}\n"
                     f"  RAW kb_settings={kb_settings}"
                 )
 
@@ -1872,25 +2136,19 @@ async def get_sources_from_items(
                     if kb_collection_names_set:
                         try:
                             if effective_hybrid_search:
-                                try:
-                                    query_result = await query_collection_with_hybrid_search(
-                                        collection_names=list(kb_collection_names_set),
-                                        queries=queries,
-                                        embedding_function=embedding_function,
-                                        k=effective_k,
-                                        reranking_function=reranking_function,
-                                        k_reranker=effective_k_reranker,
-                                        r=effective_r,
-                                        hybrid_bm25_weight=effective_hybrid_bm25_weight,
-                                        enable_enriched_texts=request.app.state.config.ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS,
-                                    )
-                                except Exception as e:
-                                    log.debug(
-                                        f"Error in hybrid search for KB {knowledge_id}, using non-hybrid fallback: {e}"
-                                    )
-                                    query_result = None
-
-                            if not effective_hybrid_search or query_result is None:
+                                query_result = await query_collection_with_hybrid_search(
+                                    collection_names=list(kb_collection_names_set),
+                                    queries=queries,
+                                    embedding_function=embedding_function,
+                                    k=effective_k,
+                                    reranking_function=reranking_function,
+                                    k_reranker=effective_k_reranker,
+                                    r=effective_r,
+                                    hybrid_bm25_weight=effective_hybrid_bm25_weight,
+                                    enable_enriched_texts=request.app.state.config.ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS,
+                                    enable_reranking=effective_enable_reranking,
+                                )
+                            else:
                                 query_result = await query_collection(
                                     collection_names=list(kb_collection_names_set),
                                     queries=queries,
@@ -1946,13 +2204,26 @@ async def get_sources_from_items(
                     # offload so the async caller's event loop stays free.
                     query_result = await asyncio.to_thread(get_all_items_from_collections, collection_names)
                 else:
-                    query_result = await query_collection(
-                        request,
-                        collection_names=collection_names,
-                        queries=queries,
-                        embedding_function=embedding_function,
-                        k=k,
-                    )
+                    if hybrid_search:
+                        query_result = await query_collection_with_hybrid_search(
+                            collection_names=collection_names,
+                            queries=queries,
+                            embedding_function=embedding_function,
+                            k=k,
+                            reranking_function=reranking_function,
+                            k_reranker=k_reranker,
+                            r=r,
+                            hybrid_bm25_weight=hybrid_bm25_weight,
+                            enable_enriched_texts=request.app.state.config.ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS,
+                            enable_reranking=enable_reranking,
+                        )
+                    else:
+                        query_result = await query_collection(
+                            collection_names=collection_names,
+                            queries=queries,
+                            embedding_function=embedding_function,
+                            k=k,
+                        )
             except Exception as e:
                 log.exception(e)
 
@@ -1980,6 +2251,62 @@ async def get_sources_from_items(
         except Exception as e:
             log.exception(e)
     return sources
+
+
+async def get_sources_from_items_with_settings(
+    request,
+    items,
+    queries,
+    embedding_function,
+    reranking_function,
+    settings: RAGQuerySettings,
+    user: Optional[UserModel] = None,
+    per_knowledge_settings: Optional[dict[str, RAGQuerySettings]] = None,
+):
+    """
+    Retrieve sources from items using unified RAGQuerySettings.
+
+    This is the new interface that accepts a RAGQuerySettings object instead of
+    individual parameters. It delegates to the existing implementation.
+
+    Args:
+        request: FastAPI request object
+        items: List of items to retrieve sources from
+        queries: List of search queries
+        embedding_function: Function to generate embeddings
+        reranking_function: Function to rerank results (can be None)
+        settings: Unified RAG query settings (base/global settings)
+        user: Optional user model for access control
+        per_knowledge_settings: Optional dict mapping knowledge_id to RAGQuerySettings overrides
+
+    Returns:
+        List of source dicts with 'source', 'document', 'metadata', 'distances' keys
+    """
+    # Convert per_knowledge_settings from RAGQuerySettings to dict format for backward compat
+    per_kb_dict = None
+    if per_knowledge_settings:
+        per_kb_dict = {
+            kb_id: kb_settings.model_dump() if isinstance(kb_settings, RAGQuerySettings) else kb_settings
+            for kb_id, kb_settings in per_knowledge_settings.items()
+        }
+
+    return await get_sources_from_items(
+        request=request,
+        items=items,
+        queries=queries,
+        embedding_function=embedding_function,
+        k=settings.top_k,
+        reranking_function=reranking_function,
+        k_reranker=settings.top_k_reranker,
+        r=settings.relevance_threshold,
+        hybrid_bm25_weight=settings.hybrid_bm25_weight,
+        hybrid_search=settings.enable_hybrid_search,
+        full_context=settings.full_context,
+        enable_reranking=settings.enable_reranking,
+        user=user,
+        per_knowledge_settings=per_kb_dict,
+        base_settings=settings.model_dump(),
+    )
 
 
 def get_model_path(model: str, update_model: bool = False):
@@ -2037,6 +2364,7 @@ class RerankCompressor(BaseDocumentCompressor):
     top_n: int
     reranking_function: Any
     r_score: float
+    enable_reranking: bool = True  # When False, pass through with original ensemble scores
 
     class Config:
         extra = "forbid"
@@ -2067,6 +2395,36 @@ class RerankCompressor(BaseDocumentCompressor):
         query: str,
         callbacks: Optional[Callbacks] = None,
     ) -> Sequence[Document]:
+        # If reranking is disabled, pass through documents with original scores
+        if not self.enable_reranking:
+            log.debug(f"[HYBRID_DEBUG] === RERANKING DISABLED - PASS-THROUGH ===")
+            log.debug(f"[HYBRID_DEBUG] Returning top {self.top_n} documents with original scores")
+
+            # Pass through documents preserving existing scores from vector search,
+            # or assign rank-based scores for BM25-only results
+            result_docs = []
+            docs_to_process = list(documents[: self.top_n])
+            total_docs = len(docs_to_process)
+
+            for idx, doc in enumerate(docs_to_process):
+                metadata = doc.metadata.copy()
+                # If document has a score from vector search, use it
+                # Otherwise, assign a rank-based score (higher rank = higher score)
+                if "score" not in metadata or metadata["score"] is None:
+                    # Rank-based score: position 0 gets 1.0, position n gets decreasing score
+                    # Using formula: 1 / (rank + 1) to mimic RRF-style scoring
+                    metadata["score"] = 1.0 / (idx + 1)
+                    log.debug(f"[HYBRID_DEBUG]   Pass-through #{idx+1}: assigned rank-based score={metadata['score']:.4f}")
+                else:
+                    log.debug(f"[HYBRID_DEBUG]   Pass-through #{idx+1}: preserved original score={metadata['score']:.4f}")
+
+                result_docs.append(Document(
+                    page_content=doc.page_content,
+                    metadata=metadata
+                ))
+
+            return result_docs
+
         reranking = self.reranking_function is not None
 
         log.debug(f"[HYBRID_DEBUG] === RERANKING/SCORING START ===")
