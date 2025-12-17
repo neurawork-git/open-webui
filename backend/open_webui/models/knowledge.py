@@ -127,6 +127,7 @@ class RagSettings(BaseModel):
     enable_hybrid_search: Optional[bool] = None
     hybrid_bm25_weight: Optional[float] = None
     full_context: Optional[bool] = None
+    enable_reranking: Optional[bool] = None  # Override global reranking setting
 
     model_config = ConfigDict(extra="ignore")
 
