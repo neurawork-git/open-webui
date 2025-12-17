@@ -3028,6 +3028,12 @@ RAG_EXTERNAL_RERANKER_TIMEOUT = PersistentConfig(
     os.environ.get("RAG_EXTERNAL_RERANKER_TIMEOUT", ""),
 )
 
+# Enable/disable reranking - when disabled, raw hybrid scores are preserved
+ENABLE_RAG_RERANKING = PersistentConfig(
+    "ENABLE_RAG_RERANKING",
+    "rag.enable_reranking",
+    os.environ.get("ENABLE_RAG_RERANKING", "True").lower() == "true",
+)
 
 RAG_TEXT_SPLITTER = PersistentConfig(
     "RAG_TEXT_SPLITTER",

@@ -1970,6 +1970,9 @@ async def chat_completion_files_handler(
                 or base_settings.get(
                     "full_context", request.app.state.config.RAG_FULL_CONTEXT
                 ),
+                enable_reranking=base_settings.get(
+                    "enable_reranking", request.app.state.config.ENABLE_RAG_RERANKING
+                ),
                 user=user,
                 # Pass per-KB settings for independent filtering per collection
                 per_knowledge_settings=per_knowledge_rag_settings,

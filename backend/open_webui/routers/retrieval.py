@@ -474,6 +474,7 @@ async def get_rag_config(request: Request, user=Depends(get_admin_user)):
         # Hybrid search settings
         "ENABLE_RAG_HYBRID_SEARCH": request.app.state.config.ENABLE_RAG_HYBRID_SEARCH,
         "ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS": request.app.state.config.ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS,
+        "ENABLE_RAG_RERANKING": request.app.state.config.ENABLE_RAG_RERANKING,
         "TOP_K_RERANKER": request.app.state.config.TOP_K_RERANKER,
         "RELEVANCE_THRESHOLD": request.app.state.config.RELEVANCE_THRESHOLD,
         "HYBRID_BM25_WEIGHT": request.app.state.config.HYBRID_BM25_WEIGHT,
@@ -673,6 +674,7 @@ class ConfigForm(BaseModel):
     # Hybrid search settings
     ENABLE_RAG_HYBRID_SEARCH: Optional[bool] = None
     ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS: Optional[bool] = None
+    ENABLE_RAG_RERANKING: Optional[bool] = None
     TOP_K_RERANKER: Optional[int] = None
     RELEVANCE_THRESHOLD: Optional[float] = None
     HYBRID_BM25_WEIGHT: Optional[float] = None
@@ -779,6 +781,11 @@ async def update_rag_config(
         form_data.ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS
         if form_data.ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS is not None
         else request.app.state.config.ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS
+    )
+    request.app.state.config.ENABLE_RAG_RERANKING = (
+        form_data.ENABLE_RAG_RERANKING
+        if form_data.ENABLE_RAG_RERANKING is not None
+        else request.app.state.config.ENABLE_RAG_RERANKING
     )
 
     request.app.state.config.TOP_K_RERANKER = (
@@ -1228,6 +1235,8 @@ async def update_rag_config(
         "RAG_FULL_CONTEXT": request.app.state.config.RAG_FULL_CONTEXT,
         # Hybrid search settings
         "ENABLE_RAG_HYBRID_SEARCH": request.app.state.config.ENABLE_RAG_HYBRID_SEARCH,
+        "ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS": request.app.state.config.ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS,
+        "ENABLE_RAG_RERANKING": request.app.state.config.ENABLE_RAG_RERANKING,
         "TOP_K_RERANKER": request.app.state.config.TOP_K_RERANKER,
         "RELEVANCE_THRESHOLD": request.app.state.config.RELEVANCE_THRESHOLD,
         "HYBRID_BM25_WEIGHT": request.app.state.config.HYBRID_BM25_WEIGHT,
@@ -2573,7 +2582,7 @@ async def query_doc_handler(
                     if form_data.hybrid_bm25_weight
                     else request.app.state.config.HYBRID_BM25_WEIGHT
                 ),
-                user=user,
+                enable_reranking=request.app.state.config.ENABLE_RAG_RERANKING,
             )
         else:
             query_embedding = await request.app.state.EMBEDDING_FUNCTION(
@@ -2649,6 +2658,7 @@ async def query_collection_handler(
                     if form_data.enable_enriched_texts is not None
                     else request.app.state.config.ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS
                 ),
+                enable_reranking=request.app.state.config.ENABLE_RAG_RERANKING,
             )
         else:
             return await query_collection(
