@@ -1572,32 +1572,34 @@ async def get_sources_from_items(
                     or request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL
                 ):
                     # Full context mode - get ALL documents from this KB
-                    file_ids = (knowledge_base.data or {}).get("file_ids", [])
+                    if knowledge_base and (
+                        user.role == "admin"
+                        or knowledge_base.user_id == user.id
+                        or has_access(user.id, "read", knowledge_base.access_control)
+                    ):
+                        files = Knowledges.get_files_by_id(knowledge_base.id)
 
-                    documents = []
-                    metadatas = []
-                    for file_id in file_ids:
-                        file_object = Files.get_file_by_id(file_id)
-
-                        if file_object:
-                            documents.append(file_object.data.get("content", ""))
+                        documents = []
+                        metadatas = []
+                        for file in files:
+                            documents.append(file.data.get("content", ""))
                             metadatas.append(
                                 {
-                                    "file_id": file_id,
-                                    "name": file_object.filename,
-                                    "source": file_object.filename,
+                                    "file_id": file.id,
+                                    "name": file.filename,
+                                    "source": file.filename,
                                 }
                             )
 
-                    query_result = {
-                        "documents": [documents],
-                        "metadatas": [metadatas],
-                    }
-                    # Handle full context result and continue to next item
-                    if query_result:
-                        if "data" in item:
-                            del item["data"]
-                        query_results.append({**query_result, "file": item})
+                        query_result = {
+                            "documents": [documents],
+                            "metadatas": [metadatas],
+                        }
+                        # Handle full context result and continue to next item
+                        if query_result:
+                            if "data" in item:
+                                del item["data"]
+                            query_results.append({**query_result, "file": item})
                     continue
                 else:
                     # Vector search mode - query this KB independently with its own settings
