@@ -490,10 +490,9 @@ async def get_knowledge_by_id(
                 db=db,
             )
         ):
-            # Repair any inconsistencies between knowledge.data.file_ids and ChromaDB
-            if repair_knowledge_file_ids(knowledge):
-                # Reload knowledge after repair
-                knowledge = Knowledges.get_knowledge_by_id(id=id)
+            # NOTE: Auto-repair disabled - use POST /{id}/reindex to sync files
+            # if repair_knowledge_file_ids(knowledge):
+            #     knowledge = Knowledges.get_knowledge_by_id(id=id)
 
             return KnowledgeFilesResponse(
                 **knowledge.model_dump(),
@@ -1065,19 +1064,17 @@ async def reindex_knowledge_by_id(request: Request, id: str, user=Depends(get_ve
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
         )
 
-    # Validate knowledge data
-    if not knowledge.data or not isinstance(knowledge.data, dict):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Knowledge base has no data or invalid data structure",
-        )
-
     log.info(f"Starting reindex for knowledge base {id} ({knowledge.name})")
 
-    # Get file IDs from knowledge data
-    file_ids = knowledge.data.get("file_ids", [])
-    files = Files.get_files_by_ids(file_ids)
+    # Get files from knowledge_file junction table
+    files = Knowledges.get_files_by_id(id)
     total_files = len(files)
+
+    if total_files == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Knowledge base has no files to reindex",
+        )
 
     # Delete existing vector collection
     try:
