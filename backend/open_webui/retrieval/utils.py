@@ -109,21 +109,38 @@ async def embedding_with_retry(
     expected_count = len(texts)
     last_error = None
     delay = initial_delay
+    func_name = getattr(embedding_func, '__name__', 'unknown')
+
+    log.debug(
+        f"embedding_with_retry: Starting for {expected_count} texts "
+        f"using {func_name}, max_retries={max_retries}"
+    )
 
     for attempt in range(max_retries + 1):
         try:
             if attempt > 0:
                 log.warning(
-                    f"Embedding retry attempt {attempt}/{max_retries} after {delay:.1f}s delay"
+                    f"[Embedding Retry] Attempt {attempt}/{max_retries} for {expected_count} texts "
+                    f"after {delay:.1f}s delay. Previous error: {last_error}"
                 )
                 await asyncio.sleep(delay)
                 delay = min(delay * backoff_factor, max_delay)
 
             result = await embedding_func(texts=texts, **kwargs)
 
-            # Validate result
+            # Validate result - None typically means a transient error
+            # (rate limit 429, connection issue, timeout, etc.) so we should retry
             if result is None:
-                raise EmbeddingError("Embedding function returned None")
+                last_error = EmbeddingError(
+                    f"Embedding function {func_name} returned None - "
+                    "check logs above for actual error (likely rate limit or connection issue)"
+                )
+                log.warning(
+                    f"[Embedding Retry] {func_name} returned None for {expected_count} texts. "
+                    f"Attempt {attempt + 1}/{max_retries + 1}. "
+                    "This usually indicates rate limiting (429), connection error, or timeout."
+                )
+                continue  # Retry
 
             if len(result) != expected_count:
                 raise PartialEmbeddingError(
@@ -132,42 +149,57 @@ async def embedding_with_retry(
                     embeddings=result
                 )
 
-            # Success - log if we had retries
+            # Success
             if attempt > 0:
-                log.info(f"Embedding generation succeeded after {attempt} retries")
+                log.info(
+                    f"[Embedding Success] Generated {len(result)} embeddings "
+                    f"after {attempt} retries"
+                )
+            else:
+                log.debug(f"[Embedding Success] Generated {len(result)} embeddings on first attempt")
 
             return result
 
         except PartialEmbeddingError as e:
+            # Retry on partial results - API may have had a transient issue
             last_error = e
             log.warning(
-                f"Partial embedding result: got {e.received}/{e.expected} embeddings. "
+                f"[Embedding Retry] Partial result: got {e.received}/{e.expected} embeddings. "
                 f"Attempt {attempt + 1}/{max_retries + 1}"
             )
+
+        except EmbeddingError:
+            # Don't retry on our own raised errors
+            raise
 
         except aiohttp.ClientError as e:
+            # Retry on connection errors - these are often transient
             last_error = EmbeddingError(f"Connection error: {e}")
             log.warning(
-                f"Connection error during embedding generation: {e}. "
+                f"[Embedding Retry] Connection error: {e}. "
                 f"Attempt {attempt + 1}/{max_retries + 1}"
             )
 
-        except asyncio.TimeoutError as e:
-            last_error = EmbeddingError(f"Timeout error: {e}")
+        except asyncio.TimeoutError:
+            # Retry on timeouts - may succeed with retry
+            last_error = EmbeddingError("Timeout error")
             log.warning(
-                f"Timeout during embedding generation. "
+                f"[Embedding Retry] Timeout for {expected_count} texts. "
                 f"Attempt {attempt + 1}/{max_retries + 1}"
             )
 
         except Exception as e:
-            last_error = EmbeddingError(f"Unexpected error: {e}")
-            log.warning(
-                f"Error during embedding generation: {e}. "
-                f"Attempt {attempt + 1}/{max_retries + 1}"
+            # Don't retry on unexpected errors - fail fast
+            log.exception(
+                f"[Embedding Error] Unexpected error for {expected_count} texts: {e}"
             )
+            raise EmbeddingError(f"Unexpected error: {e}") from e
 
     # All retries exhausted
-    log.error(f"All {max_retries + 1} embedding attempts failed. Last error: {last_error}")
+    log.error(
+        f"[Embedding Failed] All {max_retries + 1} attempts failed for {expected_count} texts. "
+        f"Last error: {last_error}"
+    )
     raise last_error
 
 
