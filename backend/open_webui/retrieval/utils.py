@@ -1195,39 +1195,96 @@ async def agenerate_openai_batch_embeddings(
     prefix: str = None,
     user: UserModel = None,
 ) -> Optional[list[list[float]]]:
-    try:
-        log.debug(
-            f"agenerate_openai_batch_embeddings:model {model} batch size: {len(texts)}"
-        )
-        form_data = {"input": texts, "model": model}
-        if isinstance(RAG_EMBEDDING_PREFIX_FIELD_NAME, str) and isinstance(prefix, str):
-            form_data[RAG_EMBEDDING_PREFIX_FIELD_NAME] = prefix
+    """
+    Generate embeddings using OpenAI API with built-in retry for 429 errors.
+    """
+    max_429_retries = 5
 
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {key}",
-        }
-        if ENABLE_FORWARD_USER_INFO_HEADERS and user:
-            headers = include_user_info_headers(headers, user)
+    log.debug(
+        f"agenerate_openai_batch_embeddings: model={model}, batch_size={len(texts)}"
+    )
 
-        async with aiohttp.ClientSession(
-            trust_env=True, timeout=aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT)
-        ) as session:
-            async with session.post(
-                f"{url}/embeddings",
-                headers=headers,
-                json=form_data,
-                ssl=AIOHTTP_CLIENT_SESSION_SSL,
-            ) as r:
-                r.raise_for_status()
-                data = await r.json()
-                if "data" in data:
-                    return [item["embedding"] for item in data["data"]]
-                else:
-                    raise Exception("Something went wrong :/")
-    except Exception as e:
-        log.exception(f"Error generating openai batch embeddings: {e}")
-        return None
+    form_data = {"input": texts, "model": model}
+    if isinstance(RAG_EMBEDDING_PREFIX_FIELD_NAME, str) and isinstance(prefix, str):
+        form_data[RAG_EMBEDDING_PREFIX_FIELD_NAME] = prefix
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {key}",
+    }
+    if ENABLE_FORWARD_USER_INFO_HEADERS and user:
+        headers = include_user_info_headers(headers, user)
+
+    for attempt in range(max_429_retries):
+        try:
+            async with aiohttp.ClientSession(
+                trust_env=True, timeout=aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT)
+            ) as session:
+                async with session.post(
+                    f"{url}/embeddings",
+                    headers=headers,
+                    json=form_data,
+                    ssl=AIOHTTP_CLIENT_SESSION_SSL,
+                ) as r:
+                    # Handle rate limiting with built-in retry
+                    if r.status == 429:
+                        retry_after_str = r.headers.get("Retry-After", "1")
+                        try:
+                            retry_after = float(retry_after_str)
+                        except ValueError:
+                            retry_after = 1.0
+
+                        log.warning(
+                            f"[Embedding 429] Rate limited (attempt {attempt + 1}/{max_429_retries}). "
+                            f"Retry-After: {retry_after}s, batch_size: {len(texts)}"
+                        )
+
+                        if attempt < max_429_retries - 1:
+                            await asyncio.sleep(retry_after)
+                            continue
+                        else:
+                            log.error(
+                                f"[Embedding 429] Max retries exceeded. batch_size: {len(texts)}"
+                            )
+                            return None
+
+                    if r.status != 200:
+                        error_text = await r.text()
+                        log.warning(
+                            f"[Embedding HTTP {r.status}] {error_text[:200]}, batch_size: {len(texts)}"
+                        )
+                        return None
+
+                    data = await r.json()
+
+                    if "data" not in data:
+                        log.warning(f"[Embedding Error] Response missing 'data' field")
+                        return None
+
+                    embeddings = [item["embedding"] for item in data["data"]]
+
+                    if len(embeddings) != len(texts):
+                        log.warning(
+                            f"[Embedding Partial] Got {len(embeddings)}/{len(texts)} embeddings"
+                        )
+                        return None
+
+                    return embeddings
+
+        except aiohttp.ClientResponseError as e:
+            log.warning(f"[Embedding HTTP Error] Status {e.status}: {e.message}")
+            return None
+        except aiohttp.ClientError as e:
+            log.warning(f"[Embedding Connection Error] {type(e).__name__}: {e}")
+            return None
+        except asyncio.TimeoutError:
+            log.warning(f"[Embedding Timeout] Request timed out, batch_size: {len(texts)}")
+            return None
+        except Exception as e:
+            log.exception(f"[Embedding Error] Unexpected: {e}")
+            return None
+
+    return None
 
 
 def generate_azure_openai_batch_embeddings(
@@ -1287,41 +1344,105 @@ async def agenerate_azure_openai_batch_embeddings(
     prefix: str = None,
     user: UserModel = None,
 ) -> Optional[list[list[float]]]:
-    try:
-        log.debug(
-            f"agenerate_azure_openai_batch_embeddings:deployment {model} batch size: {len(texts)}"
-        )
-        form_data = {"input": texts}
-        if isinstance(RAG_EMBEDDING_PREFIX_FIELD_NAME, str) and isinstance(prefix, str):
-            form_data[RAG_EMBEDDING_PREFIX_FIELD_NAME] = prefix
+    """
+    Generate embeddings using Azure OpenAI with built-in retry for 429 errors.
 
-        full_url = f"{url}/openai/deployments/{model}/embeddings?api-version={version}"
+    This function has internal retry logic specifically for rate limit (429) errors,
+    respecting the Retry-After header from Azure. Other transient errors are handled
+    by the embedding_with_retry wrapper.
+    """
+    max_429_retries = 5  # Internal retries specifically for rate limiting
 
-        headers = {
-            "Content-Type": "application/json",
-            "api-key": key,
-        }
-        if ENABLE_FORWARD_USER_INFO_HEADERS and user:
-            headers = include_user_info_headers(headers, user)
+    log.debug(
+        f"agenerate_azure_openai_batch_embeddings: deployment={model}, batch_size={len(texts)}"
+    )
 
-        async with aiohttp.ClientSession(
-            trust_env=True, timeout=aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT)
-        ) as session:
-            async with session.post(
-                full_url,
-                headers=headers,
-                json=form_data,
-                ssl=AIOHTTP_CLIENT_SESSION_SSL,
-            ) as r:
-                r.raise_for_status()
-                data = await r.json()
-                if "data" in data:
-                    return [item["embedding"] for item in data["data"]]
-                else:
-                    raise Exception("Something went wrong :/")
-    except Exception as e:
-        log.exception(f"Error generating azure openai batch embeddings: {e}")
-        return None
+    form_data = {"input": texts}
+    if isinstance(RAG_EMBEDDING_PREFIX_FIELD_NAME, str) and isinstance(prefix, str):
+        form_data[RAG_EMBEDDING_PREFIX_FIELD_NAME] = prefix
+
+    full_url = f"{url}/openai/deployments/{model}/embeddings?api-version={version}"
+
+    headers = {
+        "Content-Type": "application/json",
+        "api-key": key,
+    }
+    if ENABLE_FORWARD_USER_INFO_HEADERS and user:
+        headers = include_user_info_headers(headers, user)
+
+    for attempt in range(max_429_retries):
+        try:
+            async with aiohttp.ClientSession(
+                trust_env=True, timeout=aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT)
+            ) as session:
+                async with session.post(
+                    full_url,
+                    headers=headers,
+                    json=form_data,
+                    ssl=AIOHTTP_CLIENT_SESSION_SSL,
+                ) as r:
+                    # Handle rate limiting with built-in retry
+                    if r.status == 429:
+                        retry_after_str = r.headers.get("Retry-After", "1")
+                        try:
+                            retry_after = float(retry_after_str)
+                        except ValueError:
+                            retry_after = 1.0
+
+                        log.warning(
+                            f"[Embedding 429] Rate limited (attempt {attempt + 1}/{max_429_retries}). "
+                            f"Retry-After: {retry_after}s, batch_size: {len(texts)}"
+                        )
+
+                        if attempt < max_429_retries - 1:
+                            await asyncio.sleep(retry_after)
+                            continue
+                        else:
+                            log.error(
+                                f"[Embedding 429] Max retries exceeded for rate limiting. "
+                                f"batch_size: {len(texts)}"
+                            )
+                            return None
+
+                    # Check for other HTTP errors
+                    if r.status != 200:
+                        error_text = await r.text()
+                        log.warning(
+                            f"[Embedding HTTP {r.status}] {error_text[:200]}, batch_size: {len(texts)}"
+                        )
+                        return None
+
+                    data = await r.json()
+
+                    if "data" not in data:
+                        log.warning(f"[Embedding Error] Response missing 'data' field: {data}")
+                        return None
+
+                    embeddings = [item["embedding"] for item in data["data"]]
+
+                    # Validate embedding count matches input count
+                    if len(embeddings) != len(texts):
+                        log.warning(
+                            f"[Embedding Partial] Got {len(embeddings)}/{len(texts)} embeddings"
+                        )
+                        return None  # Let retry wrapper handle partial results
+
+                    return embeddings
+
+        except aiohttp.ClientResponseError as e:
+            log.warning(f"[Embedding HTTP Error] Status {e.status}: {e.message}")
+            return None
+        except aiohttp.ClientError as e:
+            log.warning(f"[Embedding Connection Error] {type(e).__name__}: {e}")
+            return None
+        except asyncio.TimeoutError:
+            log.warning(f"[Embedding Timeout] Request timed out, batch_size: {len(texts)}")
+            return None
+        except Exception as e:
+            log.exception(f"[Embedding Error] Unexpected: {e}")
+            return None
+
+    return None
 
 
 def generate_ollama_batch_embeddings(
