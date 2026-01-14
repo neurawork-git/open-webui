@@ -893,6 +893,16 @@ else:
 
 
 ####################################
+# EMBEDDING RETRY SETTINGS
+####################################
+
+EMBEDDING_MAX_RETRIES = int(os.environ.get("EMBEDDING_MAX_RETRIES", "3"))
+EMBEDDING_RETRY_INITIAL_DELAY = float(os.environ.get("EMBEDDING_RETRY_INITIAL_DELAY", "1.0"))
+EMBEDDING_RETRY_MAX_DELAY = float(os.environ.get("EMBEDDING_RETRY_MAX_DELAY", "30.0"))
+EMBEDDING_RETRY_BACKOFF_FACTOR = float(os.environ.get("EMBEDDING_RETRY_BACKOFF_FACTOR", "2.0"))
+
+
+####################################
 # SENTENCE TRANSFORMERS
 ####################################
 
