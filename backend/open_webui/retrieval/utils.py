@@ -153,6 +153,10 @@ from open_webui.env import (
     OFFLINE_MODE,
     ENABLE_FORWARD_USER_INFO_HEADERS,
     AIOHTTP_CLIENT_SESSION_SSL,
+    EMBEDDING_MAX_RETRIES,
+    EMBEDDING_RETRY_INITIAL_DELAY,
+    EMBEDDING_RETRY_MAX_DELAY,
+    EMBEDDING_RETRY_BACKOFF_FACTOR,
 )
 from open_webui.config import (
     RAG_EMBEDDING_QUERY_PREFIX,
@@ -161,6 +165,117 @@ from open_webui.config import (
 )
 
 log = logging.getLogger(__name__)
+
+
+class EmbeddingError(Exception):
+    """Custom exception for embedding generation errors."""
+    pass
+
+
+class PartialEmbeddingError(EmbeddingError):
+    """Exception raised when API returns fewer embeddings than requested."""
+    def __init__(self, expected: int, received: int, embeddings: list = None):
+        self.expected = expected
+        self.received = received
+        self.embeddings = embeddings or []
+        super().__init__(f"Expected {expected} embeddings, received {received}")
+
+
+async def embedding_with_retry(
+    embedding_func,
+    texts: list[str],
+    max_retries: int = None,
+    initial_delay: float = None,
+    max_delay: float = None,
+    backoff_factor: float = None,
+    **kwargs
+) -> list[list[float]]:
+    """
+    Wrapper that adds retry logic and validation to embedding functions.
+
+    Args:
+        embedding_func: The async embedding function to call
+        texts: List of texts to generate embeddings for
+        max_retries: Maximum number of retry attempts (default from env)
+        initial_delay: Initial delay between retries in seconds (default from env)
+        max_delay: Maximum delay between retries in seconds (default from env)
+        backoff_factor: Multiplier for exponential backoff (default from env)
+        **kwargs: Additional arguments to pass to embedding_func
+
+    Returns:
+        List of embeddings matching the input texts
+
+    Raises:
+        EmbeddingError: If all retries fail or validation fails
+    """
+    max_retries = max_retries if max_retries is not None else EMBEDDING_MAX_RETRIES
+    initial_delay = initial_delay if initial_delay is not None else EMBEDDING_RETRY_INITIAL_DELAY
+    max_delay = max_delay if max_delay is not None else EMBEDDING_RETRY_MAX_DELAY
+    backoff_factor = backoff_factor if backoff_factor is not None else EMBEDDING_RETRY_BACKOFF_FACTOR
+
+    expected_count = len(texts)
+    last_error = None
+    delay = initial_delay
+
+    for attempt in range(max_retries + 1):
+        try:
+            if attempt > 0:
+                log.warning(
+                    f"Embedding retry attempt {attempt}/{max_retries} after {delay:.1f}s delay"
+                )
+                await asyncio.sleep(delay)
+                delay = min(delay * backoff_factor, max_delay)
+
+            result = await embedding_func(texts=texts, **kwargs)
+
+            # Validate result
+            if result is None:
+                raise EmbeddingError("Embedding function returned None")
+
+            if len(result) != expected_count:
+                raise PartialEmbeddingError(
+                    expected=expected_count,
+                    received=len(result),
+                    embeddings=result
+                )
+
+            # Success - log if we had retries
+            if attempt > 0:
+                log.info(f"Embedding generation succeeded after {attempt} retries")
+
+            return result
+
+        except PartialEmbeddingError as e:
+            last_error = e
+            log.warning(
+                f"Partial embedding result: got {e.received}/{e.expected} embeddings. "
+                f"Attempt {attempt + 1}/{max_retries + 1}"
+            )
+
+        except aiohttp.ClientError as e:
+            last_error = EmbeddingError(f"Connection error: {e}")
+            log.warning(
+                f"Connection error during embedding generation: {e}. "
+                f"Attempt {attempt + 1}/{max_retries + 1}"
+            )
+
+        except asyncio.TimeoutError as e:
+            last_error = EmbeddingError(f"Timeout error: {e}")
+            log.warning(
+                f"Timeout during embedding generation. "
+                f"Attempt {attempt + 1}/{max_retries + 1}"
+            )
+
+        except Exception as e:
+            last_error = EmbeddingError(f"Unexpected error: {e}")
+            log.warning(
+                f"Error during embedding generation: {e}. "
+                f"Attempt {attempt + 1}/{max_retries + 1}"
+            )
+
+    # All retries exhausted
+    log.error(f"All {max_retries + 1} embedding attempts failed. Last error: {last_error}")
+    raise last_error
 
 
 from typing import Any
@@ -1301,16 +1416,19 @@ def get_embedding_function(
 
         async def async_embedding_function(query, prefix=None, user=None):
             if isinstance(query, list):
+                total_items = len(query)
                 # Create batches
                 batches = [
                     query[i : i + embedding_batch_size]
                     for i in range(0, len(query), embedding_batch_size)
                 ]
 
+                log.debug(
+                    f"generate_multiple_async: Processing {len(batches)} batches "
+                    f"({total_items} total items, batch size {embedding_batch_size})"
+                )
+
                 if enable_async:
-                    log.debug(
-                        f"generate_multiple_async: Processing {len(batches)} batches in parallel"
-                    )
                     # Use semaphore to limit concurrent embedding API requests
                     # 0 = unlimited (no semaphore)
                     if concurrent_requests:
@@ -1330,25 +1448,41 @@ def get_embedding_function(
                             embedding_function(batch, prefix=prefix, user=user)
                             for batch in batches
                         ]
-                    batch_results = await asyncio.gather(*tasks)
+                    # return_exceptions=False ensures errors propagate immediately
+                    batch_results = await asyncio.gather(*tasks, return_exceptions=False)
                 else:
-                    log.debug(
-                        f"generate_multiple_async: Processing {len(batches)} batches sequentially"
-                    )
                     batch_results = []
                     for batch in batches:
                         batch_results.append(
                             await embedding_function(batch, prefix=prefix, user=user)
                         )
 
-                # Flatten results
+                # Flatten results with validation
                 embeddings = []
-                for batch_embeddings in batch_results:
-                    if isinstance(batch_embeddings, list):
-                        embeddings.extend(batch_embeddings)
+                for i, batch_embeddings in enumerate(batch_results):
+                    if batch_embeddings is None:
+                        # This shouldn't happen with retry logic, but handle defensively
+                        raise EmbeddingError(
+                            f"Batch {i + 1}/{len(batches)} returned None embeddings"
+                        )
+                    if not isinstance(batch_embeddings, list):
+                        raise EmbeddingError(
+                            f"Batch {i + 1}/{len(batches)} returned invalid type: "
+                            f"{type(batch_embeddings)}"
+                        )
+                    embeddings.extend(batch_embeddings)
+
+                # Final validation: ensure count matches
+                if len(embeddings) != total_items:
+                    raise PartialEmbeddingError(
+                        expected=total_items,
+                        received=len(embeddings),
+                        embeddings=embeddings
+                    )
 
                 log.debug(
-                    f"generate_multiple_async: Generated {len(embeddings)} embeddings from {len(batches)} parallel batches"
+                    f"generate_multiple_async: Successfully generated {len(embeddings)} "
+                    f"embeddings from {len(batches)} batches"
                 )
                 return embeddings
             else:
@@ -1366,6 +1500,27 @@ async def generate_embeddings(
     prefix: Union[str, None] = None,
     **kwargs,
 ):
+    """
+    Generate embeddings with automatic retry logic for transient errors.
+
+    This function wraps the underlying embedding APIs with retry logic to handle:
+    - Connection errors (network issues, DNS failures)
+    - Timeout errors
+    - Partial results (API returns fewer embeddings than requested)
+
+    Args:
+        engine: The embedding engine (ollama, openai, azure_openai)
+        model: The model name/deployment ID
+        text: Single string or list of strings to embed
+        prefix: Optional prefix to prepend to texts
+        **kwargs: Additional arguments (url, key, user, azure_api_version)
+
+    Returns:
+        Single embedding (if text is str) or list of embeddings (if text is list)
+
+    Raises:
+        EmbeddingError: If all retry attempts fail
+    """
     url = kwargs.get("url", "")
     key = kwargs.get("key", "")
     user = kwargs.get("user")
@@ -1376,35 +1531,53 @@ async def generate_embeddings(
         else:
             text = f"{prefix}{text}"
 
-    if engine == "ollama":
-        embeddings = await agenerate_ollama_batch_embeddings(
-            **{
-                "model": model,
-                "texts": text if isinstance(text, list) else [text],
-                "url": url,
-                "key": key,
-                "prefix": prefix,
-                "user": user,
-            }
-        )
-        return embeddings[0] if isinstance(text, str) else embeddings
-    elif engine == "openai":
-        embeddings = await agenerate_openai_batch_embeddings(
-            model, text if isinstance(text, list) else [text], url, key, prefix, user
-        )
-        return embeddings[0] if isinstance(text, str) else embeddings
-    elif engine == "azure_openai":
-        azure_api_version = kwargs.get("azure_api_version", "")
-        embeddings = await agenerate_azure_openai_batch_embeddings(
-            model,
-            text if isinstance(text, list) else [text],
-            url,
-            key,
-            azure_api_version,
-            prefix,
-            user,
-        )
-        return embeddings[0] if isinstance(text, str) else embeddings
+    texts_list = text if isinstance(text, list) else [text]
+    is_single = isinstance(text, str)
+
+    try:
+        if engine == "ollama":
+            embeddings = await embedding_with_retry(
+                embedding_func=agenerate_ollama_batch_embeddings,
+                texts=texts_list,
+                model=model,
+                url=url,
+                key=key,
+                prefix=prefix,
+                user=user,
+            )
+        elif engine == "openai":
+            embeddings = await embedding_with_retry(
+                embedding_func=agenerate_openai_batch_embeddings,
+                texts=texts_list,
+                model=model,
+                url=url,
+                key=key,
+                prefix=prefix,
+                user=user,
+            )
+        elif engine == "azure_openai":
+            azure_api_version = kwargs.get("azure_api_version", "")
+            embeddings = await embedding_with_retry(
+                embedding_func=agenerate_azure_openai_batch_embeddings,
+                texts=texts_list,
+                model=model,
+                url=url,
+                key=key,
+                version=azure_api_version,
+                prefix=prefix,
+                user=user,
+            )
+        else:
+            raise EmbeddingError(f"Unknown embedding engine: {engine}")
+
+        return embeddings[0] if is_single else embeddings
+
+    except EmbeddingError:
+        # Re-raise embedding errors as-is
+        raise
+    except Exception as e:
+        log.exception(f"Unexpected error in generate_embeddings: {e}")
+        raise EmbeddingError(f"Failed to generate embeddings: {e}") from e
 
 
 def get_reranking_function(reranking_engine, reranking_model, reranking_function):
