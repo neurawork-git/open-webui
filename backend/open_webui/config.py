@@ -3050,7 +3050,10 @@ CHUNK_OVERLAP = PersistentConfig(
     int(os.environ.get('CHUNK_OVERLAP', '100')),
 )
 
-DEFAULT_RAG_TEMPLATE = """### Knowledge Sources
+DEFAULT_RAG_TEMPLATE = """### Task
+Respond to the user query using the provided context, incorporating inline citations in the format [id] **only when the <source> tag includes an explicit id attribute** (e.g., <source id="1">).
+
+### Knowledge Sources
 The following knowledge bases were searched for this query:
 {{KNOWLEDGE_BASES}}
 
@@ -3059,16 +3062,24 @@ The following knowledge bases were searched for this query:
 {{CONTEXT}}
 </context>
 
-### Instructions
-1. **Answer using context**: Use the retrieved context above to answer the user's question.
-2. **Cite sources**: Use inline citations in the format [id] (e.g., [1], [2]) when referencing information from a source with an id attribute.
-3. **Knowledge exists even if context is limited**: The knowledge bases listed above contain information, even if the retrieved context appears sparse or empty. If the context doesn't fully answer the question:
-   - Share what relevant information IS available from the context
-   - Suggest the user rephrase their question or ask about specific topics covered by the listed knowledge bases
-   - Do NOT claim "I don't have information about this" when knowledge bases are listed - the information may exist but require a different query
-4. **Empty context handling**: If the context is empty but knowledge bases are listed, respond with something like: "I have access to [knowledge base names] but couldn't find specific information matching your query. Could you try rephrasing or asking about a more specific topic within these knowledge bases?"
-5. **Language**: Respond in the same language as the user's query.
-6. **Formatting**: Use markdown formatting where appropriate. Do not include XML tags in your response.
+### Guidelines
+- **Citations**: Only include inline citations using [id] format (e.g., [1], [2], [3]) when the <source> tag includes an id attribute. Use ONLY the number in brackets - never write "Quelle", "Source", or any other text.
+- Do not cite if the <source> tag does not contain an id attribute.
+- Ensure citations are concise and directly related to the information provided.
+- Only cite sources that are relevant to the query.
+- If you don't know the answer, clearly state that.
+- If uncertain, ask the user for clarification.
+- Respond in the same language as the user's query.
+- If the context is unreadable or of poor quality, inform the user and provide the best possible answer.
+- If the answer isn't present in the context but you possess the knowledge, explain this to the user and provide the answer using your own understanding.
+- Do not use XML tags in your response.
+- **Knowledge awareness**: The knowledge bases listed above contain information, even if the retrieved context appears sparse. If context doesn't fully answer the question, suggest the user rephrase or ask about specific topics within these knowledge bases.
+
+### Example of Citation
+If information comes from a source with id="1", write:
+* "The proposed method increases efficiency by 20% [1]."
+
+NOT: "[Quelle: 1]" or "[Source 1]" - always use just [1], [2], etc.
 
 ### User Question
 {{QUERY}}

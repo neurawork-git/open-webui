@@ -148,7 +148,6 @@ class KnowledgeMeta(BaseModel):
 class KnowledgeForm(BaseModel):
     name: str
     description: str
-    data: Optional[dict] = None
     meta: Optional[dict] = None
     access_grants: Optional[list[dict]] = None
 
@@ -668,21 +667,16 @@ class KnowledgeTable:
     async def update_knowledge_data_by_id(
         self, id: str, data: dict, db: Optional[AsyncSession] = None
     ) -> Optional[KnowledgeModel]:
-        try:
-            async with get_async_db_context(db) as db:
-                await db.execute(
-                    update(Knowledge)
-                    .filter_by(id=id)
-                    .values(
-                        data=data,
-                        updated_at=int(time.time()),
-                    )
-                )
-                await db.commit()
-                return await self.get_knowledge_by_id(id=id, db=db)
-        except Exception as e:
-            log.exception(e)
-            return None
+        """
+        DEPRECATED: The 'data' column was removed from the Knowledge table.
+        File associations are now tracked via the KnowledgeFile junction table.
+        This method is kept for API compatibility but does nothing.
+        """
+        log.warning(
+            "update_knowledge_data_by_id is deprecated - 'data' column no longer exists. "
+            "Use KnowledgeFile table for file associations."
+        )
+        return await self.get_knowledge_by_id(id=id, db=db)
 
     async def delete_knowledge_by_id(self, id: str, db: Optional[AsyncSession] = None) -> bool:
         try:
