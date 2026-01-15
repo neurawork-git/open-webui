@@ -748,6 +748,34 @@ async def query_doc_with_hybrid_search(
             else original_texts
         )
 
+        # Filter out empty/whitespace-only texts to prevent embedding errors
+        # Keep track of valid indices to maintain alignment with metadata
+        valid_indices = []
+        valid_texts = []
+        valid_metadatas = []
+        for i, (text, meta) in enumerate(zip(bm25_texts, bm25_metadatas)):
+            if text and text.strip():
+                valid_indices.append(i)
+                valid_texts.append(text)
+                valid_metadatas.append(meta)
+            else:
+                log.warning(f"[HYBRID_DEBUG] Filtering empty document at index {i}")
+
+        if len(valid_texts) < len(bm25_texts):
+            log.warning(
+                f"[HYBRID_DEBUG] Filtered {len(bm25_texts) - len(valid_texts)} empty documents "
+                f"(remaining: {len(valid_texts)})"
+            )
+
+        # If no valid documents remain, return empty results
+        if not valid_texts:
+            log.warning(f"[HYBRID_DEBUG] No valid documents in collection {collection_name} after filtering")
+            return {"documents": [], "metadatas": [], "distances": []}
+
+        # Use filtered texts and metadata
+        bm25_texts = valid_texts
+        filtered_metadatas = valid_metadatas
+
         # Compute BM25 scores using rank_bm25
         from rank_bm25 import BM25Okapi
 
@@ -760,7 +788,7 @@ async def query_doc_with_hybrid_search(
 
         # Log BM25 scores for all docs
         log.debug(f"[HYBRID_DEBUG] BM25 Scoring (query tokens: {query_tokens}):")
-        scored_docs = list(zip(bm25_scores, bm25_texts, collection_result.metadatas[0]))
+        scored_docs = list(zip(bm25_scores, bm25_texts, filtered_metadatas))
         scored_docs_sorted = sorted(scored_docs, key=lambda x: x[0], reverse=True)
 
         for idx, (score, text, meta) in enumerate(scored_docs_sorted[:10]):  # Top 10
@@ -772,7 +800,7 @@ async def query_doc_with_hybrid_search(
         # This ensures BM25-matched documents have proper scores for thresholds and display
         bm25_retriever = ScoringBM25Retriever.from_texts_and_scores(
             texts=bm25_texts,
-            metadatas=bm25_metadatas,
+            metadatas=filtered_metadatas,
             bm25_scores=list(bm25_scores),
             k=k,
         )
@@ -1762,10 +1790,9 @@ async def generate_embeddings(
         zero_embedding = [0.0] * 1536
         return zero_embedding if is_single else [zero_embedding] * len(texts_list)
 
-
     try:
         if engine == "ollama":
-            embeddings = await embedding_with_retry(
+            non_empty_embeddings = await embedding_with_retry(
                 embedding_func=agenerate_ollama_batch_embeddings,
                 texts=non_empty_texts,
                 model=model,
@@ -1775,7 +1802,7 @@ async def generate_embeddings(
                 user=user,
             )
         elif engine == "openai":
-            embeddings = await embedding_with_retry(
+            non_empty_embeddings = await embedding_with_retry(
                 embedding_func=agenerate_openai_batch_embeddings,
                 texts=non_empty_texts,
                 model=model,
@@ -1786,7 +1813,7 @@ async def generate_embeddings(
             )
         elif engine == "azure_openai":
             azure_api_version = kwargs.get("azure_api_version", "")
-            embeddings = await embedding_with_retry(
+            non_empty_embeddings = await embedding_with_retry(
                 embedding_func=agenerate_azure_openai_batch_embeddings,
                 texts=non_empty_texts,
                 model=model,
@@ -1798,6 +1825,30 @@ async def generate_embeddings(
             )
         else:
             raise EmbeddingError(f"Unknown embedding engine: {engine}")
+
+        # Reconstruct full embeddings list with zeros for empty texts
+        if len(non_empty_texts) == len(texts_list):
+            # No empty texts, return as-is
+            embeddings = non_empty_embeddings
+        else:
+            # Get embedding dimension from first non-empty result
+            embedding_dim = len(non_empty_embeddings[0]) if non_empty_embeddings else 1536
+            zero_embedding = [0.0] * embedding_dim
+
+            # Reconstruct full list with zeros for empty indices
+            embeddings = []
+            non_empty_idx = 0
+            for i in range(len(texts_list)):
+                if i in non_empty_indices:
+                    embeddings.append(non_empty_embeddings[non_empty_idx])
+                    non_empty_idx += 1
+                else:
+                    embeddings.append(zero_embedding)
+
+            log.debug(
+                f"[Embedding] Reconstructed {len(embeddings)} embeddings "
+                f"({len(non_empty_texts)} real, {len(texts_list) - len(non_empty_texts)} zeros)"
+            )
 
         return embeddings[0] if is_single else embeddings
 
@@ -2432,6 +2483,20 @@ class RerankCompressor(BaseDocumentCompressor):
         log.debug(f"[HYBRID_DEBUG] Documents to score: {len(documents)}")
         log.debug(f"[HYBRID_DEBUG] Top N to return: {self.top_n}")
         log.debug(f"[HYBRID_DEBUG] Relevance threshold (r_score): {self.r_score}")
+
+        # Filter out documents with empty/whitespace-only content to prevent embedding errors
+        original_count = len(documents)
+        documents = [doc for doc in documents if doc.page_content and doc.page_content.strip()]
+        if len(documents) < original_count:
+            log.warning(
+                f"[HYBRID_DEBUG] Filtered out {original_count - len(documents)} empty documents "
+                f"(remaining: {len(documents)})"
+            )
+
+        # If no valid documents remain, return empty list
+        if not documents:
+            log.warning("[HYBRID_DEBUG] No valid documents after filtering empty content")
+            return []
 
         # Log incoming documents from ensemble (before reranking)
         log.debug(f"[HYBRID_DEBUG] Documents from Ensemble (before reranking):")
