@@ -41,10 +41,12 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=sha,prefix=git-
+            # Unique tags per build (immutable)
+            type=sha,prefix=git-,format=short
+            type=raw,value=build-${{ github.run_number }}-{{date 'YYYYMMDD-HHmmss'}}
+            # Only update 'latest' on main branch
             type=raw,value=latest,enable={{is_default_branch}}
+            # Semver tags if git tags exist
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
 
