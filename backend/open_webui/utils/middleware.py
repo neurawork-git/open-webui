@@ -858,15 +858,26 @@ def apply_source_context_to_messages(
     # Track unique knowledge bases for metadata
     knowledge_bases_seen = {}
 
+    # Debug: log source structure
+    log.debug(f"[RAG Debug] Processing {len(sources)} sources")
+    for i, src in enumerate(sources):
+        src_info = src.get("source", {})
+        log.debug(
+            f"[RAG Debug] Source {i}: type={src_info.get('type')}, id={src_info.get('id')}, "
+            f"name={src_info.get('name')}, desc={src_info.get('description', 'NONE')}"
+        )
+
     for source in sources:
         # Extract knowledge base metadata (id, name, description)
         source_info = source.get("source", {})
+        source_type = source_info.get("type")
         kb_id = source_info.get("id")
         kb_name = source_info.get("name")
         kb_description = source_info.get("description")
 
-        # Track unique knowledge bases
-        if kb_id and kb_id not in knowledge_bases_seen:
+        # Track unique knowledge bases (only for type=="collection", not direct file uploads)
+        # Direct file uploads have type=="file" and shouldn't be listed in {{KNOWLEDGE_BASES}}
+        if source_type == "collection" and kb_id and kb_id not in knowledge_bases_seen:
             knowledge_bases_seen[kb_id] = {
                 "name": kb_name or "",
                 "description": kb_description or "",
@@ -889,6 +900,10 @@ def apply_source_context_to_messages(
 
     # Build knowledge bases metadata string
     # Format: <kb id="..." name="..." description="..."/>
+    log.debug(f"[RAG Debug] Unique knowledge bases tracked: {len(knowledge_bases_seen)}")
+    for kb_id, kb_info in knowledge_bases_seen.items():
+        log.debug(f"[RAG Debug] KB tracked: id={kb_id}, name={kb_info.get('name')}, desc_len={len(kb_info.get('description', '') or '')}")
+
     knowledge_bases_string = ""
     for kb_id, kb_info in knowledge_bases_seen.items():
         kb_name = html.escape(kb_info["name"]) if kb_info["name"] else ""
@@ -901,25 +916,30 @@ def apply_source_context_to_messages(
         )
     knowledge_bases_string = knowledge_bases_string.strip()
 
+    # Debug log the inputs to rag_template
+    log.debug(f"[RAG Debug] RAG_TEMPLATE config:\n{request.app.state.config.RAG_TEMPLATE}")
+    log.debug(f"[RAG Debug] context_string:\n{context_string}")
+    log.debug(f"[RAG Debug] user_message: {user_message}")
+    log.debug(f"[RAG Debug] knowledge_bases_string:\n{knowledge_bases_string}")
+
+    # Build the filled template and log it
+    filled_rag_template = rag_template(
+        request.app.state.config.RAG_TEMPLATE,
+        context_string,
+        user_message,
+        knowledge_bases_string,
+    )
+    log.debug(f"[RAG Debug] === FILLED RAG TEMPLATE ===\n{filled_rag_template}\n=== END FILLED RAG TEMPLATE ===")
+
     if RAG_SYSTEM_CONTEXT:
         return add_or_update_system_message(
-            rag_template(
-                request.app.state.config.RAG_TEMPLATE,
-                context_string,
-                user_message,
-                knowledge_bases_string,
-            ),
+            filled_rag_template,
             messages,
             append=True,
         )
     else:
         return add_or_update_user_message(
-            rag_template(
-                request.app.state.config.RAG_TEMPLATE,
-                context_string,
-                user_message,
-                knowledge_bases_string,
-            ),
+            filled_rag_template,
             messages,
             append=False,
         )
@@ -1856,6 +1876,14 @@ async def chat_completion_files_handler(
     sources = []
 
     if files := body.get("metadata", {}).get("files", None):
+        # Debug: log incoming files from frontend/model knowledge
+        log.debug(f"[RAG Debug] Received {len(files)} files for RAG processing")
+        for i, f in enumerate(files):
+            log.debug(
+                f"[RAG Debug] File {i}: type={f.get('type')}, id={f.get('id')}, "
+                f"name={f.get('name')}, desc={f.get('description', 'NONE')[:50] if f.get('description') else 'NONE'}..."
+            )
+
         # Check if all files are in full context mode
         all_full_context = all(item.get("context") == "full" for item in files)
 
@@ -1914,14 +1942,17 @@ async def chat_completion_files_handler(
             if item.get("type") == "collection" and item.get("id")
         ]
         if knowledge_ids:
+            log.debug(f"[RAG Debug] Enriching {len(knowledge_ids)} knowledge bases")
             for kid in knowledge_ids:
                 kb = Knowledges.get_knowledge_by_id(kid)
                 if kb:
+                    log.debug(f"[RAG Debug] KB {kid}: name={kb.name}, desc={kb.description[:50] if kb.description else 'NONE'}...")
                     # Enrich the item with knowledge base metadata for RAG context
                     for item in files:
                         if item.get("id") == kid and item.get("type") == "collection":
                             item["name"] = kb.name
                             item["description"] = kb.description
+                            log.debug(f"[RAG Debug] Enriched item {kid} with name and description")
                             break
 
                     if kb.meta and isinstance(kb.meta, dict):
@@ -1931,6 +1962,14 @@ async def chat_completion_files_handler(
                             log.debug(
                                 f"Found per-knowledge RAG settings for {kb.name} ({kid}): {kb_rag}"
                             )
+
+        # Debug: log enriched files before processing
+        log.debug(f"[RAG Debug] After enrichment, {len(files)} files:")
+        for i, f in enumerate(files):
+            log.debug(
+                f"[RAG Debug] Enriched file {i}: type={f.get('type')}, id={f.get('id')}, "
+                f"name={f.get('name')}, desc_len={len(f.get('description', '') or '')}"
+            )
 
         # Build global settings dict
         global_settings = {
@@ -2331,19 +2370,49 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         knowledge_files = []
         for item in model_knowledge:
             if item.get("collection_name"):
+                # Single-file KB: collection_name IS the knowledge base ID
+                kb_id = item.get("collection_name")
+                kb_name = item.get("name")
+                kb_description = None
+                # Look up KB to get description
+                kb = Knowledges.get_knowledge_by_id(kb_id)
+                if kb:
+                    kb_name = kb.name or kb_name
+                    kb_description = kb.description
                 knowledge_files.append(
                     {
-                        "id": item.get("collection_name"),
-                        "name": item.get("name"),
+                        "id": kb_id,
+                        "name": kb_name,
+                        "description": kb_description,
+                        "type": "collection",
                         "legacy": True,
                     }
                 )
             elif item.get("collection_names"):
+                # Multi-file KB: collection_names are vector DB collection names, not KB ID
+                # Try to find the KB ID by looking up the first collection name
+                kb_id = None
+                kb_name = item.get("name")
+                kb_description = None
+                collection_names = item.get("collection_names", [])
+                if collection_names:
+                    # Try to look up KB by the first collection name
+                    kb = Knowledges.get_knowledge_by_id(collection_names[0])
+                    if kb:
+                        kb_id = kb.id
+                        kb_name = kb.name or kb_name
+                        kb_description = kb.description
+                    else:
+                        # Fallback: use first collection name as id (may not be valid)
+                        kb_id = collection_names[0]
+
                 knowledge_files.append(
                     {
-                        "name": item.get("name"),
+                        "id": kb_id,
+                        "name": kb_name,
+                        "description": kb_description,
                         "type": "collection",
-                        "collection_names": item.get("collection_names"),
+                        "collection_names": collection_names,
                         "legacy": True,
                     }
                 )
