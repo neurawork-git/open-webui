@@ -1,5 +1,6 @@
 import logging
 import os
+import gc
 from typing import Awaitable, Optional, Union
 
 import requests
@@ -181,6 +182,27 @@ class PartialEmbeddingError(EmbeddingError):
         super().__init__(f"Expected {expected} embeddings, received {received}")
 
 
+class RateLimitError(EmbeddingError):
+    """Exception raised when API rate limit (429) is hit."""
+    def __init__(self, retry_after: float = 1.0, message: str = "Rate limited"):
+        self.retry_after = retry_after
+        super().__init__(message)
+
+
+def cleanup_memory():
+    """
+    Clean up memory after heavy operations like embedding generation or RAG searches.
+    Triggers garbage collection and clears CUDA cache if available.
+    """
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass  # torch not installed, skip CUDA cleanup
+
+
 async def embedding_with_retry(
     embedding_func,
     texts: list[str],
@@ -216,97 +238,50 @@ async def embedding_with_retry(
     expected_count = len(texts)
     last_error = None
     delay = initial_delay
-    func_name = getattr(embedding_func, '__name__', 'unknown')
-
-    log.debug(
-        f"embedding_with_retry: Starting for {expected_count} texts "
-        f"using {func_name}, max_retries={max_retries}"
-    )
 
     for attempt in range(max_retries + 1):
         try:
             if attempt > 0:
-                log.warning(
-                    f"[Embedding Retry] Attempt {attempt}/{max_retries} for {expected_count} texts "
-                    f"after {delay:.1f}s delay. Previous error: {last_error}"
-                )
+                log.warning(f"[Embedding] Retry {attempt}/{max_retries} after {delay:.1f}s")
                 await asyncio.sleep(delay)
                 delay = min(delay * backoff_factor, max_delay)
 
             result = await embedding_func(texts=texts, **kwargs)
 
-            # Validate result - None typically means a transient error
-            # (rate limit 429, connection issue, timeout, etc.) so we should retry
             if result is None:
-                last_error = EmbeddingError(
-                    f"Embedding function {func_name} returned None - "
-                    "check logs above for actual error (likely rate limit or connection issue)"
-                )
-                log.warning(
-                    f"[Embedding Retry] {func_name} returned None for {expected_count} texts. "
-                    f"Attempt {attempt + 1}/{max_retries + 1}. "
-                    "This usually indicates rate limiting (429), connection error, or timeout."
-                )
-                continue  # Retry
+                last_error = EmbeddingError("API returned None (likely rate limit or connection issue)")
+                continue
 
             if len(result) != expected_count:
-                raise PartialEmbeddingError(
-                    expected=expected_count,
-                    received=len(result),
-                    embeddings=result
-                )
-
-            # Success
-            if attempt > 0:
-                log.info(
-                    f"[Embedding Success] Generated {len(result)} embeddings "
-                    f"after {attempt} retries"
-                )
-            else:
-                log.debug(f"[Embedding Success] Generated {len(result)} embeddings on first attempt")
+                raise PartialEmbeddingError(expected=expected_count, received=len(result), embeddings=result)
 
             return result
 
         except PartialEmbeddingError as e:
-            # Retry on partial results - API may have had a transient issue
             last_error = e
-            log.warning(
-                f"[Embedding Retry] Partial result: got {e.received}/{e.expected} embeddings. "
-                f"Attempt {attempt + 1}/{max_retries + 1}"
-            )
+            log.warning(f"[Embedding] Partial result: {e.received}/{e.expected}")
+
+        except RateLimitError as e:
+            last_error = e
+            delay = min(e.retry_after, max_delay)
+            log.warning(f"[Embedding] Rate limited, waiting {e.retry_after:.1f}s")
 
         except EmbeddingError:
-            # Don't retry on our own raised errors
             raise
 
         except aiohttp.ClientError as e:
-            # Retry on connection errors - these are often transient
             last_error = EmbeddingError(f"Connection error: {e}")
-            log.warning(
-                f"[Embedding Retry] Connection error: {e}. "
-                f"Attempt {attempt + 1}/{max_retries + 1}"
-            )
+            log.warning(f"[Embedding] Connection error: {type(e).__name__}")
 
         except asyncio.TimeoutError:
-            # Retry on timeouts - may succeed with retry
-            last_error = EmbeddingError("Timeout error")
-            log.warning(
-                f"[Embedding Retry] Timeout for {expected_count} texts. "
-                f"Attempt {attempt + 1}/{max_retries + 1}"
-            )
+            last_error = EmbeddingError("Timeout")
+            log.warning("[Embedding] Request timeout")
 
         except Exception as e:
-            # Don't retry on unexpected errors - fail fast
-            log.exception(
-                f"[Embedding Error] Unexpected error for {expected_count} texts: {e}"
-            )
+            log.exception(f"[Embedding] Unexpected error: {e}")
             raise EmbeddingError(f"Unexpected error: {e}") from e
 
-    # All retries exhausted
-    log.error(
-        f"[Embedding Failed] All {max_retries + 1} attempts failed for {expected_count} texts. "
-        f"Last error: {last_error}"
-    )
+    log.error(f"[Embedding] Failed after {max_retries + 1} attempts: {last_error}")
     raise last_error
 
 
@@ -1007,34 +982,38 @@ async def query_collection(
             log.exception(f"Error when querying the collection: {e}")
             return None, e
 
-    # Generate all query embeddings (in one call)
-    query_embeddings = await embedding_function(
-        queries, prefix=RAG_EMBEDDING_QUERY_PREFIX
-    )
-    log.debug(
-        f"query_collection: processing {len(queries)} queries across {len(collection_names)} collections"
-    )
+    try:
+        # Generate all query embeddings (in one call)
+        query_embeddings = await embedding_function(
+            queries, prefix=RAG_EMBEDDING_QUERY_PREFIX
+        )
+        log.debug(
+            f"query_collection: processing {len(queries)} queries across {len(collection_names)} collections"
+        )
 
-    with ThreadPoolExecutor() as executor:
-        future_results = []
-        for query_embedding in query_embeddings:
-            for collection_name in collection_names:
-                result = executor.submit(
-                    process_query_collection, collection_name, query_embedding
-                )
-                future_results.append(result)
-        task_results = [future.result() for future in future_results]
+        with ThreadPoolExecutor() as executor:
+            future_results = []
+            for query_embedding in query_embeddings:
+                for collection_name in collection_names:
+                    result = executor.submit(
+                        process_query_collection, collection_name, query_embedding
+                    )
+                    future_results.append(result)
+            task_results = [future.result() for future in future_results]
 
-    for result, err in task_results:
-        if err is not None:
-            error = True
-        elif result is not None:
-            results.append(result)
+        for result, err in task_results:
+            if err is not None:
+                error = True
+            elif result is not None:
+                results.append(result)
 
-    if error and not results:
-        log.warning("All collection queries failed. No results returned.")
+        if error and not results:
+            log.warning("All collection queries failed. No results returned.")
 
-    return merge_and_sort_query_results(results, k=k)
+        return merge_and_sort_query_results(results, k=k)
+    finally:
+        # Clean up memory after RAG search to prevent accumulation
+        cleanup_memory()
 
 
 async def query_collection_with_hybrid_search(
@@ -1051,30 +1030,12 @@ async def query_collection_with_hybrid_search(
 ) -> dict:
     results = []
     error = False
-    # Fetch collection data once per collection sequentially
-    # Avoid fetching the same data multiple times later
-    collection_results = {}
-    for collection_name in collection_names:
-        try:
-            log.debug(
-                f"query_collection_with_hybrid_search:VECTOR_DB_CLIENT.get:collection {collection_name}"
-            )
-            collection_results[collection_name] = VECTOR_DB_CLIENT.get(
-                collection_name=collection_name
-            )
-        except Exception as e:
-            log.exception(f"Failed to fetch collection {collection_name}: {e}")
-            collection_results[collection_name] = None
 
-    log.info(
-        f"Starting hybrid search for {len(queries)} queries in {len(collection_names)} collections..."
-    )
-
-    async def process_query(collection_name, query):
+    async def process_query(collection_name, query, collection_result):
         try:
             result = await query_doc_with_hybrid_search(
                 collection_name=collection_name,
-                collection_result=collection_results[collection_name],
+                collection_result=collection_result,
                 query=query,
                 embedding_function=embedding_function,
                 k=k,
@@ -1090,39 +1051,63 @@ async def query_collection_with_hybrid_search(
             log.exception(f"Error when querying the collection with hybrid_search: {e}")
             return None, e
 
-    # Prepare tasks for all collections and queries
-    # Avoid running any tasks for collections that:
-    # - Failed to fetch data (have assigned None)
-    # - Have no documents (empty collections)
-    tasks = []
-    for collection_name in collection_names:
-        col_result = collection_results[collection_name]
-        if col_result is None:
-            log.warning(f"[HYBRID_DEBUG] Skipping collection {collection_name}: fetch failed")
-            continue
-        if not col_result.documents or not col_result.documents[0]:
-            log.warning(f"[HYBRID_DEBUG] Skipping collection {collection_name}: no documents")
-            continue
-        for query in queries:
-            tasks.append((collection_name, query))
+    try:
+        # Fetch collection data once per collection sequentially
+        # Avoid fetching the same data multiple times later
+        collection_results = {}
+        for collection_name in collection_names:
+            try:
+                log.debug(
+                    f"query_collection_with_hybrid_search:VECTOR_DB_CLIENT.get:collection {collection_name}"
+                )
+                collection_results[collection_name] = VECTOR_DB_CLIENT.get(
+                    collection_name=collection_name
+                )
+            except Exception as e:
+                log.exception(f"Failed to fetch collection {collection_name}: {e}")
+                collection_results[collection_name] = None
 
-    # Run all queries in parallel using asyncio.gather
-    task_results = await asyncio.gather(
-        *[process_query(collection_name, query) for collection_name, query in tasks]
-    )
-
-    for result, err in task_results:
-        if err is not None:
-            error = True
-        elif result is not None:
-            results.append(result)
-
-    if error and not results:
-        raise Exception(
-            "Hybrid search failed for all collections. Using Non-hybrid search as fallback."
+        log.info(
+            f"Starting hybrid search for {len(queries)} queries in {len(collection_names)} collections..."
         )
 
-    return merge_and_sort_query_results(results, k=k)
+        # Prepare tasks for all collections and queries
+        # Avoid running any tasks for collections that:
+        # - Failed to fetch data (have assigned None)
+        # - Have no documents (empty collections)
+        tasks = []
+        for collection_name in collection_names:
+            col_result = collection_results[collection_name]
+            if col_result is None:
+                log.warning(f"[HYBRID_DEBUG] Skipping collection {collection_name}: fetch failed")
+                continue
+            if not col_result.documents or not col_result.documents[0]:
+                log.warning(f"[HYBRID_DEBUG] Skipping collection {collection_name}: no documents")
+                continue
+            for query in queries:
+                tasks.append((collection_name, query, col_result))
+
+        # Run all queries in parallel using asyncio.gather
+        task_results = await asyncio.gather(
+            *[process_query(coll_name, q, col_res) for coll_name, q, col_res in tasks]
+        )
+
+        for result, err in task_results:
+            if err is not None:
+                error = True
+            elif result is not None:
+                results.append(result)
+
+        if error and not results:
+            raise Exception(
+                "Hybrid search failed for all collections. Using Non-hybrid search as fallback."
+            )
+
+        return merge_and_sort_query_results(results, k=k)
+    finally:
+        # Clean up memory after hybrid search to prevent accumulation
+        # This is especially important for BM25 which builds indexes in memory
+        cleanup_memory()
 
 
 async def query_collection_with_hybrid_search_settings(
@@ -1210,10 +1195,11 @@ async def agenerate_openai_batch_embeddings(
     user: UserModel = None,
 ) -> Optional[list[list[float]]]:
     """
-    Generate embeddings using OpenAI API with built-in retry for 429 errors.
-    """
-    max_429_retries = 5
+    Generate embeddings using OpenAI API.
 
+    Rate limiting (429) is handled by raising RateLimitError, which is caught
+    by embedding_with_retry for centralized retry logic.
+    """
     log.debug(
         f"agenerate_openai_batch_embeddings: model={model}, batch_size={len(texts)}"
     )
@@ -1229,73 +1215,47 @@ async def agenerate_openai_batch_embeddings(
     if ENABLE_FORWARD_USER_INFO_HEADERS and user:
         headers = include_user_info_headers(headers, user)
 
-    for attempt in range(max_429_retries):
-        try:
-            async with aiohttp.ClientSession(
-                trust_env=True, timeout=aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT)
-            ) as session:
-                async with session.post(
-                    f"{url}/embeddings", headers=headers, json=form_data
-                ) as r:
-                    # Handle rate limiting with built-in retry
-                    if r.status == 429:
-                        retry_after_str = r.headers.get("Retry-After", "1")
-                        try:
-                            retry_after = float(retry_after_str)
-                        except ValueError:
-                            retry_after = 1.0
+    try:
+        async with aiohttp.ClientSession(
+            trust_env=True, timeout=aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT)
+        ) as session:
+            async with session.post(
+                f"{url}/embeddings", headers=headers, json=form_data
+            ) as r:
+                if r.status == 429:
+                    retry_after_str = r.headers.get("Retry-After", "1")
+                    try:
+                        retry_after = float(retry_after_str)
+                    except ValueError:
+                        retry_after = 1.0
+                    raise RateLimitError(retry_after=retry_after)
 
-                        log.warning(
-                            f"[Embedding 429] Rate limited (attempt {attempt + 1}/{max_429_retries}). "
-                            f"Retry-After: {retry_after}s, batch_size: {len(texts)}"
-                        )
+                if r.status != 200:
+                    error_text = await r.text()
+                    log.debug(f"[Embedding] HTTP {r.status}: {error_text[:100]}")
+                    return None
 
-                        if attempt < max_429_retries - 1:
-                            await asyncio.sleep(retry_after)
-                            continue
-                        else:
-                            log.error(
-                                f"[Embedding 429] Max retries exceeded. batch_size: {len(texts)}"
-                            )
-                            return None
+                data = await r.json()
+                if "data" not in data:
+                    return None
 
-                    if r.status != 200:
-                        error_text = await r.text()
-                        log.warning(
-                            f"[Embedding HTTP {r.status}] {error_text[:200]}, batch_size: {len(texts)}"
-                        )
-                        return None
+                embeddings = [item["embedding"] for item in data["data"]]
+                if len(embeddings) != len(texts):
+                    return None
 
-                    data = await r.json()
+                return embeddings
 
-                    if "data" not in data:
-                        log.warning(f"[Embedding Error] Response missing 'data' field")
-                        return None
-
-                    embeddings = [item["embedding"] for item in data["data"]]
-
-                    if len(embeddings) != len(texts):
-                        log.warning(
-                            f"[Embedding Partial] Got {len(embeddings)}/{len(texts)} embeddings"
-                        )
-                        return None
-
-                    return embeddings
-
-        except aiohttp.ClientResponseError as e:
-            log.warning(f"[Embedding HTTP Error] Status {e.status}: {e.message}")
-            return None
-        except aiohttp.ClientError as e:
-            log.warning(f"[Embedding Connection Error] {type(e).__name__}: {e}")
-            return None
-        except asyncio.TimeoutError:
-            log.warning(f"[Embedding Timeout] Request timed out, batch_size: {len(texts)}")
-            return None
-        except Exception as e:
-            log.exception(f"[Embedding Error] Unexpected: {e}")
-            return None
-
-    return None
+    except RateLimitError:
+        raise
+    except aiohttp.ClientResponseError:
+        return None
+    except aiohttp.ClientError:
+        return None
+    except asyncio.TimeoutError:
+        return None
+    except Exception as e:
+        log.exception(f"[Embedding] Unexpected error: {e}")
+        return None
 
 
 def generate_azure_openai_batch_embeddings(
@@ -1355,100 +1315,56 @@ async def agenerate_azure_openai_batch_embeddings(
     prefix: str = None,
     user: UserModel = None,
 ) -> Optional[list[list[float]]]:
-    """
-    Generate embeddings using Azure OpenAI with built-in retry for 429 errors.
-
-    This function has internal retry logic specifically for rate limit (429) errors,
-    respecting the Retry-After header from Azure. Other transient errors are handled
-    by the embedding_with_retry wrapper.
-    """
-    max_429_retries = 5  # Internal retries specifically for rate limiting
-
-    log.debug(
-        f"agenerate_azure_openai_batch_embeddings: deployment={model}, batch_size={len(texts)}"
-    )
-
+    """Generate embeddings using Azure OpenAI."""
     form_data = {"input": texts}
     if isinstance(RAG_EMBEDDING_PREFIX_FIELD_NAME, str) and isinstance(prefix, str):
         form_data[RAG_EMBEDDING_PREFIX_FIELD_NAME] = prefix
 
     full_url = f"{url}/openai/deployments/{model}/embeddings?api-version={version}"
 
-    headers = {
-        "Content-Type": "application/json",
-        "api-key": key,
-    }
+    headers = {"Content-Type": "application/json", "api-key": key}
     if ENABLE_FORWARD_USER_INFO_HEADERS and user:
         headers = include_user_info_headers(headers, user)
 
-    for attempt in range(max_429_retries):
-        try:
-            async with aiohttp.ClientSession(
-                trust_env=True, timeout=aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT)
-            ) as session:
-                async with session.post(full_url, headers=headers, json=form_data) as r:
-                    # Handle rate limiting with built-in retry
-                    if r.status == 429:
-                        retry_after_str = r.headers.get("Retry-After", "1")
-                        try:
-                            retry_after = float(retry_after_str)
-                        except ValueError:
-                            retry_after = 1.0
+    try:
+        async with aiohttp.ClientSession(
+            trust_env=True, timeout=aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT)
+        ) as session:
+            async with session.post(full_url, headers=headers, json=form_data) as r:
+                if r.status == 429:
+                    retry_after_str = r.headers.get("Retry-After", "1")
+                    try:
+                        retry_after = float(retry_after_str)
+                    except ValueError:
+                        retry_after = 1.0
+                    raise RateLimitError(retry_after=retry_after)
 
-                        log.warning(
-                            f"[Embedding 429] Rate limited (attempt {attempt + 1}/{max_429_retries}). "
-                            f"Retry-After: {retry_after}s, batch_size: {len(texts)}"
-                        )
+                if r.status != 200:
+                    error_text = await r.text()
+                    log.debug(f"[Embedding] HTTP {r.status}: {error_text[:100]}")
+                    return None
 
-                        if attempt < max_429_retries - 1:
-                            await asyncio.sleep(retry_after)
-                            continue
-                        else:
-                            log.error(
-                                f"[Embedding 429] Max retries exceeded for rate limiting. "
-                                f"batch_size: {len(texts)}"
-                            )
-                            return None
+                data = await r.json()
+                if "data" not in data:
+                    return None
 
-                    # Check for other HTTP errors
-                    if r.status != 200:
-                        error_text = await r.text()
-                        log.warning(
-                            f"[Embedding HTTP {r.status}] {error_text[:200]}, batch_size: {len(texts)}"
-                        )
-                        return None
+                embeddings = [item["embedding"] for item in data["data"]]
+                if len(embeddings) != len(texts):
+                    return None
 
-                    data = await r.json()
+                return embeddings
 
-                    if "data" not in data:
-                        log.warning(f"[Embedding Error] Response missing 'data' field: {data}")
-                        return None
-
-                    embeddings = [item["embedding"] for item in data["data"]]
-
-                    # Validate embedding count matches input count
-                    if len(embeddings) != len(texts):
-                        log.warning(
-                            f"[Embedding Partial] Got {len(embeddings)}/{len(texts)} embeddings"
-                        )
-                        return None  # Let retry wrapper handle partial results
-
-                    return embeddings
-
-        except aiohttp.ClientResponseError as e:
-            log.warning(f"[Embedding HTTP Error] Status {e.status}: {e.message}")
-            return None
-        except aiohttp.ClientError as e:
-            log.warning(f"[Embedding Connection Error] {type(e).__name__}: {e}")
-            return None
-        except asyncio.TimeoutError:
-            log.warning(f"[Embedding Timeout] Request timed out, batch_size: {len(texts)}")
-            return None
-        except Exception as e:
-            log.exception(f"[Embedding Error] Unexpected: {e}")
-            return None
-
-    return None
+    except RateLimitError:
+        raise
+    except aiohttp.ClientResponseError:
+        return None
+    except aiohttp.ClientError:
+        return None
+    except asyncio.TimeoutError:
+        return None
+    except Exception as e:
+        log.exception(f"[Embedding] Unexpected error: {e}")
+        return None
 
 
 def generate_ollama_batch_embeddings(
@@ -1572,19 +1488,18 @@ def get_embedding_function(
             azure_api_version=azure_api_version,
         )
 
-        async def async_embedding_function(query, prefix=None, user=None):
+        async def async_embedding_function(query, prefix=None, user=None, doc_name=None):
             if isinstance(query, list):
                 total_items = len(query)
-                # Create batches
                 batches = [
                     query[i : i + embedding_batch_size]
                     for i in range(0, len(query), embedding_batch_size)
                 ]
+                num_batches = len(batches)
 
-                log.debug(
-                    f"generate_multiple_async: Processing {len(batches)} batches "
-                    f"({total_items} total items, batch size {embedding_batch_size})"
-                )
+                # Log start of embedding generation
+                doc_label = f"'{doc_name}'" if doc_name else "document"
+                log.info(f"[Embedding] {doc_label}: {total_items} chunks in {num_batches} batches")
 
                 if enable_async:
                     # Execute all batches in parallel
@@ -1592,31 +1507,27 @@ def get_embedding_function(
                         embedding_function(batch, prefix=prefix, user=user)
                         for batch in batches
                     ]
-                    # return_exceptions=False ensures errors propagate immediately
                     batch_results = await asyncio.gather(*tasks, return_exceptions=False)
                 else:
+                    # Sequential processing with progress logging
                     batch_results = []
-                    for batch in batches:
-                        batch_results.append(
-                            await embedding_function(batch, prefix=prefix, user=user)
-                        )
+                    for i, batch in enumerate(batches):
+                        result = await embedding_function(batch, prefix=prefix, user=user)
+                        batch_results.append(result)
+                        # Log progress every 5 batches or on last batch
+                        if (i + 1) % 5 == 0 or i == num_batches - 1:
+                            embedded_count = sum(len(r) for r in batch_results if r)
+                            log.info(f"[Embedding] {doc_label}: {embedded_count}/{total_items} chunks")
 
                 # Flatten results with validation
                 embeddings = []
                 for i, batch_embeddings in enumerate(batch_results):
                     if batch_embeddings is None:
-                        # This shouldn't happen with retry logic, but handle defensively
-                        raise EmbeddingError(
-                            f"Batch {i + 1}/{len(batches)} returned None embeddings"
-                        )
+                        raise EmbeddingError(f"Batch {i + 1}/{num_batches} failed")
                     if not isinstance(batch_embeddings, list):
-                        raise EmbeddingError(
-                            f"Batch {i + 1}/{len(batches)} returned invalid type: "
-                            f"{type(batch_embeddings)}"
-                        )
+                        raise EmbeddingError(f"Batch {i + 1}/{num_batches} invalid type")
                     embeddings.extend(batch_embeddings)
 
-                # Final validation: ensure count matches
                 if len(embeddings) != total_items:
                     raise PartialEmbeddingError(
                         expected=total_items,
@@ -1624,10 +1535,7 @@ def get_embedding_function(
                         embeddings=embeddings
                     )
 
-                log.debug(
-                    f"generate_multiple_async: Successfully generated {len(embeddings)} "
-                    f"embeddings from {len(batches)} batches"
-                )
+                log.info(f"[Embedding] {doc_label}: completed {len(embeddings)} chunks")
                 return embeddings
             else:
                 return await embedding_function(query, prefix, user)
@@ -1679,19 +1587,16 @@ async def generate_embeddings(
     is_single = isinstance(text, str)
 
     # Filter out empty/whitespace-only strings to prevent API errors
-    # Track indices of non-empty texts to reconstruct results
     non_empty_indices = []
     non_empty_texts = []
     for i, t in enumerate(texts_list):
         if t and t.strip():
             non_empty_indices.append(i)
             non_empty_texts.append(t)
-        else:
-            log.warning(f"[Embedding] Skipping empty/whitespace text at index {i}")
 
     # If all texts are empty, return zero embeddings
     if not non_empty_texts:
-        log.warning(f"[Embedding] All {len(texts_list)} texts are empty, returning zero embeddings")
+        log.debug(f"[Embedding] All {len(texts_list)} texts empty, returning zeros")
         # Return a placeholder zero embedding - we'll use 1536 dimensions (OpenAI default)
         # The actual dimension doesn't matter much for empty content
         zero_embedding = [0.0] * 1536
