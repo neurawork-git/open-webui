@@ -81,6 +81,7 @@ from open_webui.retrieval.web.yandex import search_yandex
 from open_webui.retrieval.web.ydc import search_youcom
 
 from open_webui.retrieval.utils import (
+    cleanup_memory,
     get_content_from_url,
     get_embedding_function,
     get_reranking_function,
@@ -1455,25 +1456,16 @@ def save_docs_to_vector_db(
     add: bool = False,
     user=None,
 ) -> bool:
-    def _get_docs_info(docs: list[Document]) -> str:
-        docs_info = set()
-
-        # Trying to select relevant metadata identifying the document.
+    def _get_doc_name(docs: list[Document]) -> str:
+        """Extract document name from metadata for logging."""
         for doc in docs:
-            metadata = getattr(doc, "metadata", {})
-            doc_name = metadata.get("name", "")
-            if not doc_name:
-                doc_name = metadata.get("title", "")
-            if not doc_name:
-                doc_name = metadata.get("source", "")
-            if doc_name:
-                docs_info.add(doc_name)
+            doc_metadata = getattr(doc, "metadata", {})
+            for key in ["name", "title", "source"]:
+                if doc_metadata.get(key):
+                    return doc_metadata[key]
+        return collection_name
 
-        return ", ".join(docs_info)
-
-    log.debug(
-        f"save_docs_to_vector_db: document {_get_docs_info(docs)} {collection_name}"
-    )
+    doc_name = _get_doc_name(docs)
 
     # Check if entries with the same hash (metadata.hash) already exist
     if metadata and "hash" in metadata:
@@ -1498,7 +1490,6 @@ def save_docs_to_vector_db(
 
     if split:
         if request.app.state.config.ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER:
-            log.info("Using markdown header text splitter")
             # Define headers to split on - covering most common markdown header levels
             markdown_splitter = MarkdownHeaderTextSplitter(
                 headers_to_split_on=[
@@ -1538,10 +1529,6 @@ def save_docs_to_vector_db(
             )
             docs = text_splitter.split_documents(docs)
         elif request.app.state.config.TEXT_SPLITTER == "token":
-            log.info(
-                f"Using token text splitter: {request.app.state.config.TIKTOKEN_ENCODING_NAME}"
-            )
-
             tiktoken.get_encoding(str(request.app.state.config.TIKTOKEN_ENCODING_NAME))
             text_splitter = TokenTextSplitter(
                 encoding_name=str(request.app.state.config.TIKTOKEN_ENCODING_NAME),
@@ -1571,18 +1558,11 @@ def save_docs_to_vector_db(
 
     try:
         if VECTOR_DB_CLIENT.has_collection(collection_name=collection_name):
-            log.info(f"collection {collection_name} already exists")
-
             if overwrite:
                 VECTOR_DB_CLIENT.delete_collection(collection_name=collection_name)
-                log.info(f"deleting existing collection {collection_name}")
             elif add is False:
-                log.info(
-                    f"collection {collection_name} already exists, overwrite is False and add is False"
-                )
                 return True
 
-        log.info(f"generating embeddings for {collection_name}")
         embedding_function = get_embedding_function(
             request.app.state.config.RAG_EMBEDDING_ENGINE,
             request.app.state.config.RAG_EMBEDDING_MODEL,
@@ -1624,6 +1604,7 @@ def save_docs_to_vector_db(
                 list(map(lambda x: x.replace("\n", " "), texts)),
                 prefix=RAG_EMBEDDING_CONTENT_PREFIX,
                 user=user,
+                doc_name=doc_name,
             ),
             request.app.state.main_loop,
         )
@@ -1640,17 +1621,20 @@ def save_docs_to_vector_db(
             for idx, text in enumerate(texts)
         ]
 
-        log.info(f"adding to collection {collection_name}")
         VECTOR_DB_CLIENT.insert(
             collection_name=collection_name,
             items=items,
         )
 
-        log.info(f"added {len(items)} items to collection {collection_name}")
+        log.info(f"[Document] '{doc_name}': saved {len(items)} chunks to vector DB")
         return True
     except Exception as e:
-        log.exception(e)
+        log.exception(f"[Document] '{doc_name}': failed - {e}")
         raise e
+    finally:
+        # Clean up memory after document processing to prevent accumulation
+        # This is especially important for large document uploads
+        cleanup_memory()
 
 
 class ProcessFileForm(BaseModel):
