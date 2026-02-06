@@ -57,6 +57,10 @@
 		: 'rounded-2xl'} text-left"
 	type="button"
 	on:click={async () => {
+		// Don't open modal if file is still uploading (no ID yet)
+		if (loading || !item?.id) {
+			return;
+		}
 		if (item?.file?.data?.content || item?.type === 'file' || item?.content || modal) {
 			showModal = !showModal;
 		} else {

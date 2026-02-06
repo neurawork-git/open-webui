@@ -398,7 +398,7 @@
 				<select
 					bind:value={statusFilter}
 					on:change={applyStatusFilter}
-					class="px-3 py-2 text-sm rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+					class="px-3 py-2 pr-8 text-sm rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
 				>
 					<option value="">{$i18n.t('All Statuses')}</option>
 					<option value="queued">{$i18n.t('Queued')}</option>

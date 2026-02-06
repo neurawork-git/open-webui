@@ -1682,7 +1682,6 @@ class ProcessFileForm(BaseModel):
     collection_name: Optional[str] = None
 
 
-@router.post("/process/file")
 def process_file(
     request: Request,
     form_data: ProcessFileForm,
@@ -1695,6 +1694,33 @@ def process_file(
     Process a file and save its content to the vector database.
     Note: granular session management is used to prevent connection pool exhaustion.
     The session is committed before external API calls, and updates use a fresh session.
+
+    This is the internal implementation that can accept an optional tracker.
+    Use process_file_endpoint for the API endpoint.
+    """
+    return _process_file_impl(request, form_data, user, db, tracker)
+
+
+@router.post("/process/file")
+def process_file_endpoint(
+    request: Request,
+    form_data: ProcessFileForm,
+    user=Depends(get_verified_user),
+    db: Session = Depends(get_session),
+):
+    """API endpoint for processing a file."""
+    return _process_file_impl(request, form_data, user, db, None)
+
+
+def _process_file_impl(
+    request: Request,
+    form_data: ProcessFileForm,
+    user,
+    db: Session,
+    tracker: Optional[ProcessingTaskTracker],
+):
+    """
+    Process a file and save its content to the vector database.
 
     Args:
         request: FastAPI request object
