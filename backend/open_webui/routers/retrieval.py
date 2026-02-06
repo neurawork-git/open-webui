@@ -38,6 +38,15 @@ from langchain_core.documents import Document
 
 from open_webui.models.files import FileModel, FileUpdateForm, Files
 from open_webui.models.knowledge import Knowledges
+from open_webui.models.processing import (
+    ProcessingTasks,
+    ProcessingTaskCreate,
+    ProcessingTaskTracker,
+    ProcessingStage,
+    ProcessingCancelledException,
+    DocumentType,
+    get_progress_for_stage,
+)
 from open_webui.storage.provider import Storage
 from open_webui.internal.db import get_session
 from sqlalchemy.orm import Session
@@ -1396,6 +1405,7 @@ def save_docs_to_vector_db(
     split: bool = True,
     add: bool = False,
     user=None,
+    tracker: Optional[ProcessingTaskTracker] = None,
 ) -> bool:
     def _get_doc_name(docs: list[Document]) -> str:
         """Extract document name from metadata for logging."""
@@ -1407,6 +1417,10 @@ def save_docs_to_vector_db(
         return collection_name
 
     doc_name = _get_doc_name(docs)
+
+    # Check for cancellation before starting
+    if tracker and tracker.is_cancelled():
+        raise ProcessingCancelledException("Processing cancelled before chunking")
 
     # Check if entries with the same hash (metadata.hash) already exist
     if metadata and "hash" in metadata:
@@ -1420,6 +1434,10 @@ def save_docs_to_vector_db(
             if existing_doc_ids:
                 log.info(f"Document with hash {metadata['hash']} already exists")
                 raise ValueError(ERROR_MESSAGES.DUPLICATE_CONTENT)
+
+    # Update stage to CHUNKING
+    if tracker:
+        tracker.update_stage(ProcessingStage.CHUNKING)
 
     if split:
         if request.app.state.config.ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER:
@@ -1489,6 +1507,18 @@ def save_docs_to_vector_db(
         for doc in docs
     ]
 
+    # Update tracker with total chunks count and move to EMBEDDING stage
+    if tracker:
+        tracker.update_stage(
+            ProcessingStage.EMBEDDING,
+            total_chunks=len(texts),
+            processed_chunks=0,
+        )
+
+    # Check for cancellation before embedding
+    if tracker and tracker.is_cancelled():
+        raise ProcessingCancelledException("Processing cancelled before embedding")
+
     try:
         if VECTOR_DB_CLIENT.has_collection(collection_name=collection_name):
             if overwrite:
@@ -1527,15 +1557,24 @@ def save_docs_to_vector_db(
             enable_async=request.app.state.config.ENABLE_ASYNC_EMBEDDING,
         )
 
-        # Run async embedding in sync context, passing doc_name for progress tracking
+        # Run async embedding in sync context, passing doc_name and tracker for progress tracking
         embeddings = asyncio.run(
             embedding_function(
                 list(map(lambda x: x.replace("\n", " "), texts)),
                 prefix=RAG_EMBEDDING_CONTENT_PREFIX,
                 user=user,
                 doc_name=doc_name,
+                tracker=tracker,
             )
         )
+
+        # Check for cancellation after embedding
+        if tracker and tracker.is_cancelled():
+            raise ProcessingCancelledException("Processing cancelled after embedding")
+
+        # Update to INDEXING stage
+        if tracker:
+            tracker.update_stage(ProcessingStage.INDEXING)
 
         items = [
             {
@@ -1575,9 +1614,17 @@ def process_file(
     form_data: ProcessFileForm,
     user=Depends(get_verified_user),
     db: Session = Depends(get_session),
+    tracker: Optional[ProcessingTaskTracker] = None,
 ):
     """
     Process a file and save its content to the vector database.
+
+    Args:
+        request: FastAPI request object
+        form_data: Form containing file_id, optional content, and collection_name
+        user: Authenticated user
+        db: Database session
+        tracker: Optional ProcessingTaskTracker for progress updates
     """
     if user.role == "admin":
         file = Files.get_file_by_id(form_data.file_id, db=db)
@@ -1750,6 +1797,7 @@ def process_file(
                         },
                         add=(True if form_data.collection_name else False),
                         user=user,
+                        tracker=tracker,
                     )
                     log.info(f"added {len(docs)} items to collection {collection_name}")
 

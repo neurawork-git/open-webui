@@ -45,6 +45,14 @@ from open_webui.routers.audio import transcribe
 
 from open_webui.storage.provider import Storage
 
+from open_webui.models.processing import (
+    ProcessingTasks,
+    ProcessingTaskCreate,
+    ProcessingTaskTracker,
+    ProcessingStage,
+    ProcessingCancelledException,
+    DocumentType,
+)
 
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.access_control import has_access
@@ -122,10 +130,23 @@ def process_uploaded_file(
     file_item,
     file_metadata,
     user,
+    task_id: Optional[str] = None,
     db: Optional[Session] = None,
 ):
+    """
+    Process an uploaded file with optional task tracking.
+
+    If task_id is provided, progress will be tracked in the ProcessingTask table.
+    """
     def _process_handler(db_session):
+        tracker = None
         try:
+            # Create tracker if task_id is provided
+            if task_id:
+                tracker = ProcessingTaskTracker(task_id, db=db_session)
+                # Mark task as started (EXTRACTING stage)
+                tracker.update_stage(ProcessingStage.EXTRACTING)
+
             if file.content_type:
                 stt_supported_content_types = getattr(
                     request.app.state.config, "STT_SUPPORTED_CONTENT_TYPES", []
@@ -134,6 +155,10 @@ def process_uploaded_file(
                 if strict_match_mime_type(
                     stt_supported_content_types, file.content_type
                 ):
+                    # Check for cancellation before transcription
+                    if tracker and tracker.is_cancelled():
+                        raise ProcessingCancelledException("Processing cancelled before transcription")
+
                     file_path_processed = Storage.get_file(file_path)
                     result = transcribe(
                         request, file_path_processed, file_metadata, user
@@ -146,6 +171,7 @@ def process_uploaded_file(
                         ),
                         user=user,
                         db=db_session,
+                        tracker=tracker,
                     )
                 elif (not file.content_type.startswith(("image/", "video/"))) or (
                     request.app.state.config.CONTENT_EXTRACTION_ENGINE == "external"
@@ -155,6 +181,7 @@ def process_uploaded_file(
                         ProcessFileForm(file_id=file_item.id),
                         user=user,
                         db=db_session,
+                        tracker=tracker,
                     )
                 else:
                     raise Exception(
@@ -169,15 +196,35 @@ def process_uploaded_file(
                     ProcessFileForm(file_id=file_item.id),
                     user=user,
                     db=db_session,
+                    tracker=tracker,
                 )
 
+            # Mark task as completed
+            if tracker:
+                tracker.complete()
+
+        except ProcessingCancelledException as e:
+            log.info(f"Processing cancelled for file: {file_item.id}")
+            if tracker:
+                tracker.cancel()
+            Files.update_file_data_by_id(
+                file_item.id,
+                {
+                    "status": "cancelled",
+                    "error": str(e),
+                },
+                db=db_session,
+            )
         except Exception as e:
             log.error(f"Error processing file: {file_item.id}")
+            error_msg = str(e.detail) if hasattr(e, "detail") else str(e)
+            if tracker:
+                tracker.fail(error_msg, {"exception_type": type(e).__name__})
             Files.update_file_data_by_id(
                 file_item.id,
                 {
                     "status": "failed",
-                    "error": str(e.detail) if hasattr(e, "detail") else str(e),
+                    "error": error_msg,
                 },
                 db=db_session,
             )
@@ -301,6 +348,25 @@ def upload_file_handler(
                 )
 
         if process:
+            # Create ProcessingTask for tracking (before background processing starts)
+            processing_task = ProcessingTasks.create_task(
+                user_id=user.id,
+                form_data=ProcessingTaskCreate(
+                    document_id=file_item.id,
+                    document_name=name,
+                    document_type=DocumentType.FILE_UPLOAD.value,
+                    chat_id=file_metadata.get("chat_id"),
+                    knowledge_id=file_metadata.get("knowledge_id"),
+                    metadata={
+                        "content_type": file.content_type,
+                        "file_size": len(contents),
+                        "channel_id": file_metadata.get("channel_id"),
+                    }
+                ),
+                db=db,
+            )
+            task_id = processing_task.id if processing_task else None
+
             if background_tasks and process_in_background:
                 background_tasks.add_task(
                     process_uploaded_file,
@@ -310,8 +376,12 @@ def upload_file_handler(
                     file_item,
                     file_metadata,
                     user,
+                    task_id,
                 )
-                return {"status": True, **file_item.model_dump()}
+                response = {"status": True, **file_item.model_dump()}
+                if task_id:
+                    response["processing_task_id"] = task_id
+                return response
             else:
                 process_uploaded_file(
                     request,
@@ -320,9 +390,13 @@ def upload_file_handler(
                     file_item,
                     file_metadata,
                     user,
+                    task_id,
                     db=db,
                 )
-                return {"status": True, **file_item.model_dump()}
+                response = {"status": True, **file_item.model_dump()}
+                if task_id:
+                    response["processing_task_id"] = task_id
+                return response
         else:
             if file_item:
                 return file_item
@@ -503,15 +577,38 @@ async def get_file_process_status(
                     file_item = Files.get_file_by_id(file_id)  # Creates own session
                     if file_item:
                         data = file_item.model_dump().get("data", {})
-                        status = data.get("status")
+                        file_status = data.get("status")
 
-                        if status:
-                            event = {"status": status}
-                            if status == "failed":
+                        if file_status:
+                            event = {"status": file_status}
+                            if file_status == "failed":
                                 event["error"] = data.get("error")
 
+                            # Get ProcessingTask for detailed progress
+                            tasks = ProcessingTasks.get_tasks(
+                                document_type=None,
+                                limit=1,
+                                offset=0,
+                            )
+                            # Find task matching this document
+                            from open_webui.internal.db import SessionLocal
+                            with SessionLocal() as task_db:
+                                from sqlalchemy import desc
+                                from open_webui.models.processing import ProcessingTask as ProcessingTaskTable
+                                task = (
+                                    task_db.query(ProcessingTaskTable)
+                                    .filter(ProcessingTaskTable.document_id == file_id)
+                                    .order_by(desc(ProcessingTaskTable.created_at))
+                                    .first()
+                                )
+                                if task:
+                                    event["stage"] = task.stage
+                                    event["progress"] = task.progress
+                                    event["processed_chunks"] = task.processed_chunks
+                                    event["total_chunks"] = task.total_chunks
+
                             yield f"data: {json.dumps(event)}\n\n"
-                            if status in ("completed", "failed"):
+                            if file_status in ("completed", "failed", "cancelled"):
                                 break
                         else:
                             # Legacy
@@ -527,7 +624,25 @@ async def get_file_process_status(
                 media_type="text/event-stream",
             )
         else:
-            return {"status": file.data.get("status", "pending")}
+            # Non-streaming: return status with ProcessingTask details
+            response = {"status": file.data.get("status", "pending")}
+
+            # Get ProcessingTask for detailed progress
+            from open_webui.models.processing import ProcessingTask as ProcessingTaskTable
+            task = (
+                db.query(ProcessingTaskTable)
+                .filter(ProcessingTaskTable.document_id == id)
+                .order_by(ProcessingTaskTable.created_at.desc())
+                .first()
+            )
+            if task:
+                response["stage"] = task.stage
+                response["progress"] = task.progress
+                response["processed_chunks"] = task.processed_chunks
+                response["total_chunks"] = task.total_chunks
+                response["processing_task_id"] = task.id
+
+            return response
     else:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
