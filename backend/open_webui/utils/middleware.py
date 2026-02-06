@@ -74,6 +74,7 @@ from open_webui.retrieval.utils import get_sources_from_items, merge_rag_setting
 from open_webui.models.knowledge import Knowledges
 
 
+from open_webui.utils.sanitize import strip_markdown_code_fences
 from open_webui.utils.chat import generate_chat_completion
 from open_webui.utils.task import (
     get_task_model_id,
@@ -93,6 +94,7 @@ from open_webui.utils.misc import (
     prepend_to_first_user_message_content,
     convert_logit_bias_input_to_json,
     get_content_from_message,
+    convert_output_to_messages,
 )
 from open_webui.utils.tools import (
     get_tools,
@@ -106,6 +108,7 @@ from open_webui.utils.filter import (
 )
 from open_webui.utils.code_interpreter import execute_code_jupyter
 from open_webui.utils.payload import apply_system_prompt_to_body
+from open_webui.utils.response import normalize_usage
 from open_webui.utils.mcp.client import MCPClient
 
 
@@ -125,7 +128,10 @@ from open_webui.env import (
     ENABLE_REALTIME_CHAT_SAVE,
     ENABLE_QUERIES_CACHE,
     RAG_SYSTEM_CONTEXT,
+    ENABLE_FORWARD_USER_INFO_HEADERS,
+    FORWARD_SESSION_INFO_HEADER_CHAT_ID,
 )
+from open_webui.utils.headers import include_user_info_headers
 from open_webui.constants import TASKS
 
 
@@ -145,6 +151,11 @@ DEFAULT_REASONING_TAGS = [
 ]
 DEFAULT_SOLUTION_TAGS = [("<|begin_of_solution|>", "<|end_of_solution|>")]
 DEFAULT_CODE_INTERPRETER_TAGS = [("<code_interpreter>", "</code_interpreter>")]
+
+
+def output_id(prefix: str) -> str:
+    """Generate OR-style ID: prefix + 24-char hex UUID."""
+    return f"{prefix}_{uuid4().hex[:24]}"
 
 
 def get_citation_source_from_tool_result(
@@ -285,6 +296,475 @@ def get_citation_source_from_tool_result(
                 "metadata": [{"source": tool_name}],
             }
         ]
+
+
+def split_content_and_whitespace(content):
+    content_stripped = content.rstrip()
+    original_whitespace = (
+        content[len(content_stripped) :] if len(content) > len(content_stripped) else ""
+    )
+    return content_stripped, original_whitespace
+
+
+def is_opening_code_block(content):
+    backtick_segments = content.split("```")
+    # Even number of segments means the last backticks are opening a new block
+    return len(backtick_segments) > 1 and len(backtick_segments) % 2 == 0
+
+
+def serialize_output(output: list) -> str:
+    """
+    Convert OR-aligned output items to HTML for display.
+    For LLM consumption, use convert_output_to_messages() instead.
+    """
+    content = ""
+
+    # First pass: collect function_call_output items by call_id for lookup
+    tool_outputs = {}
+    for item in output:
+        if item.get("type") == "function_call_output":
+            tool_outputs[item.get("call_id")] = item
+
+    # Second pass: render items in order
+    for idx, item in enumerate(output):
+        item_type = item.get("type", "")
+
+        if item_type == "message":
+            for content_part in item.get("content", []):
+                if "text" in content_part:
+                    text = content_part.get("text", "").strip()
+                    if text:
+                        content = f"{content}{text}\n"
+
+        elif item_type == "function_call":
+            # Render tool call inline with its result (if available)
+            if content and not content.endswith("\n"):
+                content += "\n"
+
+            call_id = item.get("call_id", "")
+            name = item.get("name", "")
+            arguments = item.get("arguments", "")
+
+            result_item = tool_outputs.get(call_id)
+            if result_item:
+                result_text = ""
+                for out in result_item.get("output", []):
+                    if "text" in out:
+                        result_text += out.get("text", "")
+                files = result_item.get("files")
+                embeds = result_item.get("embeds", "")
+
+                content += f'<details type="tool_calls" done="true" id="{call_id}" name="{name}" arguments="{html.escape(json.dumps(arguments))}" result="{html.escape(json.dumps(result_text, ensure_ascii=False))}" files="{html.escape(json.dumps(files)) if files else ""}" embeds="{html.escape(json.dumps(embeds))}">\n<summary>Tool Executed</summary>\n</details>\n'
+            else:
+                content += f'<details type="tool_calls" done="false" id="{call_id}" name="{name}" arguments="{html.escape(json.dumps(arguments))}">\n<summary>Executing...</summary>\n</details>\n'
+
+        elif item_type == "function_call_output":
+            # Already handled inline with function_call above
+            pass
+
+        elif item_type == "reasoning":
+            reasoning_content = ""
+            # Check for 'summary' (new structure) or 'content' (legacy/fallback)
+            source_list = item.get("summary", []) or item.get("content", [])
+            for content_part in source_list:
+                if "text" in content_part:
+                    reasoning_content += content_part.get("text", "")
+                elif "summary" in content_part:  # Handle potential nested logic if any
+                    pass
+
+            reasoning_content = reasoning_content.strip()
+
+            duration = item.get("duration")
+            status = item.get("status", "in_progress")
+
+            # Infer completion: if this reasoning item is NOT the last item,
+            # render as done (a subsequent item means reasoning is complete)
+            is_last_item = idx == len(output) - 1
+
+            if content and not content.endswith("\n"):
+                content += "\n"
+
+            display = html.escape(
+                "\n".join(
+                    (f"> {line}" if not line.startswith(">") else line)
+                    for line in reasoning_content.splitlines()
+                )
+            )
+
+            if status == "completed" or duration is not None or not is_last_item:
+                content = f'{content}<details type="reasoning" done="true" duration="{duration or 0}">\n<summary>Thought for {duration or 0} seconds</summary>\n{display}\n</details>\n'
+            else:
+                content = f'{content}<details type="reasoning" done="false">\n<summary>Thinking…</summary>\n{display}\n</details>\n'
+
+        elif item_type == "open_webui:code_interpreter":
+            content_stripped, original_whitespace = split_content_and_whitespace(
+                content
+            )
+            if is_opening_code_block(content_stripped):
+                content = content_stripped.rstrip("`").rstrip() + original_whitespace
+            else:
+                content = content_stripped + original_whitespace
+
+            if content and not content.endswith("\n"):
+                content += "\n"
+
+    return content.strip()
+
+
+def deep_merge(target, source):
+    """
+    Merge source into target recursively (returning new structure).
+    - Dicts: Recursive merge.
+    - Strings: Concatenation.
+    - Others: Overwrite.
+    """
+    if isinstance(target, dict) and isinstance(source, dict):
+        new_target = target.copy()
+        for k, v in source.items():
+            if k in new_target:
+                new_target[k] = deep_merge(new_target[k], v)
+            else:
+                new_target[k] = v
+        return new_target
+    elif isinstance(target, str) and isinstance(source, str):
+        return target + source
+    else:
+        return source
+
+
+def handle_responses_streaming_event(
+    data: dict,
+    current_output: list,
+) -> tuple[list, dict | None]:
+    """
+    Handle Responses API streaming events in a pure functional way.
+
+    Args:
+        data: The event data
+        current_output: List of output items (treated as immutable)
+
+    Returns:
+        tuple[list, dict | None]: (new_output, metadata)
+        - new_output: The updated output list.
+        - metadata: Metadata to emit (e.g. usage), {} if update occurred, None if skip.
+    """
+    # Default: no change
+    # Note: treating current_output as immutable, but avoiding full deepcopy for perf.
+    # We will shallow copy only if we need to modify the list structure or items.
+
+    event_type = data.get("type", "")
+
+    if event_type == "response.output_item.added":
+        item = data.get("item", {})
+        if item:
+            new_output = list(current_output)
+            new_output.append(item)
+            return new_output, None
+        return current_output, None
+
+    elif event_type == "response.content_part.added":
+        part = data.get("part", {})
+        output_index = data.get("output_index", len(current_output) - 1)
+
+        if current_output and 0 <= output_index < len(current_output):
+            new_output = list(current_output)
+            # Copy the item to mutate it
+            item = new_output[output_index].copy()
+            new_output[output_index] = item
+
+            if "content" not in item:
+                item["content"] = []
+            else:
+                # Copy content list
+                item["content"] = list(item["content"])
+
+            if item.get("type") == "reasoning":
+                # Reasoning items should not have content parts
+                pass
+            else:
+                item["content"].append(part)
+            return new_output, None
+        return current_output, None
+
+    elif event_type == "response.reasoning_summary_part.added":
+        part = data.get("part", {})
+        output_index = data.get("output_index", len(current_output) - 1)
+
+        if current_output and 0 <= output_index < len(current_output):
+            new_output = list(current_output)
+            item = new_output[output_index].copy()
+            new_output[output_index] = item
+
+            if "summary" not in item:
+                item["summary"] = []
+            else:
+                item["summary"] = list(item["summary"])
+
+            item["summary"].append(part)
+            return new_output, None
+        return current_output, None
+
+    elif event_type.startswith("response.") and event_type.endswith(".delta"):
+        # Generic Delta Handling
+        parts = event_type.split(".")
+        if len(parts) >= 3:
+            delta_type = parts[1]
+            delta = data.get("delta", "")
+
+            output_index = data.get("output_index", len(current_output) - 1)
+
+            if current_output and 0 <= output_index < len(current_output):
+                new_output = list(current_output)
+                item = new_output[output_index].copy()
+                new_output[output_index] = item
+                item_type = item.get("type", "")
+
+                # Determine target field and object based on delta_type and item_type
+                if delta_type == "function_call_arguments":
+                    key = "arguments"
+                    if item_type == "function_call":
+                        # Function call args are usually strings
+                        item[key] = item.get(key, "") + str(delta)
+                else:
+                    # Generic handling, refined by item type below
+                    pass
+
+                    if item_type == "message":
+                        # Message items: "text"/"output_text" -> "text"
+                        # "reasoning_text" -> Skipped (should use reasoning item)
+                        if delta_type in ["text", "output_text"]:
+                            key = "text"
+                        elif delta_type in ["reasoning_text", "reasoning_summary_text"]:
+                            # Skip reasoning updates for message items
+                            return new_output, None
+                        else:
+                            key = delta_type
+
+                        content_index = data.get("content_index", 0)
+                        if "content" not in item:
+                            item["content"] = []
+                        else:
+                            item["content"] = list(item["content"])
+                        content_list = item["content"]
+
+                        while len(content_list) <= content_index:
+                            content_list.append({"type": "text", "text": ""})
+
+                        # Copy the part to mutate it
+                        part = content_list[content_index].copy()
+                        content_list[content_index] = part
+
+                        current_val = part.get(key)
+                        if current_val is None:
+                            # Initialize based on delta type
+                            current_val = {} if isinstance(delta, dict) else ""
+
+                        part[key] = deep_merge(current_val, delta)
+
+                    elif item_type == "reasoning":
+                        # Reasoning items: "reasoning_text"/"reasoning_summary_text" -> "text"
+                        # "text"/"output_text" -> Skipped (should use message item)
+                        if delta_type == "reasoning_summary_text":
+                            # Summary updates -> item['summary']
+                            key = "text"
+                            summary_index = data.get("summary_index", 0)
+                            if "summary" not in item:
+                                item["summary"] = []
+                            else:
+                                item["summary"] = list(item["summary"])
+                            summary_list = item["summary"]
+
+                            while len(summary_list) <= summary_index:
+                                summary_list.append(
+                                    {"type": "summary_text", "text": ""}
+                                )
+
+                            part = summary_list[summary_index].copy()
+                            summary_list[summary_index] = part
+
+                            target_val = part.get(key, "")
+                            part[key] = deep_merge(target_val, delta)
+
+                        elif delta_type == "reasoning_text":
+                            # Reasoning body updates -> item['content']
+                            key = "text"
+                            content_index = data.get("content_index", 0)
+                            if "content" not in item:
+                                item["content"] = []
+                            else:
+                                item["content"] = list(item["content"])
+                            content_list = item["content"]
+
+                            while len(content_list) <= content_index:
+                                # Reasoning content parts default to text
+                                content_list.append({"type": "text", "text": ""})
+
+                            part = content_list[content_index].copy()
+                            content_list[content_index] = part
+
+                            target_val = part.get(key, "")
+                            part[key] = deep_merge(target_val, delta)
+
+                        elif delta_type in ["text", "output_text"]:
+                            return new_output, None
+                        else:
+                            # Fallback just in case other deltas target reasoning?
+                            pass
+
+                    else:
+                        # Fallback for other item types
+                        if delta_type in ["text", "output_text"]:
+                            key = "text"
+                        else:
+                            key = delta_type
+
+                        current_val = item.get(key)
+                        if current_val is None:
+                            current_val = {} if isinstance(delta, dict) else ""
+                        item[key] = deep_merge(current_val, delta)
+
+            return new_output, None
+
+    elif event_type.startswith("response.") and event_type.endswith(".done"):
+        # Delta Events: response.content_part.done, response.text.done, etc.
+        parts = event_type.split(".")
+        if len(parts) >= 3:
+            type_name = parts[1]
+
+            # 1. Handle specific Delta "done" signals
+            if type_name == "content_part":
+                # "Signaling that no further changes will occur to a content part"
+                # If payloads contains the full part, we could update it.
+                # Usually purely signaling in standard implementation, but we check payload.
+                part = data.get("part")
+                output_index = data.get("output_index", len(current_output) - 1)
+
+                if part and current_output and 0 <= output_index < len(current_output):
+                    new_output = list(current_output)
+                    item = new_output[output_index].copy()
+                    new_output[output_index] = item
+
+                    if "content" in item:
+                        item["content"] = list(item["content"])
+                        content_index = data.get(
+                            "content_index", len(item["content"]) - 1
+                        )
+                        if 0 <= content_index < len(item["content"]):
+                            item["content"][content_index] = part
+                            return new_output, {}
+                return current_output, None
+
+            elif type_name == "reasoning_summary_part":
+                part = data.get("part")
+                output_index = data.get("output_index", len(current_output) - 1)
+
+                if part and current_output and 0 <= output_index < len(current_output):
+                    new_output = list(current_output)
+                    item = new_output[output_index].copy()
+                    new_output[output_index] = item
+
+                    if "summary" in item:
+                        item["summary"] = list(item["summary"])
+                        summary_index = data.get(
+                            "summary_index", len(item["summary"]) - 1
+                        )
+                        if 0 <= summary_index < len(item["summary"]):
+                            item["summary"][summary_index] = part
+                            return new_output, {}
+                return current_output, None
+
+            # 2. Skip Output Item done (handled specifically below)
+            if type_name == "output_item":
+                pass
+
+            # 3. Generic Field Done (text.done, audio.done)
+            elif type_name not in ["completed", "failed"]:
+                output_index = data.get("output_index", len(current_output) - 1)
+                if current_output and 0 <= output_index < len(current_output):
+
+                    key = (
+                        "text"
+                        if type_name
+                        in [
+                            "text",
+                            "output_text",
+                            "reasoning_text",
+                            "reasoning_summary_text",
+                        ]
+                        else type_name
+                    )
+                    if type_name == "function_call_arguments":
+                        key = "arguments"
+
+                    if key in data:
+                        final_value = data[key]
+                        new_output = list(current_output)
+                        item = new_output[output_index].copy()
+                        new_output[output_index] = item
+                        item_type = item.get("type", "")
+
+                        if type_name == "function_call_arguments":
+                            if item_type == "function_call":
+                                item["arguments"] = final_value
+                        elif item_type == "message":
+                            content_index = data.get("content_index", 0)
+                            if "content" in item:
+                                item["content"] = list(item["content"])
+                                if len(item["content"]) > content_index:
+                                    part = item["content"][content_index].copy()
+                                    item["content"][content_index] = part
+                                    part[key] = final_value
+                        elif item_type == "reasoning":
+                            item["status"] = "completed"
+                        else:
+                            item[key] = final_value
+
+                        return new_output, {}
+
+        return current_output, None
+
+    elif event_type == "response.output_item.done":
+        # Delta Event: Output item complete
+        item = data.get("item")
+        output_index = data.get("output_index", len(current_output) - 1)
+
+        new_output = list(current_output)
+        if item and 0 <= output_index < len(current_output):
+            new_output[output_index] = item
+        elif item:
+            new_output.append(item)
+        return new_output, {}
+
+    elif event_type == "response.completed":
+        # State Machine Event: Completed
+        response_data = data.get("response", {})
+        final_output = response_data.get("output")
+
+        new_output = final_output if final_output is not None else current_output
+
+        # Ensure reasoning items are marked as completed in the final output
+        if new_output:
+            for item in new_output:
+                if (
+                    item.get("type") == "reasoning"
+                    and item.get("status") != "completed"
+                ):
+                    item["status"] = "completed"
+
+        return new_output, {"usage": response_data.get("usage"), "done": True}
+
+    elif event_type == "response.in_progress":
+        # State Machine Event: In Progress
+        # We could extract metadata if needed, but for now just acknowledge iteration
+        return current_output, None
+
+    elif event_type == "response.failed":
+        # State Machine Event: Failed
+        error = data.get("response", {}).get("error", {})
+        return current_output, {"error": error}
+
+    else:
+        return current_output, None
 
 
 def apply_source_context_to_messages(
@@ -1571,6 +2051,30 @@ async def convert_url_images_to_base64(form_data):
     return form_data
 
 
+def process_messages_with_output(messages: list[dict]) -> list[dict]:
+    """
+    Process messages with OR-aligned output items for LLM consumption.
+
+    For assistant messages with 'output' field, produces properly formatted
+    OpenAI-style messages (tool_calls + tool results). Strips 'output' before LLM.
+    """
+    processed = []
+
+    for message in messages:
+        if message.get("role") == "assistant" and message.get("output"):
+            # Use output items for clean OpenAI-format messages
+            output_messages = convert_output_to_messages(message["output"])
+            if output_messages:
+                processed.extend(output_messages)
+                continue
+
+        # Strip 'output' field before adding (LLM shouldn't see it)
+        clean_message = {k: v for k, v in message.items() if k != "output"}
+        processed.append(clean_message)
+
+    return processed
+
+
 async def process_chat_payload(request, form_data, user, metadata, model):
     # Pipeline Inlet -> Filter Inlet -> Chat Memory -> Chat Web Search -> Chat Image Generation
     # -> Chat Code Interpreter (Form Data Update) -> (Default) Chat Tools Function Calling
@@ -1578,6 +2082,9 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
     form_data = apply_params_to_form_data(form_data, model)
     log.debug(f"form_data: {form_data}")
+
+    # Process messages with OR-aligned output items for clean LLM messages
+    form_data["messages"] = process_messages_with_output(form_data.get("messages", []))
 
     system_message = get_system_message(form_data.get("messages", []))
     if system_message:  # Chat Controls/User Settings
@@ -1593,22 +2100,12 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     event_emitter = get_event_emitter(metadata)
     event_caller = get_event_call(metadata)
 
-    oauth_token = None
-    try:
-        if request.cookies.get("oauth_session_id", None):
-            oauth_token = await request.app.state.oauth_manager.get_oauth_token(
-                user.id,
-                request.cookies.get("oauth_session_id", None),
-            )
-    except Exception as e:
-        log.error(f"Error getting OAuth token: {e}")
-
     extra_params = {
         "__event_emitter__": event_emitter,
         "__event_call__": event_caller,
         "__user__": user.model_dump() if isinstance(user, UserModel) else {},
         "__metadata__": metadata,
-        "__oauth_token__": oauth_token,
+        "__oauth_token__": await get_system_oauth_token(request, user),
         "__request__": request,
         "__model__": model,
         "__chat_id__": metadata.get("chat_id"),
@@ -1738,12 +2235,10 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         raise e
 
     try:
-        filter_functions = [
-            Functions.get_function_by_id(filter_id)
-            for filter_id in get_sorted_filter_ids(
-                request, model, metadata.get("filter_ids", [])
-            )
-        ]
+        filter_ids = get_sorted_filter_ids(
+            request, model, metadata.get("filter_ids", [])
+        )
+        filter_functions = Functions.get_functions_by_ids(filter_ids)
 
         form_data, flags = await process_filter_functions(
             request=request,
@@ -1917,6 +2412,12 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                         for key, value in connection_headers.items():
                             headers[key] = value
 
+                    # Add user info headers if enabled
+                    if ENABLE_FORWARD_USER_INFO_HEADERS and user:
+                        headers = include_user_info_headers(headers, user)
+                        if metadata and metadata.get("chat_id"):
+                            headers[FORWARD_SESSION_INFO_HEADER_CHAT_ID] = metadata.get("chat_id")
+
                     mcp_clients[server_id] = MCPClient()
                     await mcp_clients[server_id].connect(
                         url=mcp_server_connection.get("url", ""),
@@ -2010,11 +2511,8 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     # Inject builtin tools for native function calling based on enabled features and model capability
     # Check if builtin_tools capability is enabled for this model (defaults to True if not specified)
     builtin_tools_enabled = (
-        model.get("info", {})
-        .get("meta", {})
-        .get("capabilities", {})
-        .get("builtin_tools", True)
-    )
+        model.get("info", {}).get("meta", {}).get("capabilities") or {}
+    ).get("builtin_tools", True)
     if (
         metadata.get("params", {}).get("function_calling") == "native"
         and builtin_tools_enabled
@@ -2058,11 +2556,8 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
     # Check if file context extraction is enabled for this model (default True)
     file_context_enabled = (
-        model.get("info", {})
-        .get("meta", {})
-        .get("capabilities", {})
-        .get("file_context", True)
-    )
+        model.get("info", {}).get("meta", {}).get("capabilities") or {}
+    ).get("file_context", True)
 
     if file_context_enabled:
         try:
@@ -2106,190 +2601,220 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     return form_data, metadata, events
 
 
-async def process_chat_response(
-    request, response, form_data, user, metadata, model, events, tasks
+def get_event_emitter_and_caller(metadata):
+    event_emitter = None
+    event_caller = None
+    if (
+        "session_id" in metadata
+        and metadata["session_id"]
+        and "chat_id" in metadata
+        and metadata["chat_id"]
+        and "message_id" in metadata
+        and metadata["message_id"]
+    ):
+        event_emitter = get_event_emitter(metadata)
+        event_caller = get_event_call(metadata)
+    return event_emitter, event_caller
+
+
+def build_chat_response_context(
+    request, form_data, user, model, metadata, tasks, events
 ):
-    async def background_tasks_handler():
-        message = None
-        messages = []
+    event_emitter, event_caller = get_event_emitter_and_caller(metadata)
+    return {
+        "request": request,
+        "form_data": form_data,
+        "user": user,
+        "model": model,
+        "metadata": metadata,
+        "tasks": tasks,
+        "events": events,
+        "event_emitter": event_emitter,
+        "event_caller": event_caller,
+    }
 
-        if "chat_id" in metadata and not metadata["chat_id"].startswith("local:"):
-            messages_map = Chats.get_messages_map_by_chat_id(metadata["chat_id"])
-            message = messages_map.get(metadata["message_id"]) if messages_map else None
 
-            message_list = get_message_list(messages_map, metadata["message_id"])
+def get_response_data(response):
+    if isinstance(response, list) and len(response) == 1:
+        # If the response is a single-item list, unwrap it #17213
+        response = response[0]
 
-            # Remove details tags and files from the messages.
-            # as get_message_list creates a new list, it does not affect
-            # the original messages outside of this handler
-
-            messages = []
-            for message in message_list:
-                content = message.get("content", "")
-                if isinstance(content, list):
-                    for item in content:
-                        if item.get("type") == "text":
-                            content = item["text"]
-                            break
-
-                if isinstance(content, str):
-                    content = re.sub(
-                        r"<details\b[^>]*>.*?<\/details>|!\[.*?\]\(.*?\)",
-                        "",
-                        content,
-                        flags=re.S | re.I,
-                    ).strip()
-
-                messages.append(
-                    {
-                        **message,
-                        "role": message.get(
-                            "role", "assistant"
-                        ),  # Safe fallback for missing role
-                        "content": content,
-                    }
-                )
+    if isinstance(response, JSONResponse):
+        if isinstance(response.body, bytes):
+            try:
+                response_data = json.loads(response.body.decode("utf-8", "replace"))
+            except json.JSONDecodeError:
+                response_data = {"error": {"detail": "Invalid JSON response"}}
         else:
-            # Local temp chat, get the model and message from the form_data
-            message = get_last_user_message_item(form_data.get("messages", []))
-            messages = form_data.get("messages", [])
-            if message:
-                message["model"] = form_data.get("model")
+            response_data = response
+    elif isinstance(response, dict):
+        response_data = response
+    else:
+        response_data = None
 
-        if message and "model" in message:
-            if tasks and messages:
-                if (
-                    TASKS.FOLLOW_UP_GENERATION in tasks
-                    and tasks[TASKS.FOLLOW_UP_GENERATION]
-                ):
-                    res = await generate_follow_ups(
-                        request,
-                        {
-                            "model": message["model"],
-                            "messages": messages,
-                            "message_id": metadata["message_id"],
-                            "chat_id": metadata["chat_id"],
-                        },
-                        user,
-                    )
+    return response, response_data
 
-                    if res and isinstance(res, dict):
-                        if len(res.get("choices", [])) == 1:
-                            response_message = res.get("choices", [])[0].get(
-                                "message", {}
-                            )
 
-                            follow_ups_string = response_message.get(
-                                "content"
-                            ) or response_message.get("reasoning_content", "")
-                        else:
-                            follow_ups_string = ""
+def merge_events_into_response(response_data, events):
+    if events and isinstance(events, list):
+        extra_response = {}
+        for event in events:
+            if isinstance(event, dict):
+                extra_response.update(event)
+            else:
+                extra_response[event] = True
 
-                        follow_ups_string = follow_ups_string[
-                            follow_ups_string.find("{") : follow_ups_string.rfind("}")
-                            + 1
-                        ]
+        return {
+            **extra_response,
+            **response_data,
+        }
+    return response_data
 
-                        try:
-                            follow_ups = json.loads(follow_ups_string).get(
-                                "follow_ups", []
-                            )
-                            await event_emitter(
-                                {
-                                    "type": "chat:message:follow_ups",
-                                    "data": {
-                                        "follow_ups": follow_ups,
-                                    },
-                                }
-                            )
 
-                            if not metadata.get("chat_id", "").startswith("local:"):
-                                Chats.upsert_message_to_chat_by_id_and_message_id(
-                                    metadata["chat_id"],
-                                    metadata["message_id"],
-                                    {
-                                        "followUps": follow_ups,
-                                    },
-                                )
+def build_response_object(response, response_data):
+    if isinstance(response, dict):
+        return response_data
+    if isinstance(response, JSONResponse):
+        return JSONResponse(
+            content=response_data,
+            headers=response.headers,
+            status_code=response.status_code,
+        )
+    return response
 
-                        except Exception as e:
-                            pass
 
-                if not metadata.get("chat_id", "").startswith(
-                    "local:"
-                ):  # Only update titles and tags for non-temp chats
-                    if TASKS.TITLE_GENERATION in tasks:
-                        user_message = get_last_user_message(messages)
-                        if user_message and len(user_message) > 100:
-                            user_message = user_message[:100] + "..."
+async def get_system_oauth_token(request, user):
+    oauth_token = None
+    try:
+        if request.cookies.get("oauth_session_id", None):
+            oauth_token = await request.app.state.oauth_manager.get_oauth_token(
+                user.id,
+                request.cookies.get("oauth_session_id", None),
+            )
+    except Exception as e:
+        log.error(f"Error getting OAuth token: {e}")
+    return oauth_token
 
-                        title = None
-                        if tasks[TASKS.TITLE_GENERATION]:
-                            res = await generate_title(
-                                request,
-                                {
-                                    "model": message["model"],
-                                    "messages": messages,
-                                    "chat_id": metadata["chat_id"],
+
+async def background_tasks_handler(ctx):
+    request = ctx["request"]
+    form_data = ctx["form_data"]
+    user = ctx["user"]
+    metadata = ctx["metadata"]
+    tasks = ctx["tasks"]
+    event_emitter = ctx["event_emitter"]
+
+    message = None
+    messages = []
+
+    if "chat_id" in metadata and not metadata["chat_id"].startswith("local:"):
+        messages_map = Chats.get_messages_map_by_chat_id(metadata["chat_id"])
+        message = messages_map.get(metadata["message_id"]) if messages_map else None
+
+        message_list = get_message_list(messages_map, metadata["message_id"])
+
+        # Remove details tags and files from the messages.
+        # as get_message_list creates a new list, it does not affect
+        # the original messages outside of this handler
+
+        messages = []
+        for message in message_list:
+            content = message.get("content", "")
+            if isinstance(content, list):
+                for item in content:
+                    if item.get("type") == "text":
+                        content = item["text"]
+                        break
+
+            if isinstance(content, str):
+                content = re.sub(
+                    r"<details\b[^>]*>.*?<\/details>|!\[.*?\]\(.*?\)",
+                    "",
+                    content,
+                    flags=re.S | re.I,
+                ).strip()
+
+            messages.append(
+                {
+                    **message,
+                    "role": message.get(
+                        "role", "assistant"
+                    ),  # Safe fallback for missing role
+                    "content": content,
+                }
+            )
+    else:
+        # Local temp chat, get the model and message from the form_data
+        message = get_last_user_message_item(form_data.get("messages", []))
+        messages = form_data.get("messages", [])
+        if message:
+            message["model"] = form_data.get("model")
+
+    if message and "model" in message:
+        if tasks and messages:
+            if (
+                TASKS.FOLLOW_UP_GENERATION in tasks
+                and tasks[TASKS.FOLLOW_UP_GENERATION]
+            ):
+                res = await generate_follow_ups(
+                    request,
+                    {
+                        "model": message["model"],
+                        "messages": messages,
+                        "message_id": metadata["message_id"],
+                        "chat_id": metadata["chat_id"],
+                    },
+                    user,
+                )
+
+                if res and isinstance(res, dict):
+                    if len(res.get("choices", [])) == 1:
+                        response_message = res.get("choices", [])[0].get("message", {})
+
+                        follow_ups_string = response_message.get(
+                            "content"
+                        ) or response_message.get("reasoning_content", "")
+                    else:
+                        follow_ups_string = ""
+
+                    follow_ups_string = follow_ups_string[
+                        follow_ups_string.find("{") : follow_ups_string.rfind("}") + 1
+                    ]
+
+                    try:
+                        follow_ups = json.loads(follow_ups_string).get("follow_ups", [])
+                        await event_emitter(
+                            {
+                                "type": "chat:message:follow_ups",
+                                "data": {
+                                    "follow_ups": follow_ups,
                                 },
-                                user,
-                            )
+                            }
+                        )
 
-                            if res and isinstance(res, dict):
-                                if len(res.get("choices", [])) == 1:
-                                    response_message = res.get("choices", [])[0].get(
-                                        "message", {}
-                                    )
-
-                                    title_string = (
-                                        response_message.get("content")
-                                        or response_message.get(
-                                            "reasoning_content",
-                                        )
-                                        or message.get("content", user_message)
-                                    )
-                                else:
-                                    title_string = ""
-
-                                title_string = title_string[
-                                    title_string.find("{") : title_string.rfind("}") + 1
-                                ]
-
-                                try:
-                                    title = json.loads(title_string).get(
-                                        "title", user_message
-                                    )
-                                except Exception as e:
-                                    title = ""
-
-                                if not title:
-                                    title = messages[0].get("content", user_message)
-
-                                Chats.update_chat_title_by_id(
-                                    metadata["chat_id"], title
-                                )
-
-                                await event_emitter(
-                                    {
-                                        "type": "chat:title",
-                                        "data": title,
-                                    }
-                                )
-
-                        if title == None and len(messages) == 2:
-                            title = messages[0].get("content", user_message)
-
-                            Chats.update_chat_title_by_id(metadata["chat_id"], title)
-
-                            await event_emitter(
+                        if not metadata.get("chat_id", "").startswith("local:"):
+                            Chats.upsert_message_to_chat_by_id_and_message_id(
+                                metadata["chat_id"],
+                                metadata["message_id"],
                                 {
-                                    "type": "chat:title",
-                                    "data": message.get("content", user_message),
-                                }
+                                    "followUps": follow_ups,
+                                },
                             )
 
-                    if TASKS.TAGS_GENERATION in tasks and tasks[TASKS.TAGS_GENERATION]:
-                        res = await generate_chat_tags(
+                    except Exception as e:
+                        pass
+
+            if not metadata.get("chat_id", "").startswith(
+                "local:"
+            ):  # Only update titles and tags for non-temp chats
+                if TASKS.TITLE_GENERATION in tasks:
+                    user_message = get_last_user_message(messages)
+                    if user_message and len(user_message) > 100:
+                        user_message = user_message[:100] + "..."
+
+                    title = None
+                    if tasks[TASKS.TITLE_GENERATION]:
+                        res = await generate_title(
                             request,
                             {
                                 "model": message["model"],
@@ -2305,221 +2830,242 @@ async def process_chat_response(
                                     "message", {}
                                 )
 
-                                tags_string = response_message.get(
-                                    "content"
-                                ) or response_message.get("reasoning_content", "")
+                                title_string = (
+                                    response_message.get("content")
+                                    or response_message.get(
+                                        "reasoning_content",
+                                    )
+                                    or message.get("content", user_message)
+                                )
                             else:
-                                tags_string = ""
+                                title_string = ""
 
-                            tags_string = tags_string[
-                                tags_string.find("{") : tags_string.rfind("}") + 1
+                            title_string = title_string[
+                                title_string.find("{") : title_string.rfind("}") + 1
                             ]
 
                             try:
-                                tags = json.loads(tags_string).get("tags", [])
-                                Chats.update_chat_tags_by_id(
-                                    metadata["chat_id"], tags, user
-                                )
-
-                                await event_emitter(
-                                    {
-                                        "type": "chat:tags",
-                                        "data": tags,
-                                    }
+                                title = json.loads(title_string).get(
+                                    "title", user_message
                                 )
                             except Exception as e:
-                                pass
+                                title = ""
 
-    event_emitter = None
-    event_caller = None
-    if (
-        "session_id" in metadata
-        and metadata["session_id"]
-        and "chat_id" in metadata
-        and metadata["chat_id"]
-        and "message_id" in metadata
-        and metadata["message_id"]
-    ):
-        event_emitter = get_event_emitter(metadata)
-        event_caller = get_event_call(metadata)
+                            if not title:
+                                title = messages[0].get("content", user_message)
 
-    # Non-streaming response
-    if not isinstance(response, StreamingResponse):
-        if event_emitter:
-            try:
-                if isinstance(response, dict) or isinstance(response, JSONResponse):
-                    if isinstance(response, list) and len(response) == 1:
-                        # If the response is a single-item list, unwrap it #17213
-                        response = response[0]
+                            Chats.update_chat_title_by_id(metadata["chat_id"], title)
 
-                    if isinstance(response, JSONResponse) and isinstance(
-                        response.body, bytes
-                    ):
-                        try:
-                            response_data = json.loads(
-                                response.body.decode("utf-8", "replace")
+                            await event_emitter(
+                                {
+                                    "type": "chat:title",
+                                    "data": title,
+                                }
                             )
-                        except json.JSONDecodeError:
-                            response_data = {
-                                "error": {"detail": "Invalid JSON response"}
+
+                    if title == None and len(messages) == 2:
+                        title = messages[0].get("content", user_message)
+
+                        Chats.update_chat_title_by_id(metadata["chat_id"], title)
+
+                        await event_emitter(
+                            {
+                                "type": "chat:title",
+                                "data": message.get("content", user_message),
                             }
-                    else:
-                        response_data = response
+                        )
 
-                    if "error" in response_data:
-                        error = response_data.get("error")
+                if TASKS.TAGS_GENERATION in tasks and tasks[TASKS.TAGS_GENERATION]:
+                    res = await generate_chat_tags(
+                        request,
+                        {
+                            "model": message["model"],
+                            "messages": messages,
+                            "chat_id": metadata["chat_id"],
+                        },
+                        user,
+                    )
 
-                        if isinstance(error, dict):
-                            error = error.get("detail", error)
+                    if res and isinstance(res, dict):
+                        if len(res.get("choices", [])) == 1:
+                            response_message = res.get("choices", [])[0].get(
+                                "message", {}
+                            )
+
+                            tags_string = response_message.get(
+                                "content"
+                            ) or response_message.get("reasoning_content", "")
                         else:
-                            error = str(error)
+                            tags_string = ""
 
-                        Chats.upsert_message_to_chat_by_id_and_message_id(
-                            metadata["chat_id"],
-                            metadata["message_id"],
-                            {
-                                "error": {"content": error},
+                        tags_string = tags_string[
+                            tags_string.find("{") : tags_string.rfind("}") + 1
+                        ]
+
+                        try:
+                            tags = json.loads(tags_string).get("tags", [])
+                            Chats.update_chat_tags_by_id(
+                                metadata["chat_id"], tags, user
+                            )
+
+                            await event_emitter(
+                                {
+                                    "type": "chat:tags",
+                                    "data": tags,
+                                }
+                            )
+                        except Exception as e:
+                            pass
+
+
+async def non_streaming_chat_response_handler(response, ctx):
+    request = ctx["request"]
+
+    user = ctx["user"]
+    metadata = ctx["metadata"]
+    events = ctx["events"]
+
+    event_emitter = ctx["event_emitter"]
+
+    response, response_data = get_response_data(response)
+    if response_data is None:
+        return response
+
+    if event_emitter:
+        try:
+            if "error" in response_data:
+                error = response_data.get("error")
+
+                if isinstance(error, dict):
+                    error = error.get("detail", error)
+                else:
+                    error = str(error)
+
+                Chats.upsert_message_to_chat_by_id_and_message_id(
+                    metadata["chat_id"],
+                    metadata["message_id"],
+                    {
+                        "error": {"content": error},
+                    },
+                )
+                if isinstance(error, str) or isinstance(error, dict):
+                    await event_emitter(
+                        {
+                            "type": "chat:message:error",
+                            "data": {"error": {"content": error}},
+                        }
+                    )
+
+            if "selected_model_id" in response_data:
+                Chats.upsert_message_to_chat_by_id_and_message_id(
+                    metadata["chat_id"],
+                    metadata["message_id"],
+                    {
+                        "selectedModelId": response_data["selected_model_id"],
+                    },
+                )
+
+            choices = response_data.get("choices", [])
+            if choices and choices[0].get("message", {}).get("content"):
+                content = response_data["choices"][0]["message"]["content"]
+
+                if content:
+                    await event_emitter(
+                        {
+                            "type": "chat:completion",
+                            "data": response_data,
+                        }
+                    )
+
+                    title = Chats.get_chat_title_by_id(metadata["chat_id"])
+
+                    # Use output from backend if provided (OR-compliant backends)
+                    response_output = response_data.get("output")
+
+                    await event_emitter(
+                        {
+                            "type": "chat:completion",
+                            "data": {
+                                "done": True,
+                                "content": content,
+                                **(
+                                    {"output": response_output}
+                                    if response_output
+                                    else {}
+                                ),
+                                "title": title,
                             },
-                        )
-                        if isinstance(error, str) or isinstance(error, dict):
-                            await event_emitter(
+                        }
+                    )
+
+                    # Save message in the database
+                    Chats.upsert_message_to_chat_by_id_and_message_id(
+                        metadata["chat_id"],
+                        metadata["message_id"],
+                        {
+                            "role": "assistant",
+                            "content": content,
+                            **({"output": response_output} if response_output else {}),
+                        },
+                    )
+
+                    # Send a webhook notification if the user is not active
+                    if not Users.is_user_active(user.id):
+                        webhook_url = Users.get_user_webhook_url_by_id(user.id)
+                        if webhook_url:
+                            await post_webhook(
+                                request.app.state.WEBUI_NAME,
+                                webhook_url,
+                                f"{title} - {request.app.state.config.WEBUI_URL}/c/{metadata['chat_id']}\n\n{content}",
                                 {
-                                    "type": "chat:message:error",
-                                    "data": {"error": {"content": error}},
-                                }
-                            )
-
-                    if "selected_model_id" in response_data:
-                        Chats.upsert_message_to_chat_by_id_and_message_id(
-                            metadata["chat_id"],
-                            metadata["message_id"],
-                            {
-                                "selectedModelId": response_data["selected_model_id"],
-                            },
-                        )
-
-                    choices = response_data.get("choices", [])
-                    if choices and choices[0].get("message", {}).get("content"):
-                        content = response_data["choices"][0]["message"]["content"]
-
-                        if content:
-                            await event_emitter(
-                                {
-                                    "type": "chat:completion",
-                                    "data": response_data,
-                                }
-                            )
-
-                            title = Chats.get_chat_title_by_id(metadata["chat_id"])
-
-                            await event_emitter(
-                                {
-                                    "type": "chat:completion",
-                                    "data": {
-                                        "done": True,
-                                        "content": content,
-                                        "title": title,
-                                    },
-                                }
-                            )
-
-                            # Save message in the database
-                            Chats.upsert_message_to_chat_by_id_and_message_id(
-                                metadata["chat_id"],
-                                metadata["message_id"],
-                                {
-                                    "role": "assistant",
-                                    "content": content,
+                                    "action": "chat",
+                                    "message": content,
+                                    "title": title,
+                                    "url": f"{request.app.state.config.WEBUI_URL}/c/{metadata['chat_id']}",
                                 },
                             )
 
-                            # Send a webhook notification if the user is not active
-                            if not Users.is_user_active(user.id):
-                                webhook_url = Users.get_user_webhook_url_by_id(user.id)
-                                if webhook_url:
-                                    await post_webhook(
-                                        request.app.state.WEBUI_NAME,
-                                        webhook_url,
-                                        f"{title} - {request.app.state.config.WEBUI_URL}/c/{metadata['chat_id']}\n\n{content}",
-                                        {
-                                            "action": "chat",
-                                            "message": content,
-                                            "title": title,
-                                            "url": f"{request.app.state.config.WEBUI_URL}/c/{metadata['chat_id']}",
-                                        },
-                                    )
+                    await background_tasks_handler(ctx)
 
-                            await background_tasks_handler()
+            response = build_response_object(
+                response, merge_events_into_response(response_data, events)
+            )
+        except Exception as e:
+            log.debug(f"Error occurred while processing request: {e}")
+            pass
 
-                    if events and isinstance(events, list):
-                        extra_response = {}
-                        for event in events:
-                            if isinstance(event, dict):
-                                extra_response.update(event)
-                            else:
-                                extra_response[event] = True
-
-                        response_data = {
-                            **extra_response,
-                            **response_data,
-                        }
-
-                    if isinstance(response, dict):
-                        response = response_data
-                    if isinstance(response, JSONResponse):
-                        response = JSONResponse(
-                            content=response_data,
-                            headers=response.headers,
-                            status_code=response.status_code,
-                        )
-
-            except Exception as e:
-                log.debug(f"Error occurred while processing request: {e}")
-                pass
-
-            return response
-        else:
-            if events and isinstance(events, list) and isinstance(response, dict):
-                extra_response = {}
-                for event in events:
-                    if isinstance(event, dict):
-                        extra_response.update(event)
-                    else:
-                        extra_response[event] = True
-
-                response = {
-                    **extra_response,
-                    **response,
-                }
-
-            return response
-
-    # Non standard response
-    if not any(
-        content_type in response.headers["Content-Type"]
-        for content_type in ["text/event-stream", "application/x-ndjson"]
-    ):
         return response
 
-    oauth_token = None
-    try:
-        if request.cookies.get("oauth_session_id", None):
-            oauth_token = await request.app.state.oauth_manager.get_oauth_token(
-                user.id,
-                request.cookies.get("oauth_session_id", None),
-            )
-    except Exception as e:
-        log.error(f"Error getting OAuth token: {e}")
+    if isinstance(response, dict):
+        response = merge_events_into_response(response_data, events)
+
+    return response
+
+
+async def streaming_chat_response_handler(response, ctx):
+    request = ctx["request"]
+
+    form_data = ctx["form_data"]
+
+    user = ctx["user"]
+    model = ctx["model"]
+
+    metadata = ctx["metadata"]
+    events = ctx["events"]
+
+    event_emitter = ctx["event_emitter"]
+    event_caller = ctx["event_caller"]
 
     extra_params = {
         "__event_emitter__": event_emitter,
         "__event_call__": event_caller,
         "__user__": user.model_dump() if isinstance(user, UserModel) else {},
         "__metadata__": metadata,
-        "__oauth_token__": oauth_token,
+        "__oauth_token__": await get_system_oauth_token(request, user),
         "__request__": request,
         "__model__": model,
     }
+
     filter_functions = [
         Functions.get_function_by_id(filter_id)
         for filter_id in get_sorted_filter_ids(
@@ -2527,24 +3073,10 @@ async def process_chat_response(
         )
     ]
 
-    # Streaming response
+    # Standard streaming response handler
     if event_emitter and event_caller:
         task_id = str(uuid4())  # Create a unique task ID.
         model_id = form_data.get("model", "")
-
-        def split_content_and_whitespace(content):
-            content_stripped = content.rstrip()
-            original_whitespace = (
-                content[len(content_stripped) :]
-                if len(content) > len(content_stripped)
-                else ""
-            )
-            return content_stripped, original_whitespace
-
-        def is_opening_code_block(content):
-            backtick_segments = content.split("```")
-            # Even number of segments means the last backticks are opening a new block
-            return len(backtick_segments) > 1 and len(backtick_segments) % 2 == 0
 
         # Handle as a background task
         async def response_handler(response, events):
@@ -2683,6 +3215,8 @@ async def process_chat_response(
 
                 return content.strip()
 
+                return content.strip()
+
             def convert_content_blocks_to_messages(content_blocks, raw=False):
                 messages = []
 
@@ -2722,6 +3256,127 @@ async def process_chat_response(
                         )
 
                 return messages
+
+            def convert_content_blocks_to_output(content_blocks):
+                """
+                Convert content_blocks to Open Responses-aligned output items.
+                See: https://openresponses.org/specification
+                """
+                output_items = []
+
+                def next_id(prefix):
+                    return f"{prefix}_{uuid4().hex[:24]}"
+
+                for block in content_blocks:
+                    block_type = block.get("type", "")
+                    # Use backend-provided ID if available, fallback to generated
+                    block_id = block.get("id")
+
+                    if block_type == "text":
+                        text_content = block.get("content", "").strip()
+                        if text_content:
+                            output_items.append(
+                                {
+                                    "type": "message",
+                                    "id": block_id or next_id("msg"),
+                                    "status": "completed",
+                                    "role": "assistant",
+                                    "content": [
+                                        {"type": "output_text", "text": text_content}
+                                    ],
+                                }
+                            )
+
+                    elif block_type == "tool_calls":
+                        tool_calls = block.get("content", [])
+                        results = block.get("results", [])
+
+                        # Emit function_call items
+                        for tool_call in tool_calls:
+                            call_id = tool_call.get("id", "")
+                            func = tool_call.get("function", {})
+                            output_items.append(
+                                {
+                                    "type": "function_call",
+                                    "id": call_id
+                                    or next_id(
+                                        "fc"
+                                    ),  # Use call_id as item id if available
+                                    "call_id": call_id,
+                                    "name": func.get("name", ""),
+                                    "arguments": func.get("arguments", "{}"),
+                                    "status": "completed" if results else "in_progress",
+                                }
+                            )
+
+                        # Emit function_call_output items
+                        for result in results:
+                            output_items.append(
+                                {
+                                    "type": "function_call_output",
+                                    "id": result.get("id") or next_id("fco"),
+                                    "call_id": result.get("tool_call_id", ""),
+                                    "output": [
+                                        {
+                                            "type": "input_text",
+                                            "text": result.get("content", ""),
+                                        }
+                                    ],
+                                    "status": "completed",
+                                    **(
+                                        {"files": result.get("files")}
+                                        if result.get("files")
+                                        else {}
+                                    ),
+                                    **(
+                                        {"embeds": result.get("embeds")}
+                                        if result.get("embeds")
+                                        else {}
+                                    ),
+                                }
+                            )
+
+                    elif block_type == "reasoning":
+                        reasoning_content = block.get("content", "").strip()
+                        duration = block.get("duration")
+                        output_items.append(
+                            {
+                                "type": "reasoning",
+                                "id": block_id or next_id("r"),
+                                "status": (
+                                    "completed"
+                                    if duration is not None
+                                    else "in_progress"
+                                ),
+                                "content": (
+                                    [{"type": "output_text", "text": reasoning_content}]
+                                    if reasoning_content
+                                    else None
+                                ),
+                                "summary": None,
+                            }
+                        )
+
+                    elif block_type == "code_interpreter":
+                        code = block.get("content", "")
+                        output_val = block.get("output")
+                        attrs = block.get("attributes", {})
+                        output_items.append(
+                            {
+                                "type": "open_webui:code_interpreter",
+                                "id": block_id or next_id("ci"),
+                                "status": (
+                                    "completed"
+                                    if output_val is not None
+                                    else "in_progress"
+                                ),
+                                "lang": attrs.get("lang", ""),
+                                "code": code,
+                                "output": output_val,
+                            }
+                        )
+
+                return output_items
 
             def tag_content_handler(content_type, tags, content, content_blocks):
                 end_flag = False
@@ -2920,12 +3575,33 @@ async def process_chat_response(
                 else last_assistant_message if last_assistant_message else ""
             )
 
+            # Initialize output: use existing from message if continuing, else create new
+            existing_output = message.get("output") if message else None
+            if existing_output:
+                output = existing_output
+            else:
+                # Only create an initial message item if there is content to initialize with
+                if content:
+                    output = [
+                        {
+                            "type": "message",
+                            "id": output_id("msg"),
+                            "status": "in_progress",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": content}],
+                        }
+                    ]
+                else:
+                    output = []
+
+            # Keep content_blocks for backward compatibility during transition
             content_blocks = [
                 {
                     "type": "text",
                     "content": content,
                 }
             ]
+            usage = None
 
             reasoning_tags_param = metadata.get("params", {}).get("reasoning_tags")
             DETECT_REASONING_TAGS = reasoning_tags_param is not False
@@ -2966,6 +3642,8 @@ async def process_chat_response(
                 async def stream_body_handler(response, form_data):
                     nonlocal content
                     nonlocal content_blocks
+                    nonlocal usage
+                    nonlocal output
 
                     response_tool_calls = []
 
@@ -3044,13 +3722,41 @@ async def process_chat_response(
                                             "data": data,
                                         }
                                     )
+                                # Check for Responses API events (type field starts with "response.")
+                                elif data.get("type", "").startswith("response."):
+                                    output, response_metadata = (
+                                        handle_responses_streaming_event(data, output)
+                                    )
+
+                                    processed_data = {
+                                        "output": output,
+                                        "content": serialize_output(output),
+                                    }
+
+                                    # print(data)
+                                    # print(processed_data)
+
+                                    # Merge any metadata (usage, done, etc.)
+                                    if response_metadata:
+                                        processed_data.update(response_metadata)
+
+                                    await event_emitter(
+                                        {
+                                            "type": "chat:completion",
+                                            "data": processed_data,
+                                        }
+                                    )
+                                    continue
                                 else:
                                     choices = data.get("choices", [])
 
-                                    # 17421
-                                    usage = data.get("usage", {}) or {}
-                                    usage.update(data.get("timings", {}))  # llama.cpp
-                                    if usage:
+                                    # Normalize usage data to standard format
+                                    raw_usage = data.get("usage", {}) or {}
+                                    raw_usage.update(
+                                        data.get("timings", {})
+                                    )  # llama.cpp
+                                    if raw_usage:
+                                        usage = normalize_usage(raw_usage)
                                         await event_emitter(
                                             {
                                                 "type": "chat:completion",
@@ -3331,13 +4037,15 @@ async def process_chat_response(
 
                                         if ENABLE_REALTIME_CHAT_SAVE:
                                             # Save message in the database
+                                            output = convert_content_blocks_to_output(
+                                                content_blocks
+                                            )
                                             Chats.upsert_message_to_chat_by_id_and_message_id(
                                                 metadata["chat_id"],
                                                 metadata["message_id"],
                                                 {
-                                                    "content": serialize_content_blocks(
-                                                        content_blocks
-                                                    ),
+                                                    "content": serialize_output(output),
+                                                    "output": output,
                                                 },
                                             )
                                         else:
@@ -3422,11 +4130,13 @@ async def process_chat_response(
                         }
                     )
 
+                    output = convert_content_blocks_to_output(content_blocks)
                     await event_emitter(
                         {
                             "type": "chat:completion",
                             "data": {
-                                "content": serialize_content_blocks(content_blocks),
+                                "content": serialize_output(output),
+                                "output": output,
                             },
                         }
                     )
@@ -3601,11 +4311,13 @@ async def process_chat_response(
                             )
                         tool_call_sources.clear()
 
+                    output = convert_content_blocks_to_output(content_blocks)
                     await event_emitter(
                         {
                             "type": "chat:completion",
                             "data": {
-                                "content": serialize_content_blocks(content_blocks),
+                                "content": serialize_output(output),
+                                "output": output,
                             },
                         }
                     )
@@ -3647,11 +4359,13 @@ async def process_chat_response(
                         and retries < MAX_RETRIES
                     ):
 
+                        output = convert_content_blocks_to_output(content_blocks)
                         await event_emitter(
                             {
                                 "type": "chat:completion",
                                 "data": {
-                                    "content": serialize_content_blocks(content_blocks),
+                                    "content": serialize_output(output),
+                                    "output": output,
                                 },
                             }
                         )
@@ -3663,13 +4377,16 @@ async def process_chat_response(
                         try:
                             if content_blocks[-1]["attributes"].get("type") == "code":
                                 code = content_blocks[-1]["content"]
+                                # Strip markdown fences if model included them
+                                code = strip_markdown_code_fences(code)
+
                                 if CODE_INTERPRETER_BLOCKED_MODULES:
                                     blocking_code = textwrap.dedent(
                                         f"""
                                         import builtins
-
+    
                                         BLOCKED_MODULES = {CODE_INTERPRETER_BLOCKED_MODULES}
-
+    
                                         _real_import = builtins.__import__
                                         def restricted_import(name, globals=None, locals=None, fromlist=(), level=0):
                                             if name.split('.')[0] in BLOCKED_MODULES:
@@ -3679,7 +4396,7 @@ async def process_chat_response(
                                                         f"Direct import of module {{name}} is restricted."
                                                     )
                                             return _real_import(name, globals, locals, fromlist, level)
-
+    
                                         builtins.__import__ = restricted_import
                                     """
                                     )
@@ -3778,11 +4495,13 @@ async def process_chat_response(
                             }
                         )
 
+                        output = convert_content_blocks_to_output(content_blocks)
                         await event_emitter(
                             {
                                 "type": "chat:completion",
                                 "data": {
-                                    "content": serialize_content_blocks(content_blocks),
+                                    "content": serialize_output(output),
+                                    "output": output,
                                 },
                             }
                         )
@@ -3819,9 +4538,11 @@ async def process_chat_response(
                             break
 
                 title = Chats.get_chat_title_by_id(metadata["chat_id"])
+                output = convert_content_blocks_to_output(content_blocks)
                 data = {
                     "done": True,
-                    "content": serialize_content_blocks(content_blocks),
+                    "content": serialize_output(output),
+                    "output": output,
                     "title": title,
                 }
 
@@ -3831,8 +4552,16 @@ async def process_chat_response(
                         metadata["chat_id"],
                         metadata["message_id"],
                         {
-                            "content": serialize_content_blocks(content_blocks),
+                            "content": serialize_output(output),
+                            "output": output,
+                            **({"usage": usage} if usage else {}),
                         },
+                    )
+                elif usage:
+                    Chats.upsert_message_to_chat_by_id_and_message_id(
+                        metadata["chat_id"],
+                        metadata["message_id"],
+                        {"usage": usage},
                     )
 
                 # Send a webhook notification if the user is not active
@@ -3858,18 +4587,20 @@ async def process_chat_response(
                     }
                 )
 
-                await background_tasks_handler()
+                await background_tasks_handler(ctx)
             except asyncio.CancelledError:
                 log.warning("Task was cancelled!")
                 await event_emitter({"type": "chat:tasks:cancel"})
 
                 if not ENABLE_REALTIME_CHAT_SAVE:
                     # Save message in the database
+                    output = convert_content_blocks_to_output(content_blocks)
                     Chats.upsert_message_to_chat_by_id_and_message_id(
                         metadata["chat_id"],
                         metadata["message_id"],
                         {
-                            "content": serialize_content_blocks(content_blocks),
+                            "content": serialize_output(output),
+                            "output": output,
                         },
                     )
 
@@ -3913,3 +4644,19 @@ async def process_chat_response(
             headers=dict(response.headers),
             background=response.background,
         )
+
+
+async def process_chat_response(response, ctx):
+    # Non-streaming response
+    if not isinstance(response, StreamingResponse):
+        return await non_streaming_chat_response_handler(response, ctx)
+
+    # Non standard response
+    if not any(
+        content_type in response.headers["Content-Type"]
+        for content_type in ["text/event-stream", "application/x-ndjson"]
+    ):
+        return response
+
+    # Streaming response
+    return await streaming_chat_response_handler(response, ctx)

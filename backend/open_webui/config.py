@@ -257,7 +257,7 @@ class AppConfig:
             self._state[key].value = value
             self._state[key].save()
 
-            if self._redis:
+            if self._redis and ENABLE_PERSISTENT_CONFIG:
                 redis_key = f"{self._redis_key_prefix}:config:{key}"
                 self._redis.set(redis_key, json.dumps(self._state[key].value))
 
@@ -265,8 +265,8 @@ class AppConfig:
         if key not in self._state:
             raise AttributeError(f"Config key '{key}' not found")
 
-        # If Redis is available, check for an updated value
-        if self._redis:
+        # If Redis is available and persistent config is enabled, check for an updated value
+        if self._redis and ENABLE_PERSISTENT_CONFIG:
             redis_key = f"{self._redis_key_prefix}:config:{key}"
             redis_value = self._redis.get(redis_key)
 
@@ -2246,9 +2246,13 @@ ENABLE_QDRANT_MULTITENANCY_MODE = (
 QDRANT_COLLECTION_PREFIX = os.environ.get("QDRANT_COLLECTION_PREFIX", "open-webui")
 
 WEAVIATE_HTTP_HOST = os.environ.get("WEAVIATE_HTTP_HOST", "")
+WEAVIATE_GRPC_HOST = os.environ.get("WEAVIATE_GRPC_HOST", "")
 WEAVIATE_HTTP_PORT = int(os.environ.get("WEAVIATE_HTTP_PORT", "8080"))
 WEAVIATE_GRPC_PORT = int(os.environ.get("WEAVIATE_GRPC_PORT", "50051"))
 WEAVIATE_API_KEY = os.environ.get("WEAVIATE_API_KEY")
+WEAVIATE_HTTP_SECURE = os.environ.get("WEAVIATE_HTTP_SECURE", "false").lower() == "true"
+WEAVIATE_GRPC_SECURE = os.environ.get("WEAVIATE_GRPC_SECURE", "false").lower() == "true"
+WEAVIATE_SKIP_INIT_CHECKS = os.environ.get("WEAVIATE_SKIP_INIT_CHECKS", "false").lower() == "true"
 
 # OpenSearch
 OPENSEARCH_URI = os.environ.get("OPENSEARCH_URI", "https://localhost:9200")
@@ -2803,6 +2807,12 @@ PDF_EXTRACT_IMAGES = PersistentConfig(
     "PDF_EXTRACT_IMAGES",
     "rag.pdf_extract_images",
     os.environ.get("PDF_EXTRACT_IMAGES", "False").lower() == "true",
+)
+
+PDF_LOADER_MODE = PersistentConfig(
+    "PDF_LOADER_MODE",
+    "rag.pdf_loader_mode",
+    os.environ.get("PDF_LOADER_MODE", "page"),
 )
 
 RAG_EMBEDDING_MODEL = PersistentConfig(
@@ -3415,6 +3425,24 @@ EXTERNAL_WEB_LOADER_API_KEY = PersistentConfig(
     os.environ.get("EXTERNAL_WEB_LOADER_API_KEY", ""),
 )
 
+YANDEX_WEB_SEARCH_URL = PersistentConfig(
+    "YANDEX_WEB_SEARCH_URL",
+    "rag.web.search.yandex_web_search_url",
+    os.environ.get("YANDEX_WEB_SEARCH_URL", ""),
+)
+
+YANDEX_WEB_SEARCH_API_KEY = PersistentConfig(
+    "YANDEX_WEB_SEARCH_API_KEY",
+    "rag.web.search.yandex_web_search_api_key",
+    os.environ.get("YANDEX_WEB_SEARCH_API_KEY", ""),
+)
+
+YANDEX_WEB_SEARCH_CONFIG = PersistentConfig(
+    "YANDEX_WEB_SEARCH_CONFIG",
+    "rag.web.search.yandex_web_search_config",
+    os.environ.get("YANDEX_WEB_SEARCH_CONFIG", ""),
+)
+
 ####################################
 # Images
 ####################################
@@ -3436,6 +3464,12 @@ IMAGE_GENERATION_MODEL = PersistentConfig(
     "image_generation.model",
     os.getenv("IMAGE_GENERATION_MODEL", ""),
 )
+
+# Regex pattern for models that support IMAGE_SIZE = "auto".
+IMAGE_AUTO_SIZE_MODELS_REGEX_PATTERN = os.getenv("IMAGE_AUTO_SIZE_MODELS_REGEX_PATTERN", "^gpt-image")
+
+# Regex pattern for models that return URLs instead of base64 data.
+IMAGE_URL_RESPONSE_MODELS_REGEX_PATTERN = os.getenv("IMAGE_URL_RESPONSE_MODELS_REGEX_PATTERN", "^gpt-image")
 
 IMAGE_SIZE = PersistentConfig(
     "IMAGE_SIZE", "image_generation.size", os.getenv("IMAGE_SIZE", "512x512")
