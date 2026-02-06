@@ -118,7 +118,7 @@ from open_webui.routers.retrieval import (
 
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from open_webui.internal.db import ScopedSession, engine, get_async_session
+from open_webui.internal.db import ScopedSession, engine, get_async_session, validate_all_schemas, SchemaValidationError
 
 from open_webui.models.functions import Functions
 from open_webui.models.models import Models
@@ -637,6 +637,18 @@ async def lifespan(app: FastAPI):
 
     app.state.instance_id = INSTANCE_ID
     start_logger()
+
+    # Validate database schema matches models before starting
+    # This catches migration issues early, preventing runtime errors
+    log.info("Validating database schema...")
+    try:
+        validate_all_schemas(fail_fast=True)
+        log.info("Database schema validation passed")
+    except SchemaValidationError as e:
+        log.error(f"Database schema validation failed: {e}")
+        log.error("The application cannot start with schema mismatches.")
+        log.error("Please run 'alembic upgrade head' to apply pending migrations.")
+        raise
 
     if RESET_CONFIG_ON_START:
         await async_reset_config()

@@ -234,13 +234,21 @@ class ProcessingTaskUpdate(BaseModel):
 
 class ProcessingMetrics(BaseModel):
     """Aggregate metrics for the processing dashboard."""
-    queue_depth: int = 0
-    active_count: int = 0
-    completed_today: int = 0
-    failed_today: int = 0
-    cancelled_today: int = 0
-    avg_processing_time_seconds: Optional[float] = None
-    chunks_per_second: Optional[float] = None
+    # Counts by status (matches frontend expectations)
+    total_tasks: int = 0
+    queued: int = 0
+    processing: int = 0
+    completed: int = 0
+    failed: int = 0
+    cancelled: int = 0
+
+    # Performance metrics
+    avg_processing_time: Optional[float] = None  # in seconds
+    success_rate: Optional[float] = None  # percentage 0-100
+
+    # Volume metrics
+    documents_processed: int = 0
+    chunks_processed: int = 0
 
 
 class ProcessingTaskListResponse(BaseModel):
@@ -730,6 +738,8 @@ class ProcessingTasksTable:
         """Get aggregate processing metrics."""
         async with get_async_db_context(db) as db:
             try:
+                from sqlalchemy import func
+
                 # Default to last 24 hours if not specified
                 if since_timestamp is None:
                     since_timestamp = int(time.time()) - 86400

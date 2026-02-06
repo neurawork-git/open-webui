@@ -102,6 +102,7 @@ async def embedding_with_retry(
     initial_delay: float = None,
     max_delay: float = None,
     backoff_factor: float = None,
+    tracker=None,
     **kwargs
 ) -> list[list[float]]:
     """
@@ -114,6 +115,7 @@ async def embedding_with_retry(
         initial_delay: Initial delay between retries in seconds (default from env)
         max_delay: Maximum delay between retries in seconds (default from env)
         backoff_factor: Multiplier for exponential backoff (default from env)
+        tracker: Optional ProcessingTaskTracker for cancellation checking
         **kwargs: Additional arguments to pass to embedding_func
 
     Returns:
@@ -121,7 +123,10 @@ async def embedding_with_retry(
 
     Raises:
         EmbeddingError: If all retries fail or validation fails
+        ProcessingCancelledException: If task is cancelled during retry
     """
+    from open_webui.models.processing import ProcessingCancelledException
+
     max_retries = max_retries if max_retries is not None else EMBEDDING_MAX_RETRIES
     initial_delay = initial_delay if initial_delay is not None else EMBEDDING_RETRY_INITIAL_DELAY
     max_delay = max_delay if max_delay is not None else EMBEDDING_RETRY_MAX_DELAY
@@ -132,6 +137,11 @@ async def embedding_with_retry(
     delay = initial_delay
 
     for attempt in range(max_retries + 1):
+        # Check for cancellation before each attempt
+        if tracker and tracker.is_cancelled():
+            log.info(f"[Embedding] Cancelled at retry attempt {attempt}")
+            raise ProcessingCancelledException("Processing cancelled during embedding retry")
+
         try:
             if attempt > 0:
                 log.warning(f"[Embedding] Retry {attempt}/{max_retries} after {delay:.1f}s")
@@ -1168,11 +1178,12 @@ def get_embedding_function(
 
         return async_embedding_function
     elif embedding_engine in ["ollama", "openai", "azure_openai"]:
-        embedding_function = lambda query, prefix=None, user=None: generate_embeddings(
+        embedding_function = lambda query, prefix=None, user=None, tracker=None: generate_embeddings(
             engine=embedding_engine,
             model=embedding_model,
             text=query,
             prefix=prefix,
+            tracker=tracker,
             url=url,
             key=key,
             user=user,
@@ -1201,7 +1212,7 @@ def get_embedding_function(
                         async def generate_batch_with_semaphore(batch):
                             async with semaphore:
                                 return await embedding_function(
-                                    batch, prefix=prefix, user=user
+                                    batch, prefix=prefix, user=user, tracker=tracker
                                 )
 
                         tasks = [
@@ -1209,7 +1220,7 @@ def get_embedding_function(
                         ]
                     else:
                         tasks = [
-                            embedding_function(batch, prefix=prefix, user=user)
+                            embedding_function(batch, prefix=prefix, user=user, tracker=tracker)
                             for batch in batches
                         ]
                     batch_results = await asyncio.gather(*tasks, return_exceptions=False)
@@ -1243,7 +1254,7 @@ def get_embedding_function(
                 log.info(f"[Embedding] {doc_label}: completed {len(embeddings)} chunks")
                 return embeddings
             else:
-                return await embedding_function(query, prefix, user)
+                return await embedding_function(query, prefix, user, tracker)
 
         return async_embedding_function
     else:
@@ -1255,6 +1266,7 @@ async def generate_embeddings(
     model: str,
     text: Union[str, list[str]],
     prefix: Union[str, None] = None,
+    tracker=None,
     **kwargs,
 ):
     """
@@ -1270,6 +1282,7 @@ async def generate_embeddings(
         model: The model name/deployment ID
         text: Single string or list of strings to embed
         prefix: Optional prefix to prepend to texts
+        tracker: Optional ProcessingTaskTracker for cancellation checking
         **kwargs: Additional arguments (url, key, user, azure_api_version)
 
     Returns:
@@ -1277,6 +1290,7 @@ async def generate_embeddings(
 
     Raises:
         EmbeddingError: If all retry attempts fail
+        ProcessingCancelledException: If task is cancelled
     """
     url = kwargs.get("url", "")
     key = kwargs.get("key", "")
@@ -1310,7 +1324,7 @@ async def generate_embeddings(
         if engine == "ollama":
             embeddings = await embedding_with_retry(
                 embedding_func=agenerate_ollama_batch_embeddings,
-                texts=texts_list,
+                texts=non_empty_texts,
                 model=model,
                 url=url,
                 key=key,
@@ -1320,7 +1334,7 @@ async def generate_embeddings(
         elif engine == "openai":
             embeddings = await embedding_with_retry(
                 embedding_func=agenerate_openai_batch_embeddings,
-                texts=texts_list,
+                texts=non_empty_texts,
                 model=model,
                 url=url,
                 key=key,
@@ -1331,7 +1345,7 @@ async def generate_embeddings(
             azure_api_version = kwargs.get("azure_api_version", "")
             embeddings = await embedding_with_retry(
                 embedding_func=agenerate_azure_openai_batch_embeddings,
-                texts=texts_list,
+                texts=non_empty_texts,
                 model=model,
                 url=url,
                 key=key,
