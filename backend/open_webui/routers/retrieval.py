@@ -1608,13 +1608,39 @@ class ProcessFileForm(BaseModel):
     collection_name: Optional[str] = None
 
 
-@router.post("/process/file")
 def process_file(
     request: Request,
     form_data: ProcessFileForm,
     user=Depends(get_verified_user),
     db: Session = Depends(get_session),
     tracker: Optional[ProcessingTaskTracker] = None,
+):
+    """
+    Process a file and save its content to the vector database.
+
+    This is the internal implementation that can accept an optional tracker.
+    Use process_file_endpoint for the API endpoint.
+    """
+    return _process_file_impl(request, form_data, user, db, tracker)
+
+
+@router.post("/process/file")
+def process_file_endpoint(
+    request: Request,
+    form_data: ProcessFileForm,
+    user=Depends(get_verified_user),
+    db: Session = Depends(get_session),
+):
+    """API endpoint for processing a file."""
+    return _process_file_impl(request, form_data, user, db, None)
+
+
+def _process_file_impl(
+    request: Request,
+    form_data: ProcessFileForm,
+    user,
+    db: Session,
+    tracker: Optional[ProcessingTaskTracker],
 ):
     """
     Process a file and save its content to the vector database.

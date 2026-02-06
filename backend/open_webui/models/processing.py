@@ -134,7 +134,8 @@ class ProcessingTask(Base):
     cancelled_at = Column(BigInteger, nullable=True)
 
     # Additional metadata (scraper type, URL, content size, etc.)
-    metadata = Column(JSONField, nullable=True)
+    # Note: 'metadata' is reserved in SQLAlchemy, so we use 'task_metadata'
+    task_metadata = Column(JSONField, nullable=True)
 
 
 ####################
@@ -175,7 +176,7 @@ class ProcessingTaskModel(BaseModel):
     cancelled_by: Optional[str] = None
     cancelled_at: Optional[int] = None
 
-    metadata: Optional[dict] = None
+    task_metadata: Optional[dict] = None
 
 
 class ProcessingTaskResponse(BaseModel):
@@ -215,7 +216,7 @@ class ProcessingTaskCreate(BaseModel):
     document_type: str = DocumentType.FILE_UPLOAD.value
     chat_id: Optional[str] = None
     knowledge_id: Optional[str] = None
-    metadata: Optional[dict] = None
+    task_metadata: Optional[dict] = None
 
 
 class ProcessingTaskUpdate(BaseModel):
@@ -227,18 +228,26 @@ class ProcessingTaskUpdate(BaseModel):
     current_batch: Optional[int] = None
     error_message: Optional[str] = None
     error_details: Optional[dict] = None
-    metadata: Optional[dict] = None
+    task_metadata: Optional[dict] = None
 
 
 class ProcessingMetrics(BaseModel):
     """Aggregate metrics for the processing dashboard."""
-    queue_depth: int = 0
-    active_count: int = 0
-    completed_today: int = 0
-    failed_today: int = 0
-    cancelled_today: int = 0
-    avg_processing_time_seconds: Optional[float] = None
-    chunks_per_second: Optional[float] = None
+    # Counts by status (matches frontend expectations)
+    total_tasks: int = 0
+    queued: int = 0
+    processing: int = 0
+    completed: int = 0
+    failed: int = 0
+    cancelled: int = 0
+
+    # Performance metrics
+    avg_processing_time: Optional[float] = None  # in seconds
+    success_rate: Optional[float] = None  # percentage 0-100
+
+    # Volume metrics
+    documents_processed: int = 0
+    chunks_processed: int = 0
 
 
 class ProcessingTaskListResponse(BaseModel):
@@ -321,7 +330,7 @@ class ProcessingTasksTable:
                     stage=ProcessingStage.QUEUED.value,
                     progress=0.0,
                     created_at=now,
-                    metadata=form_data.metadata,
+                    task_metadata=form_data.task_metadata,
                 )
 
                 db.add(task)
@@ -467,8 +476,8 @@ class ProcessingTasksTable:
                     task.error_message = form_data.error_message
                 if form_data.error_details is not None:
                     task.error_details = form_data.error_details
-                if form_data.metadata is not None:
-                    task.metadata = {**(task.metadata or {}), **form_data.metadata}
+                if form_data.task_metadata is not None:
+                    task.task_metadata = {**(task.task_metadata or {}), **form_data.task_metadata}
 
                 db.commit()
                 db.refresh(task)
@@ -702,26 +711,27 @@ class ProcessingTasksTable:
         """Get aggregate processing metrics."""
         with get_db_context(db) as db:
             try:
+                from sqlalchemy import func
+
                 # Default to last 24 hours if not specified
                 if since_timestamp is None:
                     since_timestamp = int(time.time()) - 86400
 
-                # Queue depth (queued tasks)
-                queue_depth = (
+                # Count by status (current counts, not time-filtered)
+                queued = (
                     db.query(ProcessingTask)
                     .filter(ProcessingTask.status == ProcessingStatus.QUEUED.value)
                     .count()
                 )
 
-                # Active count (processing tasks)
-                active_count = (
+                processing = (
                     db.query(ProcessingTask)
                     .filter(ProcessingTask.status == ProcessingStatus.PROCESSING.value)
                     .count()
                 )
 
-                # Completed today
-                completed_today = (
+                # Completed in time range
+                completed = (
                     db.query(ProcessingTask)
                     .filter(
                         ProcessingTask.status == ProcessingStatus.COMPLETED.value,
@@ -730,8 +740,8 @@ class ProcessingTasksTable:
                     .count()
                 )
 
-                # Failed today
-                failed_today = (
+                # Failed in time range
+                failed = (
                     db.query(ProcessingTask)
                     .filter(
                         ProcessingTask.status == ProcessingStatus.FAILED.value,
@@ -740,8 +750,8 @@ class ProcessingTasksTable:
                     .count()
                 )
 
-                # Cancelled today
-                cancelled_today = (
+                # Cancelled in time range
+                cancelled = (
                     db.query(ProcessingTask)
                     .filter(
                         ProcessingTask.status == ProcessingStatus.CANCELLED.value,
@@ -750,8 +760,10 @@ class ProcessingTasksTable:
                     .count()
                 )
 
-                # Average processing time (for completed tasks)
-                from sqlalchemy import func
+                # Total tasks in time range
+                total_tasks = queued + processing + completed + failed + cancelled
+
+                # Average processing time (for completed tasks in time range)
                 avg_result = (
                     db.query(func.avg(ProcessingTask.completed_at - ProcessingTask.started_at))
                     .filter(
@@ -764,13 +776,35 @@ class ProcessingTasksTable:
                 )
                 avg_processing_time = float(avg_result) if avg_result else None
 
+                # Success rate: completed / (completed + failed) * 100
+                terminal_count = completed + failed
+                success_rate = (completed / terminal_count * 100) if terminal_count > 0 else None
+
+                # Documents processed (completed tasks count)
+                documents_processed = completed
+
+                # Chunks processed (sum of processed_chunks for completed tasks)
+                chunks_result = (
+                    db.query(func.sum(ProcessingTask.processed_chunks))
+                    .filter(
+                        ProcessingTask.status == ProcessingStatus.COMPLETED.value,
+                        ProcessingTask.completed_at >= since_timestamp
+                    )
+                    .scalar()
+                )
+                chunks_processed = int(chunks_result) if chunks_result else 0
+
                 return ProcessingMetrics(
-                    queue_depth=queue_depth,
-                    active_count=active_count,
-                    completed_today=completed_today,
-                    failed_today=failed_today,
-                    cancelled_today=cancelled_today,
-                    avg_processing_time_seconds=avg_processing_time,
+                    total_tasks=total_tasks,
+                    queued=queued,
+                    processing=processing,
+                    completed=completed,
+                    failed=failed,
+                    cancelled=cancelled,
+                    avg_processing_time=avg_processing_time,
+                    success_rate=success_rate,
+                    documents_processed=documents_processed,
+                    chunks_processed=chunks_processed,
                 )
             except Exception as e:
                 log.exception(f"Error getting metrics: {e}")

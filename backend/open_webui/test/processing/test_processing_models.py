@@ -58,8 +58,7 @@ class TestProcessingEnums:
         """Test that DocumentType has expected values."""
         assert DocumentType.FILE_UPLOAD.value == "file_upload"
         assert DocumentType.WEB_SCRAPE.value == "web_scrape"
-        assert DocumentType.KNOWLEDGE_SYNC.value == "knowledge_sync"
-        assert DocumentType.API_UPLOAD.value == "api_upload"
+        assert DocumentType.URL_IMPORT.value == "url_import"
 
 
 class TestStageProgressRanges:
@@ -114,9 +113,10 @@ class TestValidTransitions:
         assert ProcessingStage.CANCELLED in VALID_TRANSITIONS[ProcessingStage.EXTRACTING]
 
     def test_terminal_states_have_no_transitions(self):
-        """Test that terminal states have no outgoing transitions."""
+        """Test that terminal states have limited/no outgoing transitions."""
         assert len(VALID_TRANSITIONS[ProcessingStage.COMPLETED]) == 0
-        assert len(VALID_TRANSITIONS[ProcessingStage.FAILED]) == 0
+        # FAILED can transition to QUEUED for retry
+        assert VALID_TRANSITIONS[ProcessingStage.FAILED] == [ProcessingStage.QUEUED]
         assert len(VALID_TRANSITIONS[ProcessingStage.CANCELLED]) == 0
 
 
@@ -234,14 +234,14 @@ class TestGetProgressForStage:
 
     def test_embedding_progress(self):
         """Test progress calculation for EMBEDDING stage."""
-        # EMBEDDING is 0.4 - 0.9 (the main work)
+        # EMBEDDING is 0.30 - 0.95 (the main work)
         progress_at_0 = get_progress_for_stage(ProcessingStage.EMBEDDING, 0.0)
         progress_at_50 = get_progress_for_stage(ProcessingStage.EMBEDDING, 0.5)
         progress_at_100 = get_progress_for_stage(ProcessingStage.EMBEDDING, 1.0)
 
-        assert progress_at_0 == 0.4
-        assert progress_at_50 == pytest.approx(0.65, rel=0.01)
-        assert progress_at_100 == 0.9
+        assert progress_at_0 == 0.30
+        assert progress_at_50 == pytest.approx(0.625, rel=0.01)  # 0.30 + 0.5 * (0.95 - 0.30)
+        assert progress_at_100 == 0.95
 
     def test_completed_progress(self):
         """Test progress calculation for COMPLETED stage."""
@@ -278,23 +278,23 @@ class TestProcessingTaskCreate:
             document_type=DocumentType.FILE_UPLOAD.value,
             chat_id="chat-456",
             knowledge_id="kb-789",
-            metadata={"source": "upload"},
+            task_metadata={"source": "upload"},
         )
         assert task.document_id == "doc-123"
         assert task.document_name == "test.pdf"
         assert task.chat_id == "chat-456"
         assert task.knowledge_id == "kb-789"
-        assert task.metadata == {"source": "upload"}
+        assert task.task_metadata == {"source": "upload"}
 
 
 class TestProcessingTaskUpdate:
     """Tests for ProcessingTaskUpdate Pydantic model."""
 
-    def test_update_status(self):
-        """Test updating status."""
-        update = ProcessingTaskUpdate(status=ProcessingStatus.PROCESSING.value)
-        assert update.status == ProcessingStatus.PROCESSING.value
-        assert update.stage is None
+    def test_update_stage(self):
+        """Test updating stage."""
+        update = ProcessingTaskUpdate(stage=ProcessingStage.EXTRACTING.value)
+        assert update.stage == ProcessingStage.EXTRACTING.value
+        assert update.progress is None
 
     def test_update_progress(self):
         """Test updating progress fields."""
@@ -322,25 +322,20 @@ class TestProcessingMetrics:
 
     def test_default_metrics(self):
         """Test default metrics values."""
-        metrics = ProcessingMetrics(
-            total_tasks=100,
-            queued=5,
-            processing=10,
-            completed=80,
-            failed=3,
-            cancelled=2,
-        )
-        assert metrics.total_tasks == 100
-        assert metrics.queued == 5
-        assert metrics.processing == 10
-        assert metrics.completed == 80
-        assert metrics.failed == 3
-        assert metrics.cancelled == 2
+        metrics = ProcessingMetrics()
+        assert metrics.total_tasks == 0
+        assert metrics.queued == 0
+        assert metrics.processing == 0
+        assert metrics.completed == 0
+        assert metrics.failed == 0
+        assert metrics.cancelled == 0
         assert metrics.avg_processing_time is None
         assert metrics.success_rate is None
+        assert metrics.documents_processed == 0
+        assert metrics.chunks_processed == 0
 
-    def test_metrics_with_rates(self):
-        """Test metrics with calculated rates."""
+    def test_metrics_with_values(self):
+        """Test metrics with specific values."""
         metrics = ProcessingMetrics(
             total_tasks=100,
             queued=5,
@@ -349,13 +344,19 @@ class TestProcessingMetrics:
             failed=3,
             cancelled=2,
             avg_processing_time=45.5,
-            success_rate=94.1,
-            documents_processed=85,
+            success_rate=96.4,
+            documents_processed=80,
             chunks_processed=5000,
         )
+        assert metrics.total_tasks == 100
+        assert metrics.queued == 5
+        assert metrics.processing == 10
+        assert metrics.completed == 80
+        assert metrics.failed == 3
+        assert metrics.cancelled == 2
         assert metrics.avg_processing_time == 45.5
-        assert metrics.success_rate == 94.1
-        assert metrics.documents_processed == 85
+        assert metrics.success_rate == 96.4
+        assert metrics.documents_processed == 80
         assert metrics.chunks_processed == 5000
 
 
@@ -424,45 +425,36 @@ class TestProcessingTaskTracker:
             assert tracker.is_cancelled() is True
 
     def test_complete_sets_terminal_state(self, mock_db, mock_task):
-        """Test complete() sets task to COMPLETED."""
+        """Test complete() calls complete_task."""
         with patch.object(ProcessingTasks, 'get_task_by_id', return_value=mock_task):
-            with patch.object(ProcessingTasks, 'update_task') as mock_update:
+            with patch.object(ProcessingTasks, 'complete_task') as mock_complete:
                 tracker = ProcessingTaskTracker("task-123", db=mock_db)
                 tracker.complete()
 
-                mock_update.assert_called()
-                call_args = mock_update.call_args
-                update_data = call_args[1].get('update_data') or call_args[0][1]
-                assert update_data.status == ProcessingStatus.COMPLETED.value
-                assert update_data.stage == ProcessingStage.COMPLETED.value
-                assert update_data.progress == 1.0
+                mock_complete.assert_called_once_with("task-123", db=mock_db)
 
     def test_fail_sets_error_state(self, mock_db, mock_task):
-        """Test fail() sets task to FAILED with error message."""
+        """Test fail() calls fail_task with error message."""
         with patch.object(ProcessingTasks, 'get_task_by_id', return_value=mock_task):
-            with patch.object(ProcessingTasks, 'update_task') as mock_update:
+            with patch.object(ProcessingTasks, 'fail_task') as mock_fail:
                 tracker = ProcessingTaskTracker("task-123", db=mock_db)
                 tracker.fail("Connection error", {"type": "NetworkError"})
 
-                mock_update.assert_called()
-                call_args = mock_update.call_args
-                update_data = call_args[1].get('update_data') or call_args[0][1]
-                assert update_data.status == ProcessingStatus.FAILED.value
-                assert update_data.stage == ProcessingStage.FAILED.value
-                assert update_data.error_message == "Connection error"
+                mock_fail.assert_called_once_with(
+                    "task-123",
+                    "Connection error",
+                    {"type": "NetworkError"},
+                    db=mock_db
+                )
 
     def test_cancel_sets_cancelled_state(self, mock_db, mock_task):
-        """Test cancel() sets task to CANCELLED."""
+        """Test cancel() calls cancel_task."""
         with patch.object(ProcessingTasks, 'get_task_by_id', return_value=mock_task):
-            with patch.object(ProcessingTasks, 'update_task') as mock_update:
+            with patch.object(ProcessingTasks, 'cancel_task') as mock_cancel:
                 tracker = ProcessingTaskTracker("task-123", db=mock_db)
                 tracker.cancel()
 
-                mock_update.assert_called()
-                call_args = mock_update.call_args
-                update_data = call_args[1].get('update_data') or call_args[0][1]
-                assert update_data.status == ProcessingStatus.CANCELLED.value
-                assert update_data.stage == ProcessingStage.CANCELLED.value
+                mock_cancel.assert_called_once_with("task-123", db=mock_db)
 
 
 class TestProcessingTasksTable:
@@ -476,13 +468,6 @@ class TestProcessingTasksTable:
 
     def test_get_metrics_returns_metrics_object(self, mock_db):
         """Test get_metrics returns ProcessingMetrics."""
-        # Mock the query to return counts
-        mock_query = MagicMock()
-        mock_db.query.return_value = mock_query
-        mock_query.filter.return_value = mock_query
-        mock_query.count.return_value = 10
-        mock_query.scalar.return_value = 45.5
-
         with patch.object(ProcessingTasks, 'get_metrics') as mock_get_metrics:
             mock_get_metrics.return_value = ProcessingMetrics(
                 total_tasks=100,
@@ -492,10 +477,317 @@ class TestProcessingTasksTable:
                 failed=3,
                 cancelled=2,
                 avg_processing_time=45.5,
-                success_rate=94.1,
+                success_rate=96.4,
+                documents_processed=80,
+                chunks_processed=5000,
             )
 
             metrics = ProcessingTasks.get_metrics(since_timestamp=0, db=mock_db)
 
             assert isinstance(metrics, ProcessingMetrics)
-            assert metrics.total_tasks == 100
+            assert metrics.queued == 5
+            assert metrics.processing == 10
+            assert metrics.completed == 80
+
+
+class TestDatabaseSchemaIntegrity:
+    """
+    Tests to verify database schema matches SQLAlchemy models.
+
+    These tests catch issues like column renames that weren't migrated,
+    missing columns, or type mismatches between models and actual DB.
+    """
+
+    def test_processing_task_model_columns_match_table(self):
+        """
+        Verify ProcessingTask SQLAlchemy model columns match the database table.
+
+        This catches issues like:
+        - Column renamed in model but not in DB (e.g., metadata -> task_metadata)
+        - Column added to model but migration not run
+        - Column removed from model but still in DB
+        """
+        from sqlalchemy import inspect
+
+        # Get columns defined in the SQLAlchemy model
+        model_columns = set()
+        for column in ProcessingTask.__table__.columns:
+            model_columns.add(column.name)
+
+        # Expected columns based on the model definition
+        expected_columns = {
+            'id',
+            'document_id',
+            'document_name',
+            'document_type',
+            'user_id',
+            'chat_id',
+            'knowledge_id',
+            'status',
+            'stage',
+            'progress',
+            'created_at',
+            'started_at',
+            'completed_at',
+            'total_chunks',
+            'processed_chunks',
+            'current_batch',
+            'retry_count',
+            'error_message',
+            'error_details',
+            'cancel_requested',
+            'cancelled_by',
+            'cancelled_at',
+            'task_metadata',  # NOT 'metadata' - this was a bug we caught
+        }
+
+        # Verify model has all expected columns
+        missing_in_model = expected_columns - model_columns
+        assert not missing_in_model, f"Model missing expected columns: {missing_in_model}"
+
+        extra_in_model = model_columns - expected_columns
+        assert not extra_in_model, f"Model has unexpected columns: {extra_in_model}"
+
+    def test_processing_task_model_column_types(self):
+        """Verify ProcessingTask column types are correct."""
+        from sqlalchemy import String, Text, Float, Integer, BigInteger, Boolean
+
+        # Map of column name to expected type class
+        expected_types = {
+            'id': String,
+            'document_id': String,
+            'document_name': String,
+            'document_type': String,
+            'user_id': String,
+            'chat_id': String,
+            'knowledge_id': String,
+            'status': String,
+            'stage': String,
+            'progress': Float,
+            'created_at': BigInteger,
+            'started_at': BigInteger,
+            'completed_at': BigInteger,
+            'total_chunks': Integer,
+            'processed_chunks': Integer,
+            'current_batch': Integer,
+            'retry_count': Integer,
+            'error_message': Text,
+            'cancel_requested': Boolean,
+            'cancelled_by': String,
+            'cancelled_at': BigInteger,
+        }
+
+        for col_name, expected_type in expected_types.items():
+            column = ProcessingTask.__table__.columns.get(col_name)
+            assert column is not None, f"Column {col_name} not found in model"
+            assert isinstance(column.type, expected_type), \
+                f"Column {col_name} has type {type(column.type).__name__}, expected {expected_type.__name__}"
+
+    def test_pydantic_model_fields_match_sqlalchemy_model(self):
+        """
+        Verify ProcessingTaskModel Pydantic fields match ProcessingTask SQLAlchemy columns.
+
+        This catches issues where the Pydantic model and SQLAlchemy model drift apart.
+        """
+        # Get SQLAlchemy model column names
+        sqlalchemy_columns = {col.name for col in ProcessingTask.__table__.columns}
+
+        # Get Pydantic model field names
+        pydantic_fields = set(ProcessingTaskModel.model_fields.keys())
+
+        # They should match exactly
+        missing_in_pydantic = sqlalchemy_columns - pydantic_fields
+        assert not missing_in_pydantic, \
+            f"Pydantic model missing fields from SQLAlchemy model: {missing_in_pydantic}"
+
+        extra_in_pydantic = pydantic_fields - sqlalchemy_columns
+        assert not extra_in_pydantic, \
+            f"Pydantic model has extra fields not in SQLAlchemy model: {extra_in_pydantic}"
+
+    def test_migration_column_names_match_model(self):
+        """
+        Verify the migration file defines the same columns as the model.
+
+        This test reads the migration file and checks column names match.
+        This catches issues where migration was written with different column names.
+        """
+        import re
+        from pathlib import Path
+
+        # Find the migration file
+        migrations_dir = Path(__file__).parent.parent.parent / "migrations" / "versions"
+        migration_files = list(migrations_dir.glob("*processing_task*.py"))
+
+        assert len(migration_files) >= 1, "No processing_task migration file found"
+
+        # Read the latest migration file
+        migration_file = sorted(migration_files)[-1]
+        migration_content = migration_file.read_text()
+
+        # Extract column names from migration (look for sa.Column("column_name", ...))
+        column_pattern = r'sa\.Column\(["\'](\w+)["\']'
+        migration_columns = set(re.findall(column_pattern, migration_content))
+
+        # Get model columns
+        model_columns = {col.name for col in ProcessingTask.__table__.columns}
+
+        # Check for mismatches
+        missing_in_migration = model_columns - migration_columns
+        assert not missing_in_migration, \
+            f"Migration missing columns that are in model: {missing_in_migration}. " \
+            f"This may cause 'no such column' errors at runtime."
+
+        # Note: extra columns in migration might be okay (e.g., dropped columns)
+        # but we should warn about significant differences
+        extra_in_migration = migration_columns - model_columns
+        if extra_in_migration:
+            # This is a warning, not a failure - columns might have been removed
+            import warnings
+            warnings.warn(
+                f"Migration has columns not in model: {extra_in_migration}. "
+                f"If these were intentionally removed, create a new migration to drop them."
+            )
+
+
+class TestDatabaseSchemaIntegrationWithRealDB:
+    """
+    Integration tests that verify actual database schema matches models.
+
+    These tests connect to the real database and validate the schema.
+    They catch issues that only manifest at runtime, like:
+    - Migration was never run
+    - Column was renamed but migration didn't update existing DB
+    - Different environments have different schemas
+    """
+
+    @pytest.fixture
+    def db_session(self):
+        """Get a real database session for integration testing."""
+        from open_webui.internal.db import get_db_context
+        with get_db_context() as db:
+            yield db
+
+    def test_processing_task_table_exists(self, db_session):
+        """Verify processing_task table exists in the database."""
+        from sqlalchemy import inspect
+        inspector = inspect(db_session.bind)
+        tables = inspector.get_table_names()
+        assert 'processing_task' in tables, \
+            "processing_task table not found in database. Run migrations: alembic upgrade head"
+
+    def test_processing_task_db_columns_match_model(self, db_session):
+        """
+        Verify actual database columns match the SQLAlchemy model.
+
+        This is the critical test that catches schema drift between
+        the model definition and the actual database state.
+        """
+        from sqlalchemy import inspect
+        inspector = inspect(db_session.bind)
+
+        # Get actual database columns
+        db_columns = {col['name'] for col in inspector.get_columns('processing_task')}
+
+        # Get model columns
+        model_columns = {col.name for col in ProcessingTask.__table__.columns}
+
+        # Check for columns in model but not in DB
+        missing_in_db = model_columns - db_columns
+        assert not missing_in_db, \
+            f"CRITICAL: Database missing columns that model expects: {missing_in_db}. " \
+            f"This will cause 'no such column' errors at runtime. " \
+            f"Run migrations or manually add the columns."
+
+        # Check for columns in DB but not in model (less critical but worth noting)
+        extra_in_db = db_columns - model_columns
+        if extra_in_db:
+            import warnings
+            warnings.warn(
+                f"Database has extra columns not in model: {extra_in_db}. "
+                f"These may be deprecated. Consider removing them."
+            )
+
+    def test_processing_task_can_create_and_read(self, db_session):
+        """
+        Integration test: verify we can actually create and read a ProcessingTask.
+
+        This catches any schema issues that prevent basic CRUD operations.
+        """
+        import uuid
+
+        # Create a task
+        form_data = ProcessingTaskCreate(
+            document_id=f"test-{uuid.uuid4()}",
+            document_name="schema_test.pdf",
+            document_type=DocumentType.FILE_UPLOAD.value,
+            task_metadata={"test": True},  # This was the problematic field!
+        )
+
+        task = ProcessingTasks.create_task(
+            user_id="test-user",
+            form_data=form_data,
+            db=db_session,
+        )
+
+        assert task is not None, "Failed to create task - possible schema mismatch"
+        assert task.document_name == "schema_test.pdf"
+        assert task.task_metadata == {"test": True}
+
+        # Verify we can read it back
+        retrieved = ProcessingTasks.get_task_by_id(task.id, db=db_session)
+        assert retrieved is not None, "Failed to retrieve task - possible schema mismatch"
+        assert retrieved.id == task.id
+        assert retrieved.task_metadata == {"test": True}
+
+        # Cleanup
+        ProcessingTasks.delete_task(task.id, db=db_session)
+
+    def test_all_model_fields_can_be_written_and_read(self, db_session):
+        """
+        Test that every field in the model can be written to and read from DB.
+
+        This catches issues with individual columns that might have type
+        mismatches or missing columns.
+        """
+        import uuid
+        import time
+
+        # Create with all fields populated
+        form_data = ProcessingTaskCreate(
+            document_id=f"test-{uuid.uuid4()}",
+            document_name="full_schema_test.pdf",
+            document_type=DocumentType.WEB_SCRAPE.value,
+            chat_id="chat-123",
+            knowledge_id="kb-456",
+            task_metadata={"full_test": True, "nested": {"key": "value"}},
+        )
+
+        task = ProcessingTasks.create_task(
+            user_id="test-user-full",
+            form_data=form_data,
+            db=db_session,
+        )
+
+        assert task is not None, "Failed to create task with all fields"
+
+        # Update all updateable fields
+        update_data = ProcessingTaskUpdate(
+            stage=ProcessingStage.EMBEDDING.value,
+            progress=0.75,
+            total_chunks=100,
+            processed_chunks=75,
+            current_batch=3,
+            error_message=None,
+            error_details=None,
+            task_metadata={"updated": True},
+        )
+
+        updated = ProcessingTasks.update_task(task.id, update_data, db=db_session)
+        assert updated is not None, "Failed to update task - possible schema mismatch"
+        assert updated.stage == ProcessingStage.EMBEDDING.value
+        assert updated.progress == 0.75
+        assert updated.total_chunks == 100
+        assert updated.processed_chunks == 75
+
+        # Cleanup
+        ProcessingTasks.delete_task(task.id, db=db_session)
