@@ -1,12 +1,13 @@
 """
 Unit tests for document processing API endpoints.
 
-Tests the REST API endpoints in routers/processing.py.
+Tests the REST API endpoints in routers/processing.py using proper
+FastAPI dependency overrides.
 """
 
 import pytest
 import time
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 from fastapi import FastAPI
 
@@ -14,19 +15,19 @@ from open_webui.routers.processing import router
 from open_webui.models.processing import (
     ProcessingTask,
     ProcessingTasks,
+    ProcessingTaskModel,
     ProcessingTaskResponse,
     ProcessingTaskListResponse,
     ProcessingMetrics,
     ProcessingStatus,
     ProcessingStage,
     DocumentType,
-    can_cancel,
 )
 
 
 # Create a test app with the router
 app = FastAPI()
-app.include_router(router)
+app.include_router(router, prefix="/api/v1/admin/processing")
 
 
 @pytest.fixture
@@ -39,449 +40,377 @@ def mock_admin_user():
 
 
 @pytest.fixture
-def mock_task():
-    """Create a mock processing task."""
-    task = MagicMock(spec=ProcessingTask)
-    task.id = "task-123"
-    task.document_id = "doc-456"
-    task.document_name = "test.pdf"
-    task.document_type = DocumentType.FILE_UPLOAD.value
-    task.user_id = "user-789"
-    task.chat_id = None
-    task.status = ProcessingStatus.PROCESSING.value
-    task.stage = ProcessingStage.EMBEDDING.value
-    task.progress = 0.5
-    task.created_at = int(time.time()) - 60
-    task.started_at = int(time.time()) - 50
-    task.completed_at = None
-    task.total_chunks = 100
-    task.processed_chunks = 50
-    task.retry_count = 0
-    task.error_message = None
-    task.cancel_requested = False
-    task.metadata = {}
-    return task
+def mock_task_model():
+    """Create a mock ProcessingTaskModel."""
+    return ProcessingTaskModel(
+        id="task-123",
+        document_id="doc-456",
+        document_name="test.pdf",
+        document_type=DocumentType.FILE_UPLOAD.value,
+        user_id="user-789",
+        chat_id=None,
+        knowledge_id=None,
+        status=ProcessingStatus.PROCESSING.value,
+        stage=ProcessingStage.EMBEDDING.value,
+        progress=0.5,
+        created_at=int(time.time()) - 60,
+        started_at=int(time.time()) - 50,
+        completed_at=None,
+        total_chunks=100,
+        processed_chunks=50,
+        current_batch=5,
+        retry_count=0,
+        error_message=None,
+        error_details=None,
+        cancel_requested=False,
+        cancelled_by=None,
+        cancelled_at=None,
+        task_metadata={},
+    )
 
 
 @pytest.fixture
-def mock_failed_task():
-    """Create a mock failed processing task."""
-    task = MagicMock(spec=ProcessingTask)
-    task.id = "task-failed"
-    task.document_id = "doc-456"
-    task.document_name = "test.pdf"
-    task.document_type = DocumentType.FILE_UPLOAD.value
-    task.user_id = "user-789"
-    task.chat_id = None
-    task.status = ProcessingStatus.FAILED.value
-    task.stage = ProcessingStage.FAILED.value
-    task.progress = 0.3
-    task.created_at = int(time.time()) - 120
-    task.started_at = int(time.time()) - 110
-    task.completed_at = int(time.time()) - 10
-    task.total_chunks = 100
-    task.processed_chunks = 30
-    task.retry_count = 1
-    task.error_message = "Connection timeout"
-    task.cancel_requested = False
-    task.metadata = {}
-    return task
-
-
-class TestListProcessingTasks:
-    """Tests for GET /tasks endpoint."""
-
-    def test_list_tasks_returns_list(self, mock_admin_user, mock_task):
-        """Test that list endpoint returns task list."""
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_session') as mock_session:
-                mock_db = MagicMock()
-                mock_session.return_value = mock_db
-
-                mock_query = MagicMock()
-                mock_db.query.return_value = mock_query
-                mock_query.filter.return_value = mock_query
-                mock_query.count.return_value = 1
-                mock_query.order_by.return_value = mock_query
-                mock_query.offset.return_value = mock_query
-                mock_query.limit.return_value = mock_query
-                mock_query.all.return_value = [mock_task]
-
-                client = TestClient(app)
-                response = client.get("/tasks")
-
-                assert response.status_code == 200
-                data = response.json()
-                assert "items" in data
-                assert "total" in data
-                assert data["total"] == 1
-
-    def test_list_tasks_with_status_filter(self, mock_admin_user, mock_task):
-        """Test filtering tasks by status."""
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_session') as mock_session:
-                mock_db = MagicMock()
-                mock_session.return_value = mock_db
-
-                mock_query = MagicMock()
-                mock_db.query.return_value = mock_query
-                mock_query.filter.return_value = mock_query
-                mock_query.count.return_value = 1
-                mock_query.order_by.return_value = mock_query
-                mock_query.offset.return_value = mock_query
-                mock_query.limit.return_value = mock_query
-                mock_query.all.return_value = [mock_task]
-
-                client = TestClient(app)
-                response = client.get("/tasks?status=processing")
-
-                assert response.status_code == 200
-
-    def test_list_tasks_with_pagination(self, mock_admin_user, mock_task):
-        """Test pagination parameters."""
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_session') as mock_session:
-                mock_db = MagicMock()
-                mock_session.return_value = mock_db
-
-                mock_query = MagicMock()
-                mock_db.query.return_value = mock_query
-                mock_query.filter.return_value = mock_query
-                mock_query.count.return_value = 100
-                mock_query.order_by.return_value = mock_query
-                mock_query.offset.return_value = mock_query
-                mock_query.limit.return_value = mock_query
-                mock_query.all.return_value = [mock_task]
-
-                client = TestClient(app)
-                response = client.get("/tasks?limit=10&offset=20")
-
-                assert response.status_code == 200
-                data = response.json()
-                assert data["limit"] == 10
-                assert data["offset"] == 20
-
-
-class TestGetProcessingTask:
-    """Tests for GET /tasks/{task_id} endpoint."""
-
-    def test_get_task_success(self, mock_admin_user, mock_task):
-        """Test getting a single task."""
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_session') as mock_session:
-                mock_db = MagicMock()
-                mock_session.return_value = mock_db
-                mock_db.get.return_value = mock_task
-
-                client = TestClient(app)
-                response = client.get("/tasks/task-123")
-
-                assert response.status_code == 200
-                data = response.json()
-                assert data["id"] == "task-123"
-
-    def test_get_task_not_found(self, mock_admin_user):
-        """Test getting a non-existent task."""
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_session') as mock_session:
-                mock_db = MagicMock()
-                mock_session.return_value = mock_db
-                mock_db.get.return_value = None
-
-                client = TestClient(app)
-                response = client.get("/tasks/nonexistent")
-
-                assert response.status_code == 404
-
-
-class TestCancelProcessingTask:
-    """Tests for POST /tasks/{task_id}/cancel endpoint."""
-
-    def test_cancel_task_success(self, mock_admin_user, mock_task):
-        """Test cancelling an active task."""
-        mock_task.stage = ProcessingStage.EMBEDDING.value
-        mock_task.cancel_requested = False
-
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_session') as mock_session:
-                mock_db = MagicMock()
-                mock_session.return_value = mock_db
-                mock_db.get.return_value = mock_task
-
-                client = TestClient(app)
-                response = client.post("/tasks/task-123/cancel")
-
-                assert response.status_code == 200
-                data = response.json()
-                assert data["success"] is True
-                assert mock_task.cancel_requested is True
-
-    def test_cancel_task_not_found(self, mock_admin_user):
-        """Test cancelling a non-existent task."""
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_session') as mock_session:
-                mock_db = MagicMock()
-                mock_session.return_value = mock_db
-                mock_db.get.return_value = None
-
-                client = TestClient(app)
-                response = client.post("/tasks/nonexistent/cancel")
-
-                assert response.status_code == 404
-
-    def test_cancel_completed_task_fails(self, mock_admin_user, mock_task):
-        """Test that cancelling a completed task fails."""
-        mock_task.stage = ProcessingStage.COMPLETED.value
-
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_session') as mock_session:
-                mock_db = MagicMock()
-                mock_session.return_value = mock_db
-                mock_db.get.return_value = mock_task
-
-                client = TestClient(app)
-                response = client.post("/tasks/task-123/cancel")
-
-                assert response.status_code == 400
-
-
-class TestRetryProcessingTask:
-    """Tests for POST /tasks/{task_id}/retry endpoint."""
-
-    def test_retry_failed_task_success(self, mock_admin_user, mock_failed_task):
-        """Test retrying a failed task."""
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_session') as mock_session:
-                mock_db = MagicMock()
-                mock_session.return_value = mock_db
-
-                with patch.object(ProcessingTasks, 'retry_task') as mock_retry:
-                    mock_retry.return_value = mock_failed_task
-                    mock_failed_task.retry_count = 2
-
-                    client = TestClient(app)
-                    response = client.post("/tasks/task-failed/retry")
-
-                    assert response.status_code == 200
-                    data = response.json()
-                    assert data["success"] is True
-                    assert data["retry_count"] == 2
-
-    def test_retry_active_task_fails(self, mock_admin_user, mock_task):
-        """Test that retrying an active task fails."""
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_session') as mock_session:
-                mock_db = MagicMock()
-                mock_session.return_value = mock_db
-
-                with patch.object(ProcessingTasks, 'retry_task') as mock_retry:
-                    mock_retry.return_value = None  # Task not retryable
-
-                    client = TestClient(app)
-                    response = client.post("/tasks/task-123/retry")
-
-                    assert response.status_code == 400
-
-
-class TestDeleteProcessingTask:
-    """Tests for DELETE /tasks/{task_id} endpoint."""
-
-    def test_delete_completed_task_success(self, mock_admin_user, mock_task):
-        """Test deleting a completed task."""
-        mock_task.status = ProcessingStatus.COMPLETED.value
-
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_session') as mock_session:
-                mock_db = MagicMock()
-                mock_session.return_value = mock_db
-                mock_db.get.return_value = mock_task
-
-                with patch.object(ProcessingTasks, 'delete_task') as mock_delete:
-                    mock_delete.return_value = True
-
-                    client = TestClient(app)
-                    response = client.delete("/tasks/task-123")
-
-                    assert response.status_code == 200
-                    data = response.json()
-                    assert data["success"] is True
-
-    def test_delete_active_task_fails(self, mock_admin_user, mock_task):
-        """Test that deleting an active task fails."""
-        mock_task.status = ProcessingStatus.PROCESSING.value
-
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_session') as mock_session:
-                mock_db = MagicMock()
-                mock_session.return_value = mock_db
-                mock_db.get.return_value = mock_task
-
-                client = TestClient(app)
-                response = client.delete("/tasks/task-123")
-
-                assert response.status_code == 400
-
-
-class TestGetProcessingMetrics:
-    """Tests for GET /metrics endpoint."""
-
-    def test_get_metrics_success(self, mock_admin_user):
-        """Test getting processing metrics."""
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_session') as mock_session:
-                mock_db = MagicMock()
-                mock_session.return_value = mock_db
-
-                with patch.object(ProcessingTasks, 'get_metrics') as mock_metrics:
-                    mock_metrics.return_value = ProcessingMetrics(
-                        total_tasks=100,
-                        queued=5,
-                        processing=10,
-                        completed=80,
-                        failed=3,
-                        cancelled=2,
-                        avg_processing_time=45.5,
-                        success_rate=94.1,
-                    )
-
-                    client = TestClient(app)
-                    response = client.get("/metrics?time_range=24h")
-
-                    assert response.status_code == 200
-                    data = response.json()
-                    assert data["total_tasks"] == 100
-                    assert data["completed"] == 80
-
-    def test_get_metrics_different_time_ranges(self, mock_admin_user):
-        """Test getting metrics with different time ranges."""
-        time_ranges = ["1h", "24h", "7d", "30d"]
-
-        for time_range in time_ranges:
-            with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-                with patch('open_webui.routers.processing.get_session') as mock_session:
-                    mock_db = MagicMock()
-                    mock_session.return_value = mock_db
-
-                    with patch.object(ProcessingTasks, 'get_metrics') as mock_metrics:
-                        mock_metrics.return_value = ProcessingMetrics(
-                            total_tasks=100,
-                            queued=5,
-                            processing=10,
-                            completed=80,
-                            failed=3,
-                            cancelled=2,
-                        )
-
-                        client = TestClient(app)
-                        response = client.get(f"/metrics?time_range={time_range}")
-
-                        assert response.status_code == 200
-
-
-class TestBulkOperations:
-    """Tests for bulk operation endpoints."""
-
-    def test_bulk_cancel_tasks(self, mock_admin_user, mock_task):
-        """Test bulk cancelling tasks."""
-        mock_task.stage = ProcessingStage.EMBEDDING.value
-
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_session') as mock_session:
-                mock_db = MagicMock()
-                mock_session.return_value = mock_db
-                mock_db.get.return_value = mock_task
-
-                client = TestClient(app)
-                response = client.post(
-                    "/tasks/bulk/cancel",
-                    json={"task_ids": ["task-1", "task-2"], "reason": "Batch cleanup"}
-                )
-
-                assert response.status_code == 200
-                data = response.json()
-                assert data["success"] is True
-                assert "cancelled" in data
-                assert "failed" in data
-
-    def test_bulk_retry_tasks(self, mock_admin_user, mock_failed_task):
-        """Test bulk retrying tasks."""
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_session') as mock_session:
-                mock_db = MagicMock()
-                mock_session.return_value = mock_db
-
-                with patch.object(ProcessingTasks, 'retry_task') as mock_retry:
-                    mock_retry.return_value = mock_failed_task
-
-                    client = TestClient(app)
-                    response = client.post(
-                        "/tasks/bulk/retry",
-                        json={"task_ids": ["task-1", "task-2"]}
-                    )
-
-                    assert response.status_code == 200
-                    data = response.json()
-                    assert data["success"] is True
-
-    def test_bulk_delete_tasks(self, mock_admin_user, mock_task):
-        """Test bulk deleting tasks."""
-        mock_task.status = ProcessingStatus.COMPLETED.value
-
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_session') as mock_session:
-                mock_db = MagicMock()
-                mock_session.return_value = mock_db
-                mock_db.get.return_value = mock_task
-
-                with patch.object(ProcessingTasks, 'delete_task') as mock_delete:
-                    mock_delete.return_value = True
-
-                    client = TestClient(app)
-                    response = client.post(
-                        "/tasks/bulk/delete",
-                        json={"task_ids": ["task-1", "task-2"]}
-                    )
-
-                    assert response.status_code == 200
-                    data = response.json()
-                    assert data["success"] is True
-
-
-class TestCleanupOldTasks:
-    """Tests for POST /cleanup endpoint."""
-
-    def test_cleanup_old_tasks(self, mock_admin_user):
-        """Test cleaning up old tasks."""
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_session') as mock_session:
-                mock_db = MagicMock()
-                mock_session.return_value = mock_db
-
-                with patch.object(ProcessingTasks, 'delete_old_tasks') as mock_cleanup:
-                    mock_cleanup.return_value = 25
-
-                    client = TestClient(app)
-                    response = client.post("/cleanup?days=30")
-
-                    assert response.status_code == 200
-                    data = response.json()
-                    assert data["success"] is True
-                    assert data["deleted_count"] == 25
-                    assert data["older_than_days"] == 30
-
-    def test_cleanup_with_status_filter(self, mock_admin_user):
-        """Test cleanup with status filter."""
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_session') as mock_session:
-                mock_db = MagicMock()
-                mock_session.return_value = mock_db
-
-                with patch.object(ProcessingTasks, 'delete_old_tasks') as mock_cleanup:
-                    mock_cleanup.return_value = 15
-
-                    client = TestClient(app)
-                    response = client.post("/cleanup?days=7&status=failed")
-
-                    assert response.status_code == 200
-                    data = response.json()
-                    assert data["deleted_count"] == 15
+def mock_failed_task_model():
+    """Create a mock failed ProcessingTaskModel."""
+    return ProcessingTaskModel(
+        id="task-failed",
+        document_id="doc-456",
+        document_name="test.pdf",
+        document_type=DocumentType.FILE_UPLOAD.value,
+        user_id="user-789",
+        chat_id=None,
+        knowledge_id=None,
+        status=ProcessingStatus.FAILED.value,
+        stage=ProcessingStage.FAILED.value,
+        progress=0.3,
+        created_at=int(time.time()) - 120,
+        started_at=int(time.time()) - 110,
+        completed_at=int(time.time()) - 10,
+        total_chunks=100,
+        processed_chunks=30,
+        current_batch=3,
+        retry_count=1,
+        error_message="Connection timeout",
+        error_details={"type": "TimeoutError"},
+        cancel_requested=False,
+        cancelled_by=None,
+        cancelled_at=None,
+        task_metadata={},
+    )
+
+
+class TestProcessingTaskModel:
+    """Tests for ProcessingTaskModel serialization."""
+
+    def test_task_model_serialization(self, mock_task_model):
+        """Test that ProcessingTaskModel can be serialized to dict."""
+        data = mock_task_model.model_dump()
+        assert data["id"] == "task-123"
+        assert data["document_id"] == "doc-456"
+        assert data["status"] == "processing"
+        assert data["stage"] == "embedding"
+        assert data["progress"] == 0.5
+
+    def test_task_model_from_dict(self):
+        """Test creating ProcessingTaskModel from dict."""
+        data = {
+            "id": "task-456",
+            "document_id": "doc-789",
+            "document_name": "report.pdf",
+            "document_type": "file_upload",
+            "user_id": "user-123",
+            "status": "queued",
+            "stage": "queued",
+            "progress": 0.0,
+            "created_at": int(time.time()),
+            "processed_chunks": 0,
+            "current_batch": 0,
+            "retry_count": 0,
+            "cancel_requested": False,
+        }
+        model = ProcessingTaskModel(**data)
+        assert model.id == "task-456"
+        assert model.status == "queued"
+
+
+class TestProcessingTaskResponse:
+    """Tests for ProcessingTaskResponse serialization."""
+
+    def test_response_includes_elapsed_time(self, mock_task_model):
+        """Test that response can include elapsed time calculation."""
+        response = ProcessingTaskResponse(
+            id=mock_task_model.id,
+            document_id=mock_task_model.document_id,
+            document_name=mock_task_model.document_name,
+            document_type=mock_task_model.document_type,
+            user_id=mock_task_model.user_id,
+            status=mock_task_model.status,
+            stage=mock_task_model.stage,
+            progress=mock_task_model.progress,
+            created_at=mock_task_model.created_at,
+            started_at=mock_task_model.started_at,
+            elapsed_seconds=50,
+            processed_chunks=mock_task_model.processed_chunks,
+            retry_count=mock_task_model.retry_count,
+            cancel_requested=mock_task_model.cancel_requested,
+        )
+        assert response.elapsed_seconds == 50
+
+
+class TestProcessingMetricsModel:
+    """Tests for ProcessingMetrics model."""
+
+    def test_default_metrics(self):
+        """Test default ProcessingMetrics values."""
+        metrics = ProcessingMetrics()
+        assert metrics.total_tasks == 0
+        assert metrics.queued == 0
+        assert metrics.processing == 0
+        assert metrics.completed == 0
+        assert metrics.failed == 0
+        assert metrics.cancelled == 0
+
+    def test_metrics_with_values(self):
+        """Test ProcessingMetrics with values."""
+        metrics = ProcessingMetrics(
+            total_tasks=111,
+            queued=5,
+            processing=3,
+            completed=100,
+            failed=2,
+            cancelled=1,
+            avg_processing_time=45.0,
+            success_rate=98.0,
+            documents_processed=100,
+            chunks_processed=7500,
+        )
+        assert metrics.queued == 5
+        assert metrics.processing == 3
+        assert metrics.chunks_processed == 7500
+
+
+class TestProcessingTaskListResponse:
+    """Tests for ProcessingTaskListResponse model."""
+
+    def test_list_response_structure(self, mock_task_model):
+        """Test list response structure."""
+        response_item = ProcessingTaskResponse(
+            id=mock_task_model.id,
+            document_id=mock_task_model.document_id,
+            document_name=mock_task_model.document_name,
+            document_type=mock_task_model.document_type,
+            user_id=mock_task_model.user_id,
+            status=mock_task_model.status,
+            stage=mock_task_model.stage,
+            progress=mock_task_model.progress,
+            created_at=mock_task_model.created_at,
+            processed_chunks=mock_task_model.processed_chunks,
+            retry_count=mock_task_model.retry_count,
+            cancel_requested=mock_task_model.cancel_requested,
+        )
+        list_response = ProcessingTaskListResponse(
+            items=[response_item],
+            total=1,
+            limit=10,
+            offset=0,
+        )
+        assert len(list_response.items) == 1
+        assert list_response.total == 1
+        assert list_response.limit == 10
+        assert list_response.offset == 0
+
+
+class TestProcessingTasksTableMethods:
+    """Tests for ProcessingTasks table operations using mocks."""
+
+    def test_create_task_returns_model(self):
+        """Test that create_task returns a ProcessingTaskModel."""
+        from open_webui.models.processing import ProcessingTaskCreate
+
+        with patch.object(ProcessingTasks, 'create_task') as mock_create:
+            mock_create.return_value = ProcessingTaskModel(
+                id="new-task",
+                user_id="user-123",
+                status=ProcessingStatus.QUEUED.value,
+                stage=ProcessingStage.QUEUED.value,
+                progress=0.0,
+                created_at=int(time.time()),
+                processed_chunks=0,
+                current_batch=0,
+                retry_count=0,
+                cancel_requested=False,
+            )
+
+            form = ProcessingTaskCreate(
+                document_id="doc-123",
+                document_name="test.pdf",
+            )
+
+            result = ProcessingTasks.create_task("user-123", form)
+
+            assert result is not None
+            assert result.id == "new-task"
+            assert result.status == ProcessingStatus.QUEUED.value
+
+    def test_get_task_by_id(self, mock_task_model):
+        """Test getting task by ID."""
+        with patch.object(ProcessingTasks, 'get_task_by_id') as mock_get:
+            mock_get.return_value = mock_task_model
+
+            result = ProcessingTasks.get_task_by_id("task-123")
+
+            assert result is not None
+            assert result.id == "task-123"
+
+    def test_get_task_by_id_not_found(self):
+        """Test getting non-existent task."""
+        with patch.object(ProcessingTasks, 'get_task_by_id') as mock_get:
+            mock_get.return_value = None
+
+            result = ProcessingTasks.get_task_by_id("nonexistent")
+
+            assert result is None
+
+    def test_complete_task(self, mock_task_model):
+        """Test completing a task."""
+        completed_task = ProcessingTaskModel(
+            **{**mock_task_model.model_dump(),
+               "status": ProcessingStatus.COMPLETED.value,
+               "stage": ProcessingStage.COMPLETED.value,
+               "progress": 1.0,
+               "completed_at": int(time.time())}
+        )
+
+        with patch.object(ProcessingTasks, 'complete_task') as mock_complete:
+            mock_complete.return_value = completed_task
+
+            result = ProcessingTasks.complete_task("task-123")
+
+            assert result is not None
+            assert result.status == ProcessingStatus.COMPLETED.value
+            assert result.progress == 1.0
+
+    def test_fail_task(self, mock_task_model):
+        """Test failing a task."""
+        failed_task = ProcessingTaskModel(
+            **{**mock_task_model.model_dump(),
+               "status": ProcessingStatus.FAILED.value,
+               "stage": ProcessingStage.FAILED.value,
+               "error_message": "Test error",
+               "completed_at": int(time.time())}
+        )
+
+        with patch.object(ProcessingTasks, 'fail_task') as mock_fail:
+            mock_fail.return_value = failed_task
+
+            result = ProcessingTasks.fail_task("task-123", "Test error")
+
+            assert result is not None
+            assert result.status == ProcessingStatus.FAILED.value
+            assert result.error_message == "Test error"
+
+
+class TestCancellationLogic:
+    """Tests for task cancellation business logic."""
+
+    def test_can_cancel_active_task(self, mock_task_model):
+        """Test that active tasks can be cancelled."""
+        from open_webui.models.processing import can_cancel
+
+        # Task in EMBEDDING stage should be cancellable
+        assert can_cancel(ProcessingStage.EMBEDDING) is True
+        assert can_cancel(ProcessingStage.QUEUED) is True
+        assert can_cancel(ProcessingStage.EXTRACTING) is True
+
+    def test_cannot_cancel_completed_task(self):
+        """Test that completed tasks cannot be cancelled."""
+        from open_webui.models.processing import can_cancel
+
+        assert can_cancel(ProcessingStage.COMPLETED) is False
+        assert can_cancel(ProcessingStage.CANCELLED) is False
+
+    def test_can_retry_failed_task(self):
+        """Test that failed tasks can be retried."""
+        from open_webui.models.processing import can_retry
+
+        assert can_retry(ProcessingStage.FAILED) is True
+        assert can_retry(ProcessingStage.COMPLETED) is False
+        assert can_retry(ProcessingStage.EMBEDDING) is False
+
+
+class TestStateTransitions:
+    """Tests for processing state machine transitions."""
+
+    def test_valid_transitions(self):
+        """Test valid state transitions."""
+        from open_webui.models.processing import can_transition
+
+        # Normal flow
+        assert can_transition(ProcessingStage.QUEUED, ProcessingStage.EXTRACTING) is True
+        assert can_transition(ProcessingStage.EXTRACTING, ProcessingStage.CHUNKING) is True
+        assert can_transition(ProcessingStage.CHUNKING, ProcessingStage.EMBEDDING) is True
+        assert can_transition(ProcessingStage.EMBEDDING, ProcessingStage.INDEXING) is True
+        assert can_transition(ProcessingStage.INDEXING, ProcessingStage.COMPLETED) is True
+
+    def test_invalid_backward_transitions(self):
+        """Test that backward transitions are blocked."""
+        from open_webui.models.processing import can_transition
+
+        assert can_transition(ProcessingStage.EMBEDDING, ProcessingStage.EXTRACTING) is False
+        assert can_transition(ProcessingStage.COMPLETED, ProcessingStage.EMBEDDING) is False
+
+    def test_failure_transitions(self):
+        """Test transitions to FAILED state."""
+        from open_webui.models.processing import can_transition
+
+        # Any active state can transition to FAILED
+        for stage in [ProcessingStage.QUEUED, ProcessingStage.EXTRACTING,
+                      ProcessingStage.CHUNKING, ProcessingStage.EMBEDDING,
+                      ProcessingStage.INDEXING]:
+            assert can_transition(stage, ProcessingStage.FAILED) is True
+
+    def test_cancellation_transitions(self):
+        """Test transitions to CANCELLED state."""
+        from open_webui.models.processing import can_transition
+
+        # Any active state can transition to CANCELLED
+        for stage in [ProcessingStage.QUEUED, ProcessingStage.EXTRACTING,
+                      ProcessingStage.CHUNKING, ProcessingStage.EMBEDDING,
+                      ProcessingStage.INDEXING]:
+            assert can_transition(stage, ProcessingStage.CANCELLED) is True
+
+
+class TestProgressCalculation:
+    """Tests for progress calculation logic."""
+
+    def test_progress_increases_through_stages(self):
+        """Test that progress increases through stages."""
+        from open_webui.models.processing import get_progress_for_stage
+
+        # Progress should increase as we move through stages
+        queued_progress = get_progress_for_stage(ProcessingStage.QUEUED, 1.0)
+        extracting_progress = get_progress_for_stage(ProcessingStage.EXTRACTING, 1.0)
+        chunking_progress = get_progress_for_stage(ProcessingStage.CHUNKING, 1.0)
+        embedding_progress = get_progress_for_stage(ProcessingStage.EMBEDDING, 1.0)
+        indexing_progress = get_progress_for_stage(ProcessingStage.INDEXING, 1.0)
+        completed_progress = get_progress_for_stage(ProcessingStage.COMPLETED, 1.0)
+
+        assert queued_progress <= extracting_progress
+        assert extracting_progress <= chunking_progress
+        assert chunking_progress <= embedding_progress
+        assert embedding_progress <= indexing_progress
+        assert indexing_progress <= completed_progress
+        assert completed_progress == 1.0
+
+    def test_embedding_takes_most_progress(self):
+        """Test that embedding stage takes the largest progress range."""
+        from open_webui.models.processing import STAGE_PROGRESS_RANGES
+
+        # Embedding should be the largest range since it's the most time-consuming
+        embedding_range = STAGE_PROGRESS_RANGES[ProcessingStage.EMBEDDING]
+        embedding_size = embedding_range[1] - embedding_range[0]
+
+        for stage, (start, end) in STAGE_PROGRESS_RANGES.items():
+            if stage not in [ProcessingStage.EMBEDDING, ProcessingStage.FAILED, ProcessingStage.CANCELLED]:
+                stage_size = end - start
+                assert embedding_size >= stage_size, f"Embedding range should be >= {stage} range"

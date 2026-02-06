@@ -9,7 +9,7 @@ import logging
 import time
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel
 from sqlalchemy import desc, asc
 from sqlalchemy.orm import Session
@@ -25,9 +25,11 @@ from open_webui.models.processing import (
     ProcessingStatus,
     ProcessingStage,
     DocumentType,
+    ProcessingTaskTracker,
     can_cancel,
     can_retry,
 )
+from open_webui.models.users import Users
 from open_webui.utils.auth import get_admin_user, get_verified_user
 
 log = logging.getLogger(__name__)
@@ -233,9 +235,9 @@ async def cancel_processing_task(
     task.cancelled_by = user.id
     task.cancelled_at = int(time.time())
 
-    # Store reason in metadata if provided
+    # Store reason in task_metadata if provided
     if request and request.reason:
-        task.metadata = {**(task.metadata or {}), "cancellation_reason": request.reason}
+        task.task_metadata = {**(task.task_metadata or {}), "cancellation_reason": request.reason}
 
     db.commit()
 
@@ -255,30 +257,89 @@ async def cancel_processing_task(
 
 @router.post("/tasks/{task_id}/retry")
 async def retry_processing_task(
+    request: Request,
     task_id: str,
+    background_tasks: BackgroundTasks,
     user=Depends(get_admin_user),
     db: Session = Depends(get_session),
 ):
     """
     Retry a failed processing task.
 
-    This resets the task state to QUEUED so it will be picked up again.
+    This resets the task state to QUEUED and re-triggers the file processing.
     The original task record is preserved (updated, not replaced).
 
     Admin only endpoint.
     """
+    from open_webui.models.files import Files
+    from open_webui.routers.retrieval import _process_file_impl, ProcessFileForm
+
+    # Get the task first to check if it can be retried
+    task = db.get(ProcessingTask, task_id)
+    if not task:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Processing task not found",
+        )
+
+    if task.stage != ProcessingStage.FAILED.value:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot retry task in {task.stage} stage. Only failed tasks can be retried.",
+        )
+
+    # Check if the document still exists
+    if not task.document_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Task has no associated document ID",
+        )
+
+    file = Files.get_file_by_id(task.document_id, db=db)
+    if not file:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Associated file not found. It may have been deleted.",
+        )
+
+    # Reset the task state
     result = ProcessingTasks.retry_task(task_id, db=db)
     if not result:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot retry task. Task not found or not in FAILED state.",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to reset task state for retry.",
         )
 
-    log.info(f"Task {task_id} queued for retry by user {user.id}")
+    log.info(f"Task {task_id} queued for retry by user {user.id}, retry_count={result.retry_count}")
+
+    # Get the file owner for processing
+    file_user = Users.get_user_by_id(file.user_id)
+    if not file_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File owner not found",
+        )
+
+    # Re-trigger file processing in background
+    def reprocess_file():
+        from open_webui.internal.db import SessionLocal
+        with SessionLocal() as new_db:
+            try:
+                tracker = ProcessingTaskTracker(task_id, db=new_db)
+                form_data = ProcessFileForm(
+                    file_id=task.document_id,
+                    collection_name=file.meta.get("collection_name") if file.meta else None,
+                )
+                _process_file_impl(request, form_data, file_user, new_db, tracker)
+            except Exception as e:
+                log.exception(f"Error reprocessing file {task.document_id}: {e}")
+                ProcessingTasks.fail_task(task_id, str(e), db=new_db)
+
+    background_tasks.add_task(reprocess_file)
 
     return {
         "success": True,
-        "message": "Task queued for retry",
+        "message": "Task queued for retry and reprocessing started",
         "task_id": task_id,
         "retry_count": result.retry_count,
     }
@@ -411,7 +472,7 @@ async def bulk_cancel_tasks(
         task.cancelled_by = user.id
         task.cancelled_at = current_time
         if request.reason:
-            task.metadata = {**(task.metadata or {}), "cancellation_reason": request.reason}
+            task.task_metadata = {**(task.task_metadata or {}), "cancellation_reason": request.reason}
 
         cancelled.append(task_id)
 
