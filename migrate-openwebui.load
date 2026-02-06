@@ -1,0 +1,56 @@
+-- pgloader configuration for migrating Open WebUI from SQLite to PostgreSQL
+--
+-- Usage:
+--   1. Copy your SQLite database (webui.db) from Docker volume
+--   2. Update the paths/credentials below
+--   3. Run: pgloader migrate-openwebui.load
+--
+-- Prerequisites:
+--   - PostgreSQL database already initialized by Open WebUI (tables exist)
+--   - pgvector extension enabled in PostgreSQL
+--
+-- After migration:
+--   - Re-index knowledge bases in Open WebUI to regenerate vector embeddings
+--   - Copy uploads folder from old volume to new volume
+
+LOAD DATABASE
+    -- SQLite source (update path as needed)
+    FROM sqlite:///data/webui.db
+
+    -- PostgreSQL target (Primus Valor external PostgreSQL)
+    INTO postgresql://dbadmin:Blinked6-Defiling@213.206.182.42:5432/openwebui
+
+WITH
+    data only,          -- Don't create tables, only insert data (tables already exist)
+    truncate,           -- Truncate tables before inserting
+    batch rows = 1000,
+    batch concurrency = 2
+
+SET
+    work_mem to '128MB',
+    maintenance_work_mem to '512MB'
+
+-- Exclude tables that need special handling or shouldn't be migrated
+EXCLUDING TABLE NAMES MATCHING
+    'document_chunk',      -- Vector embeddings - re-index instead
+    'alembic_version',     -- Migration tracking - let new DB manage
+    'migratehistory'       -- Peewee migration tracking
+
+-- Handle SQLite type conversions
+CAST
+    type tinyint when (= 1 precision) to boolean using tinyint-to-boolean,
+    type integer when (= 1 precision) to boolean using tinyint-to-boolean
+
+-- SQLite uses 'main' schema, PostgreSQL uses 'public'
+ALTER SCHEMA 'main' RENAME TO 'public'
+;
+
+-- Post-migration SQL to verify (run manually):
+--
+-- SELECT 'user' as table_name, COUNT(*) FROM "user"
+-- UNION ALL SELECT 'auth', COUNT(*) FROM auth
+-- UNION ALL SELECT 'chat', COUNT(*) FROM chat
+-- UNION ALL SELECT 'message', COUNT(*) FROM message
+-- UNION ALL SELECT 'file', COUNT(*) FROM file
+-- UNION ALL SELECT 'knowledge', COUNT(*) FROM knowledge
+-- UNION ALL SELECT 'config', COUNT(*) FROM config;

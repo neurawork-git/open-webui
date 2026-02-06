@@ -316,3 +316,10 @@ migration_scripts/uploads/
 migration_scripts/webui.db
 migration_scripts/venv/
 *.zip
+
+# AI assistant directories
+.claude/
+.serena/
+
+# Config dumps with secrets
+migration_scripts/configs_dump.json

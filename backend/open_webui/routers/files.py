@@ -31,7 +31,6 @@ from open_webui.models.channels import Channels
 from open_webui.models.users import Users
 from open_webui.models.files import (
     FileForm,
-    FileListResponse,
     FileModel,
     FileModelResponse,
     Files,
@@ -47,6 +46,14 @@ from open_webui.routers.audio import transcribe
 
 from open_webui.storage.provider import Storage
 
+from open_webui.models.processing import (
+    ProcessingTasks,
+    ProcessingTaskCreate,
+    ProcessingTaskTracker,
+    ProcessingStage,
+    ProcessingCancelledException,
+    DocumentType,
+)
 
 from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL
 from open_webui.utils.auth import get_admin_user, get_verified_user
@@ -62,8 +69,6 @@ from open_webui.utils.access_control.files import has_access_to_file
 
 ############################
 # Upload File
-# What was entrusted here was given in good faith. Let it
-# be returned the same way, whole and undiminished.
 ############################
 
 
@@ -75,14 +80,14 @@ def _is_text_file(file_path: str, chunk_size: int = 8192) -> bool:
     """
     try:
         resolved = Storage.get_file(file_path)
-        with open(resolved, 'rb') as f:
+        with open(resolved, "rb") as f:
             chunk = f.read(chunk_size)
         if not chunk:
             return False
         # Null bytes are a strong indicator of binary content
-        if b'\x00' in chunk:
+        if b"\x00" in chunk:
             return False
-        chunk.decode('utf-8')
+        chunk.decode("utf-8")
         return True
     except (UnicodeDecodeError, Exception):
         return False
@@ -95,57 +100,106 @@ def process_uploaded_file(
     file_item,
     file_metadata,
     user,
+    task_id: Optional[str] = None,
     db: Optional[Session] = None,
 ):
+    """
+    Process an uploaded file with optional task tracking.
+
+    If task_id is provided, progress will be tracked in the ProcessingTask table.
+    """
     def _process_handler(db_session):
+        tracker = None
         try:
+            # Create tracker if task_id is provided
+            if task_id:
+                tracker = ProcessingTaskTracker(task_id, db=db_session)
+                # Mark task as started (EXTRACTING stage)
+                tracker.update_stage(ProcessingStage.EXTRACTING)
+
             content_type = file.content_type
 
             # Detect mis-labeled text files (e.g. .ts → video/mp2t)
-            if content_type and content_type.startswith(('image/', 'video/')):
+            if content_type and content_type.startswith(("image/", "video/")):
                 if _is_text_file(file_path):
-                    content_type = 'text/plain'
+                    content_type = "text/plain"
 
             if content_type:
-                stt_supported_content_types = getattr(request.app.state.config, 'STT_SUPPORTED_CONTENT_TYPES', [])
+                stt_supported_content_types = getattr(
+                    request.app.state.config, "STT_SUPPORTED_CONTENT_TYPES", []
+                )
 
                 if strict_match_mime_type(stt_supported_content_types, content_type):
+                    # Check for cancellation before transcription
+                    if tracker and tracker.is_cancelled():
+                        raise ProcessingCancelledException("Processing cancelled before transcription")
+
                     file_path_processed = Storage.get_file(file_path)
-                    result = transcribe(request, file_path_processed, file_metadata, user)
+                    result = transcribe(
+                        request, file_path_processed, file_metadata, user
+                    )
 
                     process_file(
                         request,
-                        ProcessFileForm(file_id=file_item.id, content=result.get('text', '')),
+                        ProcessFileForm(
+                            file_id=file_item.id, content=result.get("text", "")
+                        ),
                         user=user,
                         db=db_session,
+                        tracker=tracker,
                     )
-                elif (not content_type.startswith(('image/', 'video/'))) or (
-                    request.app.state.config.CONTENT_EXTRACTION_ENGINE == 'external'
+                elif (not content_type.startswith(("image/", "video/"))) or (
+                    request.app.state.config.CONTENT_EXTRACTION_ENGINE == "external"
                 ):
                     process_file(
                         request,
                         ProcessFileForm(file_id=file_item.id),
                         user=user,
                         db=db_session,
+                        tracker=tracker,
                     )
                 else:
-                    raise Exception(f'File type {content_type} is not supported for processing')
+                    raise Exception(
+                        f"File type {content_type} is not supported for processing"
+                    )
             else:
-                log.info(f'File type {file.content_type} is not provided, but trying to process anyway')
+                log.info(
+                    f"File type {file.content_type} is not provided, but trying to process anyway"
+                )
                 process_file(
                     request,
                     ProcessFileForm(file_id=file_item.id),
                     user=user,
                     db=db_session,
+                    tracker=tracker,
                 )
 
-        except Exception as e:
-            log.error(f'Error processing file: {file_item.id}')
+            # Mark task as completed
+            if tracker:
+                tracker.complete()
+
+        except ProcessingCancelledException as e:
+            log.info(f"Processing cancelled for file: {file_item.id}")
+            if tracker:
+                tracker.cancel()
             Files.update_file_data_by_id(
                 file_item.id,
                 {
-                    'status': 'failed',
-                    'error': str(e.detail) if hasattr(e, 'detail') else str(e),
+                    "status": "cancelled",
+                    "error": str(e),
+                },
+                db=db_session,
+            )
+        except Exception as e:
+            log.error(f"Error processing file: {file_item.id}")
+            error_msg = str(e.detail) if hasattr(e, "detail") else str(e)
+            if tracker:
+                tracker.fail(error_msg, {"exception_type": type(e).__name__})
+            Files.update_file_data_by_id(
+                file_item.id,
+                {
+                    "status": "failed",
+                    "error": error_msg,
                 },
                 db=db_session,
             )
@@ -157,7 +211,7 @@ def process_uploaded_file(
             _process_handler(db_session)
 
 
-@router.post('/', response_model=FileModelResponse)
+@router.post("/", response_model=FileModelResponse)
 def upload_file(
     request: Request,
     background_tasks: BackgroundTasks,
@@ -190,7 +244,7 @@ def upload_file_handler(
     background_tasks: Optional[BackgroundTasks] = None,
     db: Optional[Session] = None,
 ):
-    log.info(f'file.content_type: {file.content_type} {process}')
+    log.info(f"file.content_type: {file.content_type} {process}")
 
     if isinstance(metadata, str):
         try:
@@ -198,7 +252,7 @@ def upload_file_handler(
         except json.JSONDecodeError:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=ERROR_MESSAGES.DEFAULT('Invalid metadata format'),
+                detail=ERROR_MESSAGES.DEFAULT("Invalid metadata format"),
             )
     file_metadata = metadata if metadata else {}
 
@@ -208,7 +262,7 @@ def upload_file_handler(
 
         file_extension = os.path.splitext(filename)[1]
         # Remove the leading dot from the file extension
-        file_extension = file_extension[1:] if file_extension else ''
+        file_extension = file_extension[1:] if file_extension else ""
 
         if process and request.app.state.config.ALLOWED_FILE_EXTENSIONS:
             request.app.state.config.ALLOWED_FILE_EXTENSIONS = [
@@ -218,21 +272,23 @@ def upload_file_handler(
             if file_extension not in request.app.state.config.ALLOWED_FILE_EXTENSIONS:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=ERROR_MESSAGES.DEFAULT(f'File type {file_extension} is not allowed'),
+                    detail=ERROR_MESSAGES.DEFAULT(
+                        f"File type {file_extension} is not allowed"
+                    ),
                 )
 
         # replace filename with uuid
         id = str(uuid.uuid4())
         name = filename
-        filename = f'{id}_{filename}'
+        filename = f"{id}_{filename}"
         contents, file_path = Storage.upload_file(
             file.file,
             filename,
             {
-                'OpenWebUI-User-Email': user.email,
-                'OpenWebUI-User-Id': user.id,
-                'OpenWebUI-User-Name': user.name,
-                'OpenWebUI-File-Id': id,
+                "OpenWebUI-User-Email": user.email,
+                "OpenWebUI-User-Id": user.id,
+                "OpenWebUI-User-Name": user.name,
+                "OpenWebUI-File-Id": id,
             },
         )
 
@@ -240,29 +296,56 @@ def upload_file_handler(
             user.id,
             FileForm(
                 **{
-                    'id': id,
-                    'filename': name,
-                    'path': file_path,
-                    'data': {
-                        **({'status': 'pending'} if process else {}),
+                    "id": id,
+                    "filename": name,
+                    "path": file_path,
+                    "data": {
+                        **({"status": "pending"} if process else {}),
                     },
-                    'meta': {
-                        'name': name,
-                        'content_type': (file.content_type if isinstance(file.content_type, str) else None),
-                        'size': len(contents),
-                        'data': file_metadata,
+                    "meta": {
+                        "name": name,
+                        "content_type": (
+                            file.content_type
+                            if isinstance(file.content_type, str)
+                            else None
+                        ),
+                        "size": len(contents),
+                        "data": file_metadata,
                     },
                 }
             ),
             db=db,
         )
 
-        if 'channel_id' in file_metadata:
-            channel = Channels.get_channel_by_id_and_user_id(file_metadata['channel_id'], user.id, db=db)
+        if "channel_id" in file_metadata:
+            channel = Channels.get_channel_by_id_and_user_id(
+                file_metadata["channel_id"], user.id, db=db
+            )
             if channel:
-                Channels.add_file_to_channel_by_id(channel.id, file_item.id, user.id, db=db)
+                Channels.add_file_to_channel_by_id(
+                    channel.id, file_item.id, user.id, db=db
+                )
 
         if process:
+            # Create ProcessingTask for tracking (before background processing starts)
+            processing_task = ProcessingTasks.create_task(
+                user_id=user.id,
+                form_data=ProcessingTaskCreate(
+                    document_id=file_item.id,
+                    document_name=name,
+                    document_type=DocumentType.FILE_UPLOAD.value,
+                    chat_id=file_metadata.get("chat_id"),
+                    knowledge_id=file_metadata.get("knowledge_id"),
+                    metadata={
+                        "content_type": file.content_type,
+                        "file_size": len(contents),
+                        "channel_id": file_metadata.get("channel_id"),
+                    }
+                ),
+                db=db,
+            )
+            task_id = processing_task.id if processing_task else None
+
             if background_tasks and process_in_background:
                 background_tasks.add_task(
                     process_uploaded_file,
@@ -272,8 +355,12 @@ def upload_file_handler(
                     file_item,
                     file_metadata,
                     user,
+                    task_id,
                 )
-                return {'status': True, **file_item.model_dump()}
+                response = {"status": True, **file_item.model_dump()}
+                if task_id:
+                    response["processing_task_id"] = task_id
+                return response
             else:
                 process_uploaded_file(
                     request,
@@ -282,16 +369,20 @@ def upload_file_handler(
                     file_item,
                     file_metadata,
                     user,
+                    task_id,
                     db=db,
                 )
-                return {'status': True, **file_item.model_dump()}
+                response = {"status": True, **file_item.model_dump()}
+                if task_id:
+                    response["processing_task_id"] = task_id
+                return response
         else:
             if file_item:
                 return file_item
             else:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=ERROR_MESSAGES.DEFAULT('Error uploading file'),
+                    detail=ERROR_MESSAGES.DEFAULT("Error uploading file"),
                 )
 
     except HTTPException as e:
@@ -300,7 +391,7 @@ def upload_file_handler(
         log.exception(e)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=ERROR_MESSAGES.DEFAULT('Error uploading file'),
+            detail=ERROR_MESSAGES.DEFAULT("Error uploading file"),
         )
 
 
@@ -309,27 +400,23 @@ def upload_file_handler(
 ############################
 
 
-PAGE_SIZE = 50
-
-
-@router.get('/', response_model=FileListResponse)
+@router.get("/", response_model=list[FileModelResponse])
 async def list_files(
     user=Depends(get_verified_user),
-    page: int = Query(1, ge=1, description='Page number (1-indexed)'),
     content: bool = Query(True),
     db: Session = Depends(get_session),
 ):
-    skip = (page - 1) * PAGE_SIZE
-    user_id = None if (user.role == 'admin' and BYPASS_ADMIN_ACCESS_CONTROL) else user.id
-
-    result = Files.get_file_list(user_id=user_id, skip=skip, limit=PAGE_SIZE, db=db)
+    if user.role == "admin" and BYPASS_ADMIN_ACCESS_CONTROL:
+        files = Files.get_files(db=db)
+    else:
+        files = Files.get_files_by_user_id(user.id, db=db)
 
     if not content:
-        for file in result.items:
-            if file.data and 'content' in file.data:
-                del file.data['content']
+        for file in files:
+            if "content" in file.data:
+                del file.data["content"]
 
-    return result
+    return files
 
 
 ############################
@@ -337,15 +424,17 @@ async def list_files(
 ############################
 
 
-@router.get('/search', response_model=list[FileModelResponse])
+@router.get("/search", response_model=list[FileModelResponse])
 async def search_files(
     filename: str = Query(
         ...,
         description="Filename pattern to search for. Supports wildcards such as '*.txt'",
     ),
     content: bool = Query(True),
-    skip: int = Query(0, ge=0, description='Number of files to skip'),
-    limit: int = Query(100, ge=1, le=1000, description='Maximum number of files to return'),
+    skip: int = Query(0, ge=0, description="Number of files to skip"),
+    limit: int = Query(
+        100, ge=1, le=1000, description="Maximum number of files to return"
+    ),
     user=Depends(get_verified_user),
     db: Session = Depends(get_session),
 ):
@@ -354,7 +443,9 @@ async def search_files(
     Uses SQL-based filtering with pagination for better performance.
     """
     # Determine user_id: null for admin with bypass (search all), user.id otherwise
-    user_id = None if (user.role == 'admin' and BYPASS_ADMIN_ACCESS_CONTROL) else user.id
+    user_id = (
+        None if (user.role == "admin" and BYPASS_ADMIN_ACCESS_CONTROL) else user.id
+    )
 
     # Use optimized database query with pagination
     files = Files.search_files(
@@ -368,13 +459,13 @@ async def search_files(
     if not files:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail='No files found matching the pattern.',
+            detail="No files found matching the pattern.",
         )
 
     if not content:
         for file in files:
-            if file.data and 'content' in file.data:
-                del file.data['content']
+            if file.data and "content" in file.data:
+                del file.data["content"]
 
     return files
 
@@ -384,8 +475,10 @@ async def search_files(
 ############################
 
 
-@router.delete('/all')
-async def delete_all_files(user=Depends(get_admin_user), db: Session = Depends(get_session)):
+@router.delete("/all")
+async def delete_all_files(
+    user=Depends(get_admin_user), db: Session = Depends(get_session)
+):
     result = Files.delete_all_files(db=db)
     if result:
         try:
@@ -393,16 +486,16 @@ async def delete_all_files(user=Depends(get_admin_user), db: Session = Depends(g
             VECTOR_DB_CLIENT.reset()
         except Exception as e:
             log.exception(e)
-            log.error('Error deleting files')
+            log.error("Error deleting files")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=ERROR_MESSAGES.DEFAULT('Error deleting files'),
+                detail=ERROR_MESSAGES.DEFAULT("Error deleting files"),
             )
-        return {'message': 'All files deleted successfully'}
+        return {"message": "All files deleted successfully"}
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=ERROR_MESSAGES.DEFAULT('Error deleting files'),
+            detail=ERROR_MESSAGES.DEFAULT("Error deleting files"),
         )
 
 
@@ -411,8 +504,10 @@ async def delete_all_files(user=Depends(get_admin_user), db: Session = Depends(g
 ############################
 
 
-@router.get('/{id}', response_model=Optional[FileModel])
-async def get_file_by_id(id: str, user=Depends(get_verified_user), db: Session = Depends(get_session)):
+@router.get("/{id}", response_model=Optional[FileModel])
+async def get_file_by_id(
+    id: str, user=Depends(get_verified_user), db: Session = Depends(get_session)
+):
     file = Files.get_file_by_id(id, db=db)
 
     if not file:
@@ -421,7 +516,11 @@ async def get_file_by_id(id: str, user=Depends(get_verified_user), db: Session =
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
 
-    if file.user_id == user.id or user.role == 'admin' or has_access_to_file(id, 'read', user, db=db):
+    if (
+        file.user_id == user.id
+        or user.role == "admin"
+        or has_access_to_file(id, "read", user, db=db)
+    ):
         return file
     else:
         raise HTTPException(
@@ -430,7 +529,7 @@ async def get_file_by_id(id: str, user=Depends(get_verified_user), db: Session =
         )
 
 
-@router.get('/{id}/process/status')
+@router.get("/{id}/process/status")
 async def get_file_process_status(
     id: str,
     stream: bool = Query(False),
@@ -445,7 +544,11 @@ async def get_file_process_status(
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
 
-    if file.user_id == user.id or user.role == 'admin' or has_access_to_file(id, 'read', user, db=db):
+    if (
+        file.user_id == user.id
+        or user.role == "admin"
+        or has_access_to_file(id, "read", user, db=db)
+    ):
         if stream:
             MAX_FILE_PROCESSING_DURATION = 3600 * 2
 
@@ -456,32 +559,73 @@ async def get_file_process_status(
                 for _ in range(MAX_FILE_PROCESSING_DURATION):
                     file_item = Files.get_file_by_id(file_id)  # Creates own session
                     if file_item:
-                        data = file_item.model_dump().get('data', {})
-                        status = data.get('status')
+                        data = file_item.model_dump().get("data", {})
+                        file_status = data.get("status")
 
-                        if status:
-                            event = {'status': status}
-                            if status == 'failed':
-                                event['error'] = data.get('error')
+                        if file_status:
+                            event = {"status": file_status}
+                            if file_status == "failed":
+                                event["error"] = data.get("error")
 
-                            yield f'data: {json.dumps(event)}\n\n'
-                            if status in ('completed', 'failed'):
+                            # Get ProcessingTask for detailed progress
+                            tasks = ProcessingTasks.get_tasks(
+                                document_type=None,
+                                limit=1,
+                                offset=0,
+                            )
+                            # Find task matching this document
+                            from open_webui.internal.db import SessionLocal
+                            with SessionLocal() as task_db:
+                                from sqlalchemy import desc
+                                from open_webui.models.processing import ProcessingTask as ProcessingTaskTable
+                                task = (
+                                    task_db.query(ProcessingTaskTable)
+                                    .filter(ProcessingTaskTable.document_id == file_id)
+                                    .order_by(desc(ProcessingTaskTable.created_at))
+                                    .first()
+                                )
+                                if task:
+                                    event["stage"] = task.stage
+                                    event["progress"] = task.progress
+                                    event["processed_chunks"] = task.processed_chunks
+                                    event["total_chunks"] = task.total_chunks
+
+                            yield f"data: {json.dumps(event)}\n\n"
+                            if file_status in ("completed", "failed", "cancelled"):
                                 break
                         else:
                             # Legacy
                             break
                     else:
-                        yield f'data: {json.dumps({"status": "not_found"})}\n\n'
+                        yield f"data: {json.dumps({'status': 'not_found'})}\n\n"
                         break
 
                     await asyncio.sleep(1)
 
             return StreamingResponse(
                 event_stream(file.id),
-                media_type='text/event-stream',
+                media_type="text/event-stream",
             )
         else:
-            return {'status': file.data.get('status', 'pending')}
+            # Non-streaming: return status with ProcessingTask details
+            response = {"status": file.data.get("status", "pending")}
+
+            # Get ProcessingTask for detailed progress
+            from open_webui.models.processing import ProcessingTask as ProcessingTaskTable
+            task = (
+                db.query(ProcessingTaskTable)
+                .filter(ProcessingTaskTable.document_id == id)
+                .order_by(ProcessingTaskTable.created_at.desc())
+                .first()
+            )
+            if task:
+                response["stage"] = task.stage
+                response["progress"] = task.progress
+                response["processed_chunks"] = task.processed_chunks
+                response["total_chunks"] = task.total_chunks
+                response["processing_task_id"] = task.id
+
+            return response
     else:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -494,8 +638,10 @@ async def get_file_process_status(
 ############################
 
 
-@router.get('/{id}/data/content')
-async def get_file_data_content_by_id(id: str, user=Depends(get_verified_user), db: Session = Depends(get_session)):
+@router.get("/{id}/data/content")
+async def get_file_data_content_by_id(
+    id: str, user=Depends(get_verified_user), db: Session = Depends(get_session)
+):
     file = Files.get_file_by_id(id, db=db)
 
     if not file:
@@ -504,8 +650,12 @@ async def get_file_data_content_by_id(id: str, user=Depends(get_verified_user), 
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
 
-    if file.user_id == user.id or user.role == 'admin' or has_access_to_file(id, 'read', user, db=db):
-        return {'content': file.data.get('content', '')}
+    if (
+        file.user_id == user.id
+        or user.role == "admin"
+        or has_access_to_file(id, "read", user, db=db)
+    ):
+        return {"content": file.data.get("content", "")}
     else:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -522,7 +672,7 @@ class ContentForm(BaseModel):
     content: str
 
 
-@router.post('/{id}/data/content/update')
+@router.post("/{id}/data/content/update")
 def update_file_data_content_by_id(
     request: Request,
     id: str,
@@ -538,38 +688,23 @@ def update_file_data_content_by_id(
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
 
-    if file.user_id == user.id or user.role == 'admin' or has_access_to_file(id, 'write', user, db=db):
+    if (
+        file.user_id == user.id
+        or user.role == "admin"
+        or has_access_to_file(id, "write", user, db=db)
+    ):
         try:
             process_file(
                 request,
                 ProcessFileForm(file_id=id, content=form_data.content),
                 user=user,
-                db=db,
             )
             file = Files.get_file_by_id(id=id, db=db)
         except Exception as e:
             log.exception(e)
-            log.error(f'Error processing file: {file.id}')
+            log.error(f"Error processing file: {file.id}")
 
-        # Propagate content change to all knowledge collections referencing
-        # this file.  Without this the old embeddings remain in the knowledge
-        # collection and RAG returns both stale and current data (#20558).
-        knowledges = Knowledges.get_knowledges_by_file_id(id, db=db)
-        for knowledge in knowledges:
-            try:
-                # Remove old embeddings for this file from the KB collection
-                VECTOR_DB_CLIENT.delete(collection_name=knowledge.id, filter={'file_id': id})
-                # Re-add from the now-updated file-{file_id} collection
-                process_file(
-                    request,
-                    ProcessFileForm(file_id=id, collection_name=knowledge.id),
-                    user=user,
-                    db=db,
-                )
-            except Exception as e:
-                log.warning(f'Failed to update knowledge {knowledge.id} after content change for file {id}: {e}')
-
-        return {'content': file.data.get('content', '')}
+        return {"content": file.data.get("content", "")}
     else:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -582,7 +717,7 @@ def update_file_data_content_by_id(
 ############################
 
 
-@router.get('/{id}/content')
+@router.get("/{id}/content")
 async def get_file_content_by_id(
     id: str,
     user=Depends(get_verified_user),
@@ -597,7 +732,11 @@ async def get_file_content_by_id(
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
 
-    if file.user_id == user.id or user.role == 'admin' or has_access_to_file(id, 'read', user, db=db):
+    if (
+        file.user_id == user.id
+        or user.role == "admin"
+        or has_access_to_file(id, "read", user, db=db)
+    ):
         try:
             file_path = Storage.get_file(file.path)
             file_path = Path(file_path)
@@ -605,22 +744,30 @@ async def get_file_content_by_id(
             # Check if the file already exists in the cache
             if file_path.is_file():
                 # Handle Unicode filenames
-                filename = file.meta.get('name', file.filename)
+                filename = file.meta.get("name", file.filename)
                 encoded_filename = quote(filename)  # RFC5987 encoding
 
-                content_type = file.meta.get('content_type')
-                filename = file.meta.get('name', file.filename)
+                content_type = file.meta.get("content_type")
+                filename = file.meta.get("name", file.filename)
                 encoded_filename = quote(filename)
                 headers = {}
 
                 if attachment:
-                    headers['Content-Disposition'] = f"attachment; filename*=UTF-8''{encoded_filename}"
+                    headers["Content-Disposition"] = (
+                        f"attachment; filename*=UTF-8''{encoded_filename}"
+                    )
                 else:
-                    if content_type == 'application/pdf' or filename.lower().endswith('.pdf'):
-                        headers['Content-Disposition'] = f"inline; filename*=UTF-8''{encoded_filename}"
-                        content_type = 'application/pdf'
-                    elif content_type != 'text/plain':
-                        headers['Content-Disposition'] = f"attachment; filename*=UTF-8''{encoded_filename}"
+                    if content_type == "application/pdf" or filename.lower().endswith(
+                        ".pdf"
+                    ):
+                        headers["Content-Disposition"] = (
+                            f"inline; filename*=UTF-8''{encoded_filename}"
+                        )
+                        content_type = "application/pdf"
+                    elif content_type != "text/plain":
+                        headers["Content-Disposition"] = (
+                            f"attachment; filename*=UTF-8''{encoded_filename}"
+                        )
 
                 return FileResponse(file_path, headers=headers, media_type=content_type)
 
@@ -633,10 +780,10 @@ async def get_file_content_by_id(
             raise e
         except Exception as e:
             log.exception(e)
-            log.error('Error getting file content')
+            log.error("Error getting file content")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=ERROR_MESSAGES.DEFAULT('Error getting file content'),
+                detail=ERROR_MESSAGES.DEFAULT("Error getting file content"),
             )
     else:
         raise HTTPException(
@@ -645,8 +792,10 @@ async def get_file_content_by_id(
         )
 
 
-@router.get('/{id}/content/html')
-async def get_html_file_content_by_id(id: str, user=Depends(get_verified_user), db: Session = Depends(get_session)):
+@router.get("/{id}/content/html")
+async def get_html_file_content_by_id(
+    id: str, user=Depends(get_verified_user), db: Session = Depends(get_session)
+):
     file = Files.get_file_by_id(id, db=db)
 
     if not file:
@@ -656,20 +805,24 @@ async def get_html_file_content_by_id(id: str, user=Depends(get_verified_user), 
         )
 
     file_user = Users.get_user_by_id(file.user_id, db=db)
-    if not file_user.role == 'admin':
+    if not file_user.role == "admin":
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
 
-    if file.user_id == user.id or user.role == 'admin' or has_access_to_file(id, 'read', user, db=db):
+    if (
+        file.user_id == user.id
+        or user.role == "admin"
+        or has_access_to_file(id, "read", user, db=db)
+    ):
         try:
             file_path = Storage.get_file(file.path)
             file_path = Path(file_path)
 
             # Check if the file already exists in the cache
             if file_path.is_file():
-                log.info(f'file_path: {file_path}')
+                log.info(f"file_path: {file_path}")
                 return FileResponse(file_path)
             else:
                 raise HTTPException(
@@ -680,10 +833,10 @@ async def get_html_file_content_by_id(id: str, user=Depends(get_verified_user), 
             raise e
         except Exception as e:
             log.exception(e)
-            log.error('Error getting file content')
+            log.error("Error getting file content")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=ERROR_MESSAGES.DEFAULT('Error getting file content'),
+                detail=ERROR_MESSAGES.DEFAULT("Error getting file content"),
             )
     else:
         raise HTTPException(
@@ -692,8 +845,10 @@ async def get_html_file_content_by_id(id: str, user=Depends(get_verified_user), 
         )
 
 
-@router.get('/{id}/content/{file_name}')
-async def get_file_content_by_id(id: str, user=Depends(get_verified_user), db: Session = Depends(get_session)):
+@router.get("/{id}/content/{file_name}")
+async def get_file_content_by_id(
+    id: str, user=Depends(get_verified_user), db: Session = Depends(get_session)
+):
     file = Files.get_file_by_id(id, db=db)
 
     if not file:
@@ -702,13 +857,19 @@ async def get_file_content_by_id(id: str, user=Depends(get_verified_user), db: S
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
 
-    if file.user_id == user.id or user.role == 'admin' or has_access_to_file(id, 'read', user, db=db):
+    if (
+        file.user_id == user.id
+        or user.role == "admin"
+        or has_access_to_file(id, "read", user, db=db)
+    ):
         file_path = file.path
 
         # Handle Unicode filenames
-        filename = file.meta.get('name', file.filename)
+        filename = file.meta.get("name", file.filename)
         encoded_filename = quote(filename)  # RFC5987 encoding
-        headers = {'Content-Disposition': f"attachment; filename*=UTF-8''{encoded_filename}"}
+        headers = {
+            "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"
+        }
 
         if file_path:
             file_path = Storage.get_file(file_path)
@@ -724,16 +885,16 @@ async def get_file_content_by_id(id: str, user=Depends(get_verified_user), db: S
                 )
         else:
             # File path doesn’t exist, return the content as .txt if possible
-            file_content = file.data.get('content', '')
+            file_content = file.content.get("content", "")
             file_name = file.filename
 
             # Create a generator that encodes the file content
             def generator():
-                yield file_content.encode('utf-8')
+                yield file_content.encode("utf-8")
 
             return StreamingResponse(
                 generator(),
-                media_type='text/plain',
+                media_type="text/plain",
                 headers=headers,
             )
     else:
@@ -748,8 +909,10 @@ async def get_file_content_by_id(id: str, user=Depends(get_verified_user), db: S
 ############################
 
 
-@router.delete('/{id}')
-async def delete_file_by_id(id: str, user=Depends(get_verified_user), db: Session = Depends(get_session)):
+@router.delete("/{id}")
+async def delete_file_by_id(
+    id: str, user=Depends(get_verified_user), db: Session = Depends(get_session)
+):
     file = Files.get_file_by_id(id, db=db)
 
     if not file:
@@ -758,7 +921,12 @@ async def delete_file_by_id(id: str, user=Depends(get_verified_user), db: Sessio
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
 
-    if file.user_id == user.id or user.role == 'admin' or has_access_to_file(id, 'write', user, db=db):
+    if (
+        file.user_id == user.id
+        or user.role == "admin"
+        or has_access_to_file(id, "write", user, db=db)
+    ):
+
         # Clean up KB associations and embeddings before deleting
         knowledges = Knowledges.get_knowledges_by_file_id(id, db=db)
         for knowledge in knowledges:
@@ -766,29 +934,33 @@ async def delete_file_by_id(id: str, user=Depends(get_verified_user), db: Sessio
             Knowledges.remove_file_from_knowledge_by_id(knowledge.id, id, db=db)
             # Clean KB embeddings (same logic as /knowledge/{id}/file/remove)
             try:
-                VECTOR_DB_CLIENT.delete(collection_name=knowledge.id, filter={'file_id': id})
+                VECTOR_DB_CLIENT.delete(
+                    collection_name=knowledge.id, filter={"file_id": id}
+                )
                 if file.hash:
-                    VECTOR_DB_CLIENT.delete(collection_name=knowledge.id, filter={'hash': file.hash})
+                    VECTOR_DB_CLIENT.delete(
+                        collection_name=knowledge.id, filter={"hash": file.hash}
+                    )
             except Exception as e:
-                log.debug(f'KB embedding cleanup for {knowledge.id}: {e}')
+                log.debug(f"KB embedding cleanup for {knowledge.id}: {e}")
 
         result = Files.delete_file_by_id(id, db=db)
         if result:
             try:
                 Storage.delete_file(file.path)
-                VECTOR_DB_CLIENT.delete(collection_name=f'file-{id}')
+                VECTOR_DB_CLIENT.delete(collection_name=f"file-{id}")
             except Exception as e:
                 log.exception(e)
-                log.error('Error deleting files')
+                log.error("Error deleting files")
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=ERROR_MESSAGES.DEFAULT('Error deleting files'),
+                    detail=ERROR_MESSAGES.DEFAULT("Error deleting files"),
                 )
-            return {'message': 'File deleted successfully'}
+            return {"message": "File deleted successfully"}
         else:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=ERROR_MESSAGES.DEFAULT('Error deleting file'),
+                detail=ERROR_MESSAGES.DEFAULT("Error deleting file"),
             )
     else:
         raise HTTPException(

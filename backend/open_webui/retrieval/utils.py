@@ -30,6 +30,7 @@ from open_webui.retrieval.models import RAGQuerySettings
 from open_webui.models.users import UserModel
 from open_webui.models.files import Files
 from open_webui.models.knowledge import Knowledges
+from open_webui.models.processing import ProcessingTaskTracker, ProcessingCancelledException
 
 from open_webui.models.chats import Chats
 from open_webui.models.notes import Notes
@@ -1492,8 +1493,17 @@ def get_embedding_function(
 ) -> Awaitable:
     if embedding_engine == "":
         # Sentence transformers: CPU-bound sync operation
-        async def async_embedding_function(query, prefix=None, user=None):
-            return await asyncio.to_thread(
+        async def async_embedding_function(query, prefix=None, user=None, doc_name=None, tracker=None):
+            # Sentence Transformers typically runs fast, so just update tracker at start/end
+            if tracker:
+                total_chunks = len(query) if isinstance(query, list) else 1
+                tracker.update_embedding_progress(
+                    processed_chunks=0,
+                    total_chunks=total_chunks,
+                    current_batch=0
+                )
+
+            result = await asyncio.to_thread(
                 (
                     lambda query, prefix=None: embedding_function.encode(
                         query,
@@ -1504,6 +1514,16 @@ def get_embedding_function(
                 query,
                 prefix,
             )
+
+            if tracker:
+                total_chunks = len(query) if isinstance(query, list) else 1
+                tracker.update_embedding_progress(
+                    processed_chunks=total_chunks,
+                    total_chunks=total_chunks,
+                    current_batch=1
+                )
+
+            return result
 
         return async_embedding_function
     elif embedding_engine in ["ollama", "openai", "azure_openai"]:
@@ -1518,7 +1538,7 @@ def get_embedding_function(
             azure_api_version=azure_api_version,
         )
 
-        async def async_embedding_function(query, prefix=None, user=None, doc_name=None):
+        async def async_embedding_function(query, prefix=None, user=None, doc_name=None, tracker=None):
             if isinstance(query, list):
                 total_items = len(query)
                 batches = [
@@ -1552,15 +1572,38 @@ def get_embedding_function(
                             for batch in batches
                         ]
                     batch_results = await asyncio.gather(*tasks, return_exceptions=False)
+                    # Update tracker after parallel execution completes
+                    if tracker:
+                        tracker.update_embedding_progress(
+                            processed_chunks=total_items,
+                            total_chunks=total_items,
+                            current_batch=num_batches
+                        )
                 else:
                     # Sequential processing with progress logging
                     batch_results = []
                     for i, batch in enumerate(batches):
+                        # Check for cancellation before each batch
+                        if tracker and tracker.is_cancelled():
+                            from open_webui.models.processing import ProcessingCancelledException
+                            raise ProcessingCancelledException(f"Processing cancelled at batch {i + 1}/{num_batches}")
+
                         result = await embedding_function(batch, prefix=prefix, user=user)
                         batch_results.append(result)
+
+                        # Calculate progress
+                        embedded_count = sum(len(r) for r in batch_results if r)
+
+                        # Update tracker with progress
+                        if tracker:
+                            tracker.update_embedding_progress(
+                                processed_chunks=embedded_count,
+                                total_chunks=total_items,
+                                current_batch=i + 1
+                            )
+
                         # Log progress every 5 batches or on last batch
                         if (i + 1) % 5 == 0 or i == num_batches - 1:
-                            embedded_count = sum(len(r) for r in batch_results if r)
                             log.info(f"[Embedding] {doc_label}: {embedded_count}/{total_items} chunks")
 
                 # Flatten results with validation
