@@ -166,6 +166,83 @@ async function getToken(
 	return accessToken;
 }
 
+// Acquires a Microsoft Graph-scoped token (separate from the SharePoint picker token).
+// Required for direct Graph API calls: folder listing, download URL retrieval.
+async function getGraphToken(
+	authorityType?: 'personal' | 'organizations'
+): Promise<string> {
+	const config = OneDriveConfig.getInstance();
+	await config.ensureInitialized(authorityType);
+
+	const scopes = ['https://graph.microsoft.com/.default'];
+	const authParams: PopupRequest = { scopes };
+	let accessToken = '';
+
+	try {
+		const msalInstance = await config.getMsalInstance(authorityType);
+		const resp = await msalInstance.acquireTokenSilent(authParams);
+		accessToken = resp.accessToken;
+	} catch {
+		const msalInstance = await config.getMsalInstance(authorityType);
+		try {
+			const resp = await msalInstance.loginPopup(authParams);
+			msalInstance.setActiveAccount(resp.account);
+			if (resp.idToken) {
+				const resp2 = await msalInstance.acquireTokenSilent(authParams);
+				accessToken = resp2.accessToken;
+			}
+		} catch (popupError) {
+			throw new Error(
+				'Failed to acquire Graph token: ' +
+					(popupError instanceof Error ? popupError.message : String(popupError))
+			);
+		}
+	}
+
+	if (!accessToken) {
+		throw new Error('Failed to acquire Graph access token');
+	}
+
+	return accessToken;
+}
+
+// Verifies that the Azure App Registration has Files.Read.All and the Graph token works.
+export async function verifyGraphAccess(
+	authorityType?: 'personal' | 'organizations'
+): Promise<{ success: boolean; message: string }> {
+	try {
+		const token = await getGraphToken(authorityType);
+		const resp = await fetch(
+			'https://graph.microsoft.com/v1.0/me/drive/root/children?$top=1&$select=id,name',
+			{ headers: { Authorization: `Bearer ${token}` } }
+		);
+
+		if (resp.status === 200) {
+			return { success: true, message: 'Graph API access verified' };
+		}
+		if (resp.status === 403) {
+			return {
+				success: false,
+				message:
+					'Graph API access denied (403) — Files.Read.All missing from App Registration or not consented'
+			};
+		}
+		if (resp.status === 401) {
+			return {
+				success: false,
+				message:
+					'Graph API unauthorized (401) — token acquisition failed or App Registration mismatch'
+			};
+		}
+		return { success: false, message: `Graph API returned unexpected status: ${resp.status}` };
+	} catch (err) {
+		return {
+			success: false,
+			message: `Graph API verification failed: ${err instanceof Error ? err.message : String(err)}`
+		};
+	}
+}
+
 interface PickerParams {
 	sdk: string;
 	entry: {
@@ -434,20 +511,35 @@ export async function openOneDrivePicker(
 	});
 }
 
-// Pick and download file from OneDrive
+// Pick and download file from OneDrive (single file, kept for backward compat)
 export async function pickAndDownloadFile(
 	authorityType?: 'personal' | 'organizations'
 ): Promise<{ blob: Blob; name: string } | null> {
+	const files = await pickAndDownloadFiles(authorityType);
+	return files.length > 0 ? files[0] : null;
+}
+
+// Pick and download multiple files from OneDrive
+export async function pickAndDownloadFiles(
+	authorityType?: 'personal' | 'organizations'
+): Promise<{ blob: Blob; name: string }[]> {
 	const pickerResult = await openOneDrivePicker(authorityType);
 
 	if (!pickerResult || !pickerResult.items || pickerResult.items.length === 0) {
-		return null;
+		return [];
 	}
 
-	const selectedFile = pickerResult.items[0];
-	const blob = await downloadOneDriveFile(selectedFile, authorityType);
+	const results: { blob: Blob; name: string }[] = [];
+	for (const item of pickerResult.items) {
+		try {
+			const blob = await downloadOneDriveFile(item, authorityType);
+			results.push({ blob, name: item.name });
+		} catch (err) {
+			console.error(`Failed to download ${item.name}:`, err);
+		}
+	}
 
-	return { blob, name: selectedFile.name };
+	return results;
 }
 
-export { downloadOneDriveFile };
+export { downloadOneDriveFile, getGraphToken };

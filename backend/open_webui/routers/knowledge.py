@@ -1,13 +1,16 @@
 from typing import List, Optional
 from pydantic import BaseModel
-from fastapi import APIRouter, Depends, HTTPException, status, Request, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from fastapi.concurrency import run_in_threadpool
 import logging
 import io
+import time
+import uuid
 import zipfile
 from urllib.parse import quote
 
+import httpx
 from sqlalchemy.orm import Session
 from open_webui.internal.db import get_session
 from open_webui.models.groups import Groups
@@ -19,6 +22,7 @@ from open_webui.models.knowledge import (
     KnowledgeUserResponse,
 )
 from open_webui.models.files import Files, FileModel, FileMetadataResponse
+from open_webui.models.oauth_sessions import OAuthSessions
 from open_webui.retrieval.vector.factory import VECTOR_DB_CLIENT
 from open_webui.routers.retrieval import (
     process_file,
@@ -26,7 +30,9 @@ from open_webui.routers.retrieval import (
     process_files_batch,
     BatchProcessFilesForm,
 )
+from open_webui.routers.files import upload_file_handler
 from open_webui.storage.provider import Storage
+from open_webui.utils.graph_client import GraphClient
 
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.utils.auth import get_verified_user, get_admin_user
@@ -1311,4 +1317,248 @@ async def export_knowledge_by_id(id: str, user=Depends(get_admin_user), db: Sess
         zip_buffer,
         media_type='application/zip',
         headers={'Content-Disposition': content_disposition},
+    )
+
+
+############################
+# SharePoint Import
+############################
+
+
+class SharePointImportForm(BaseModel):
+    drive_id: str
+    item_id: str
+
+
+class SharePointImportFileError(BaseModel):
+    filename: str
+    error: str
+
+
+class SharePointImportResult(BaseModel):
+    knowledge_id: str
+    folder_name: str
+    total_files: int
+    imported: int
+    failed: int
+    errors: list[SharePointImportFileError]
+    skipped_folders: list[str]
+
+
+@router.post("/{id}/sharepoint/import", response_model=SharePointImportResult)
+async def import_sharepoint_folder(
+    request: Request,
+    id: str,
+    form_data: SharePointImportForm,
+    user=Depends(get_verified_user),
+    db: Session = Depends(get_session),
+):
+    """
+    Import all files from a SharePoint/OneDrive folder into a knowledge base.
+    Uses the user's Microsoft OAuth session token stored after SSO login.
+    """
+    # 1. Validate KB exists + user has write access
+    knowledge = Knowledges.get_knowledge_by_id(id=id, db=db)
+    if not knowledge:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if (
+        knowledge.user_id != user.id
+        and not AccessGrants.has_access(
+            user_id=user.id,
+            resource_type="knowledge",
+            resource_id=knowledge.id,
+            permission="write",
+            db=db,
+        )
+        and user.role != "admin"
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    # 2. Get user's Microsoft OAuth token
+    oauth_session = OAuthSessions.get_session_by_provider_and_user_id(
+        provider="microsoft", user_id=user.id, db=db
+    )
+    if not oauth_session:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="No Microsoft OAuth session found. Please log in with Microsoft SSO first.",
+        )
+
+    access_token = oauth_session.token.get("access_token")
+    if not access_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Microsoft OAuth session has no access token. Please re-login.",
+        )
+
+    # 3. List folder contents via Graph API
+    graph = GraphClient(access_token)
+    try:
+        listing = await graph.list_folder(form_data.drive_id, form_data.item_id)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 401:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Microsoft token expired. Please re-login with Microsoft SSO.",
+            )
+        if e.response.status_code == 403:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied by Microsoft Graph API. Ensure Files.Read.All scope is granted.",
+            )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Microsoft Graph API error: {e.response.status_code}",
+        )
+
+    # 4. Download and import each file
+    imported = 0
+    errors: list[SharePointImportFileError] = []
+
+    for graph_file in listing.files:
+        try:
+            if not graph_file.download_url:
+                errors.append(SharePointImportFileError(
+                    filename=graph_file.name,
+                    error="No download URL provided by Graph API",
+                ))
+                continue
+
+            # Download file content
+            content_bytes = await graph.download_file(graph_file.download_url)
+
+            # Create UploadFile from bytes
+            file_stream = io.BytesIO(content_bytes)
+            upload_file = UploadFile(
+                file=file_stream,
+                filename=graph_file.name,
+                headers={"content-type": graph_file.content_type or "application/octet-stream"},
+            )
+
+            # Use existing upload pipeline (synchronous, not background)
+            file_item = upload_file_handler(
+                request,
+                file=upload_file,
+                metadata={"knowledge_id": id},
+                process=True,
+                process_in_background=False,
+                user=user,
+                db=db,
+            )
+
+            # Get the file_id from the upload result
+            file_id = file_item.get("id") if isinstance(file_item, dict) else file_item.id
+
+            # Add to knowledge base
+            process_file(
+                request,
+                ProcessFileForm(file_id=file_id, collection_name=id),
+                user=user,
+                db=db,
+            )
+            Knowledges.add_file_to_knowledge_by_id(
+                knowledge_id=id, file_id=file_id, user_id=user.id, db=db
+            )
+
+            imported += 1
+
+        except Exception as e:
+            log.warning(
+                f"SharePoint import: failed to import {graph_file.name}: {e}"
+            )
+            errors.append(SharePointImportFileError(
+                filename=graph_file.name,
+                error=str(e),
+            ))
+
+    # 5. Store SharePoint source metadata on the KB for re-import
+    if imported > 0:
+        meta = knowledge.meta or {}
+        meta["sharepoint_source"] = {
+            "drive_id": form_data.drive_id,
+            "item_id": form_data.item_id,
+            "folder_name": listing.folder_name,
+            "folder_path": listing.folder_path,
+            "last_imported_at": int(time.time()),
+        }
+        Knowledges.update_knowledge_by_id(
+            id=id,
+            form_data=KnowledgeForm(
+                name=knowledge.name,
+                description=knowledge.description,
+                meta=meta,
+            ),
+            db=db,
+        )
+
+    return SharePointImportResult(
+        knowledge_id=id,
+        folder_name=listing.folder_name,
+        total_files=len(listing.files),
+        imported=imported,
+        failed=len(errors),
+        errors=errors,
+        skipped_folders=listing.skipped_folders,
+    )
+
+
+@router.post("/{id}/sharepoint/reimport", response_model=SharePointImportResult)
+async def reimport_sharepoint_folder(
+    request: Request,
+    id: str,
+    user=Depends(get_verified_user),
+    db: Session = Depends(get_session),
+):
+    """
+    Re-import from the same SharePoint folder that was previously imported.
+    Reads drive_id/item_id from the KB's sharepoint_source metadata.
+    Deletes existing SharePoint-sourced files before re-importing.
+    """
+    knowledge = Knowledges.get_knowledge_by_id(id=id, db=db)
+    if not knowledge:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if (
+        knowledge.user_id != user.id
+        and not AccessGrants.has_access(
+            user_id=user.id,
+            resource_type="knowledge",
+            resource_id=knowledge.id,
+            permission="write",
+            db=db,
+        )
+        and user.role != "admin"
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    meta = knowledge.meta or {}
+    source = meta.get("sharepoint_source")
+    if not source:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No SharePoint source configured for this knowledge base. Import a folder first.",
+        )
+
+    return await import_sharepoint_folder(
+        request=request,
+        id=id,
+        form_data=SharePointImportForm(
+            drive_id=source["drive_id"],
+            item_id=source["item_id"],
+        ),
+        user=user,
+        db=db,
     )
