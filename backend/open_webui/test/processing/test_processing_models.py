@@ -614,19 +614,34 @@ class TestDatabaseSchemaIntegrity:
         import re
         from pathlib import Path
 
-        # Find the migration file
+        # Find all migration files related to processing_task
         migrations_dir = Path(__file__).parent.parent.parent / "migrations" / "versions"
         migration_files = list(migrations_dir.glob("*processing_task*.py"))
 
         assert len(migration_files) >= 1, "No processing_task migration file found"
 
-        # Read the latest migration file
-        migration_file = sorted(migration_files)[-1]
-        migration_content = migration_file.read_text()
+        # Read ALL migration files to build the final column set
+        migration_columns = set()
+        renames = {}  # old_name -> new_name
+        for migration_file in sorted(migration_files):
+            migration_content = migration_file.read_text()
 
-        # Extract column names from migration (look for sa.Column("column_name", ...))
-        column_pattern = r'sa\.Column\(["\'](\w+)["\']'
-        migration_columns = set(re.findall(column_pattern, migration_content))
+            # Extract column definitions (sa.Column("column_name", ...))
+            column_pattern = r'sa\.Column\(["\'](\w+)["\']'
+            migration_columns.update(re.findall(column_pattern, migration_content))
+
+            # Only scan upgrade() for renames (ignore downgrade which reverses them)
+            upgrade_match = re.search(r'def upgrade\b.*?(?=\ndef downgrade\b|\Z)', migration_content, re.DOTALL)
+            if upgrade_match:
+                upgrade_content = upgrade_match.group()
+                rename_pattern = r'alter_column\(["\'](\w+)["\'],\s*new_column_name=["\'](\w+)["\']'
+                for old_name, new_name in re.findall(rename_pattern, upgrade_content):
+                    renames[old_name] = new_name
+
+        # Apply renames to get the final column names
+        for old_name, new_name in renames.items():
+            migration_columns.discard(old_name)
+            migration_columns.add(new_name)
 
         # Get model columns
         model_columns = {col.name for col in ProcessingTask.__table__.columns}
