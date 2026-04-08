@@ -22,19 +22,43 @@ from alembic import op
 from sqlalchemy import inspect
 import sqlalchemy as sa
 
-from open_webui.migrations.util import get_existing_tables
-
-
 revision: str = "c7d8e9f0a1b2"
 down_revision: Union[str, None] = "665e242be94b"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+def _table_exists(conn, table_name: str) -> bool:
+    """Check table existence via raw SQL to avoid inspector caching issues."""
+    dialect = conn.dialect.name
+    if dialect == "postgresql":
+        result = conn.execute(
+            sa.text(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema = 'public' AND table_name = :t)"
+            ),
+            {"t": table_name},
+        )
+    else:
+        # SQLite fallback
+        result = conn.execute(
+            sa.text(
+                "SELECT EXISTS (SELECT 1 FROM sqlite_master "
+                "WHERE type='table' AND name = :t)"
+            ),
+            {"t": table_name},
+        )
+    return result.scalar()
+
+
 def upgrade() -> None:
     conn = op.get_bind()
     inspector = inspect(conn)
-    existing_tables = set(get_existing_tables())
+
+    existing_tables = {
+        t for t in ["access_grant", "skill", "processing_task"]
+        if _table_exists(conn, t)
+    }
 
     # 1. Ensure access_grant table exists
     if "access_grant" not in existing_tables:
