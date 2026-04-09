@@ -270,7 +270,7 @@ interface PickerResult {
 }
 
 // Get picker parameters based on account type
-function getPickerParams(): PickerParams {
+function getPickerParams(mode: 'files' | 'folders' = 'files'): PickerParams {
 	const channelId = uuidv4();
 	const config = OneDriveConfig.getInstance();
 
@@ -288,7 +288,7 @@ function getPickerParams(): PickerParams {
 			enabled: true
 		},
 		typesAndSources: {
-			mode: 'files',
+			mode,
 			pivots: {
 				oneDrive: true,
 				recent: true,
@@ -359,7 +359,8 @@ async function downloadOneDriveFile(
 
 // Open OneDrive file picker and return selected file metadata
 export async function openOneDrivePicker(
-	authorityType?: 'personal' | 'organizations'
+	authorityType?: 'personal' | 'organizations',
+	mode: 'files' | 'folders' = 'files'
 ): Promise<PickerResult | null> {
 	if (typeof window === 'undefined') {
 		throw new Error('Not in browser environment');
@@ -372,7 +373,7 @@ export async function openOneDrivePicker(
 	return new Promise((resolve, reject) => {
 		let pickerWindow: Window | null = null;
 		let channelPort: MessagePort | null = null;
-		const params = getPickerParams();
+		const params = getPickerParams(mode);
 		const baseUrl = config.getBaseUrl();
 
 		const handleWindowMessage = (event: MessageEvent) => {

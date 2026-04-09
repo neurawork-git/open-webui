@@ -41,6 +41,7 @@
 	import { processWeb, processYoutubeVideo } from '$lib/apis/retrieval';
 
 	import { blobToFile, isYoutubeUrl } from '$lib/utils';
+	import { openOneDrivePicker } from '$lib/utils/onedrive-file-picker';
 
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import Files from './KnowledgeBase/Files.svelte';
@@ -84,7 +85,6 @@
 
 	let showSyncConfirmModal = false;
 	let showAccessControlModal = false;
-	let showSharePointImportModal = false;
 	let sharePointImporting = false;
 
 	let minSize = 0;
@@ -408,7 +408,6 @@
 			toast.error(`${e}`);
 		} finally {
 			sharePointImporting = false;
-			showSharePointImportModal = false;
 		}
 	};
 
@@ -948,78 +947,6 @@
 	}}
 />
 
-{#if showSharePointImportModal}
-	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-		<div class="bg-white dark:bg-gray-900 rounded-2xl p-6 w-full max-w-md mx-4 shadow-xl">
-			<h3 class="text-lg font-semibold mb-4">{$i18n.t('Import from SharePoint')}</h3>
-
-			<form
-				on:submit|preventDefault={(e) => {
-					const formData = new FormData(e.target);
-					const driveId = formData.get('driveId')?.toString() ?? '';
-					const itemId = formData.get('itemId')?.toString() ?? '';
-					if (driveId && itemId) {
-						sharePointImportHandler(driveId, itemId);
-					}
-				}}
-			>
-				<div class="mb-3">
-					<label for="sp-drive-id" class="block text-sm font-medium mb-1">
-						{$i18n.t('Drive ID')}
-					</label>
-					<input
-						id="sp-drive-id"
-						name="driveId"
-						type="text"
-						required
-						class="w-full px-3 py-2 text-sm border border-gray-200 dark:border-gray-700 rounded-xl bg-transparent outline-none focus:ring-1 focus:ring-blue-500"
-						placeholder="b!xxxxxxxx..."
-					/>
-				</div>
-
-				<div class="mb-4">
-					<label for="sp-item-id" class="block text-sm font-medium mb-1">
-						{$i18n.t('Folder ID')}
-					</label>
-					<input
-						id="sp-item-id"
-						name="itemId"
-						type="text"
-						required
-						class="w-full px-3 py-2 text-sm border border-gray-200 dark:border-gray-700 rounded-xl bg-transparent outline-none focus:ring-1 focus:ring-blue-500"
-						placeholder="01XXXXXXXX..."
-					/>
-				</div>
-
-				<p class="text-xs text-gray-500 dark:text-gray-400 mb-4">
-					{$i18n.t('Find these IDs in the SharePoint URL or via Microsoft Graph Explorer.')}
-				</p>
-
-				<div class="flex justify-end gap-2">
-					<button
-						type="button"
-						class="px-4 py-2 text-sm rounded-xl hover:bg-gray-100 dark:hover:bg-gray-800"
-						on:click={() => { showSharePointImportModal = false; }}
-					>
-						{$i18n.t('Cancel')}
-					</button>
-					<button
-						type="submit"
-						disabled={sharePointImporting}
-						class="px-4 py-2 text-sm bg-blue-600 text-white rounded-xl hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
-					>
-						{#if sharePointImporting}
-							<Spinner className="size-3" />
-							{$i18n.t('Importing...')}
-						{:else}
-							{$i18n.t('Import')}
-						{/if}
-					</button>
-				</div>
-			</form>
-		</div>
-	</div>
-{/if}
 
 <input
 	id="files-input"
@@ -1255,7 +1182,20 @@
 									} else if (data.type === 'text') {
 										showAddTextContentModal = true;
 									} else if (data.type === 'sharepoint') {
-										showSharePointImportModal = true;
+										(async () => {
+											try {
+												const result = await openOneDrivePicker('organizations', 'folders');
+												if (result?.items?.length > 0) {
+													const folder = result.items[0];
+													await sharePointImportHandler(
+														folder.parentReference.driveId,
+														folder.id
+													);
+												}
+											} catch (e) {
+												toast.error(`SharePoint: ${e}`);
+											}
+										})();
 									} else {
 										document.getElementById('files-input').click();
 									}
