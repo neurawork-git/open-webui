@@ -929,6 +929,125 @@ async def delete_knowledge_by_id(
 
 
 ############################
+# ReindexKnowledgeById
+############################
+
+
+class ReindexResponse(BaseModel):
+    """Response model for reindex operation."""
+
+    success: bool
+    message: str
+    total_files: int
+    processed_files: int
+    failed_files: list[dict]
+
+
+@router.post("/{id}/reindex", response_model=ReindexResponse)
+async def reindex_knowledge_by_id(
+    request: Request,
+    id: str,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Reindex a single knowledge base by deleting its vector collection
+    and re-processing all files with current embedding settings.
+
+    This is useful when:
+    - Embedding model has changed
+    - Vector dimension mismatch errors occur
+    - Files need to be re-chunked with new settings
+    """
+    knowledge = await Knowledges.get_knowledge_by_id(id=id, db=db)
+    if not knowledge:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    # Check access - must be owner, have write access, or be admin
+    if (
+        knowledge.user_id != user.id
+        and not await AccessGrants.has_access(
+            user_id=user.id,
+            resource_type='knowledge',
+            resource_id=knowledge.id,
+            permission='write',
+            db=db,
+        )
+        and user.role != 'admin'
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    log.info(f"Starting reindex for knowledge base {id} ({knowledge.name})")
+
+    files = await Knowledges.get_files_by_id(id, db=db)
+    total_files = len(files)
+
+    # Delete existing vector collection
+    try:
+        if await ASYNC_VECTOR_DB_CLIENT.has_collection(collection_name=id):
+            await ASYNC_VECTOR_DB_CLIENT.delete_collection(collection_name=id)
+            log.info(f"Deleted existing vector collection for knowledge base {id}")
+    except Exception as e:
+        log.error(f"Error deleting collection {id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete existing vector collection: {str(e)}",
+        )
+
+    # Re-process all files
+    failed_files = []
+    processed_count = 0
+
+    for file in files:
+        try:
+            await process_file(
+                request,
+                ProcessFileForm(file_id=file.id, collection_name=id),
+                user=user,
+                db=db,
+            )
+            processed_count += 1
+            log.debug(f"Reindexed file {file.filename} (ID: {file.id})")
+        except Exception as e:
+            log.error(f"Error processing file {file.filename} (ID: {file.id}): {str(e)}")
+            failed_files.append({
+                "file_id": file.id,
+                "filename": file.filename,
+                "error": str(e)
+            })
+
+    # Log summary
+    if failed_files:
+        log.warning(
+            f"Reindex completed for knowledge base {id} with {len(failed_files)} failures "
+            f"out of {total_files} files"
+        )
+    else:
+        log.info(
+            f"Reindex completed successfully for knowledge base {id}: "
+            f"{processed_count}/{total_files} files processed"
+        )
+
+    return ReindexResponse(
+        success=len(failed_files) == 0,
+        message=(
+            f"Reindexed {processed_count}/{total_files} files successfully"
+            if len(failed_files) == 0
+            else f"Reindexed {processed_count}/{total_files} files with {len(failed_files)} failures"
+        ),
+        total_files=total_files,
+        processed_files=processed_count,
+        failed_files=failed_files,
+    )
+
+
+############################
 # ResetKnowledgeById
 ############################
 
