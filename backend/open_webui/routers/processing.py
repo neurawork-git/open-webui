@@ -11,10 +11,10 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import desc, asc
-from sqlalchemy.orm import Session
+from sqlalchemy import desc, asc, select, func
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from open_webui.internal.db import get_session
+from open_webui.internal.db import get_async_session
 from open_webui.models.processing import (
     ProcessingTask,
     ProcessingTasks,
@@ -52,7 +52,7 @@ async def list_processing_tasks(
     sort_by: str = Query("created_at", description="Field to sort by"),
     sort_order: str = Query("desc", description="Sort order (asc or desc)"),
     user=Depends(get_admin_user),
-    db: Session = Depends(get_session),
+    db: AsyncSession = Depends(get_async_session),
 ):
     """
     List all processing tasks with filtering and pagination.
@@ -60,32 +60,35 @@ async def list_processing_tasks(
     Admin only endpoint.
     """
     try:
-        query = db.query(ProcessingTask)
+        stmt = select(ProcessingTask)
 
         # Apply filters
         if status_filter:
-            query = query.filter(ProcessingTask.status == status_filter)
+            stmt = stmt.where(ProcessingTask.status == status_filter)
         if stage:
-            query = query.filter(ProcessingTask.stage == stage)
+            stmt = stmt.where(ProcessingTask.stage == stage)
         if user_id:
-            query = query.filter(ProcessingTask.user_id == user_id)
+            stmt = stmt.where(ProcessingTask.user_id == user_id)
         if document_type:
-            query = query.filter(ProcessingTask.document_type == document_type)
+            stmt = stmt.where(ProcessingTask.document_type == document_type)
         if search:
-            query = query.filter(ProcessingTask.document_name.ilike(f"%{search}%"))
+            stmt = stmt.where(ProcessingTask.document_name.ilike(f"%{search}%"))
 
         # Get total count before pagination
-        total = query.count()
+        count_result = await db.execute(select(func.count()).select_from(stmt.subquery()))
+        total = count_result.scalar() or 0
 
         # Apply sorting
         sort_column = getattr(ProcessingTask, sort_by, ProcessingTask.created_at)
         if sort_order.lower() == "asc":
-            query = query.order_by(asc(sort_column))
+            stmt = stmt.order_by(asc(sort_column))
         else:
-            query = query.order_by(desc(sort_column))
+            stmt = stmt.order_by(desc(sort_column))
 
         # Apply pagination
-        tasks = query.offset(offset).limit(limit).all()
+        stmt = stmt.offset(offset).limit(limit)
+        result = await db.execute(stmt)
+        tasks = result.scalars().all()
 
         # Convert to response models with elapsed time calculation
         items = []
@@ -141,14 +144,14 @@ async def list_processing_tasks(
 async def get_processing_task(
     task_id: str,
     user=Depends(get_admin_user),
-    db: Session = Depends(get_session),
+    db: AsyncSession = Depends(get_async_session),
 ):
     """
     Get detailed information about a specific processing task.
 
     Admin only endpoint.
     """
-    task = db.get(ProcessingTask, task_id)
+    task = await db.get(ProcessingTask, task_id)
     if not task:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -197,7 +200,7 @@ async def cancel_processing_task(
     task_id: str,
     request: Optional[CancelTaskRequest] = None,
     user=Depends(get_admin_user),
-    db: Session = Depends(get_session),
+    db: AsyncSession = Depends(get_async_session),
 ):
     """
     Request cancellation of a processing task.
@@ -207,7 +210,7 @@ async def cancel_processing_task(
 
     Admin only endpoint.
     """
-    task = db.get(ProcessingTask, task_id)
+    task = await db.get(ProcessingTask, task_id)
     if not task:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -235,9 +238,9 @@ async def cancel_processing_task(
 
     # Store reason in metadata if provided
     if request and request.reason:
-        task.metadata = {**(task.metadata or {}), "cancellation_reason": request.reason}
+        task.meta = {**(task.meta or {}), "cancellation_reason": request.reason}
 
-    db.commit()
+    await db.commit()
 
     log.info(f"Cancellation requested for task {task_id} by user {user.id}")
 
@@ -257,7 +260,7 @@ async def cancel_processing_task(
 async def retry_processing_task(
     task_id: str,
     user=Depends(get_admin_user),
-    db: Session = Depends(get_session),
+    db: AsyncSession = Depends(get_async_session),
 ):
     """
     Retry a failed processing task.
@@ -267,7 +270,7 @@ async def retry_processing_task(
 
     Admin only endpoint.
     """
-    result = ProcessingTasks.retry_task(task_id, db=db)
+    result = await ProcessingTasks.retry_task(task_id, db=db)
     if not result:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -293,7 +296,7 @@ async def retry_processing_task(
 async def delete_processing_task(
     task_id: str,
     user=Depends(get_admin_user),
-    db: Session = Depends(get_session),
+    db: AsyncSession = Depends(get_async_session),
 ):
     """
     Delete a processing task record.
@@ -302,7 +305,7 @@ async def delete_processing_task(
 
     Admin only endpoint.
     """
-    task = db.get(ProcessingTask, task_id)
+    task = await db.get(ProcessingTask, task_id)
     if not task:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -320,7 +323,7 @@ async def delete_processing_task(
             detail="Cannot delete active task. Cancel it first.",
         )
 
-    result = ProcessingTasks.delete_task(task_id, db=db)
+    result = await ProcessingTasks.delete_task(task_id, db=db)
     if not result:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -345,7 +348,7 @@ async def delete_processing_task(
 async def get_processing_metrics(
     time_range: str = Query("24h", description="Time range: 1h, 24h, 7d, 30d"),
     user=Depends(get_admin_user),
-    db: Session = Depends(get_session),
+    db: AsyncSession = Depends(get_async_session),
 ):
     """
     Get aggregate processing metrics.
@@ -364,7 +367,7 @@ async def get_processing_metrics(
     seconds_ago = range_mapping.get(time_range, 86400)
     since_timestamp = current_time - seconds_ago
 
-    return ProcessingTasks.get_metrics(since_timestamp=since_timestamp, db=db)
+    return await ProcessingTasks.get_metrics(since_timestamp=since_timestamp, db=db)
 
 
 ####################
@@ -381,7 +384,7 @@ class BulkCancelRequest(BaseModel):
 async def bulk_cancel_tasks(
     request: BulkCancelRequest,
     user=Depends(get_admin_user),
-    db: Session = Depends(get_session),
+    db: AsyncSession = Depends(get_async_session),
 ):
     """
     Cancel multiple processing tasks at once.
@@ -393,7 +396,7 @@ async def bulk_cancel_tasks(
     current_time = int(time.time())
 
     for task_id in request.task_ids:
-        task = db.get(ProcessingTask, task_id)
+        task = await db.get(ProcessingTask, task_id)
         if not task:
             failed.append({"task_id": task_id, "reason": "Not found"})
             continue
@@ -411,11 +414,11 @@ async def bulk_cancel_tasks(
         task.cancelled_by = user.id
         task.cancelled_at = current_time
         if request.reason:
-            task.metadata = {**(task.metadata or {}), "cancellation_reason": request.reason}
+            task.meta = {**(task.meta or {}), "cancellation_reason": request.reason}
 
         cancelled.append(task_id)
 
-    db.commit()
+    await db.commit()
 
     log.info(f"Bulk cancellation: {len(cancelled)} cancelled, {len(failed)} failed, by user {user.id}")
 
@@ -434,7 +437,7 @@ class BulkRetryRequest(BaseModel):
 async def bulk_retry_tasks(
     request: BulkRetryRequest,
     user=Depends(get_admin_user),
-    db: Session = Depends(get_session),
+    db: AsyncSession = Depends(get_async_session),
 ):
     """
     Retry multiple failed tasks at once.
@@ -445,7 +448,7 @@ async def bulk_retry_tasks(
     failed = []
 
     for task_id in request.task_ids:
-        result = ProcessingTasks.retry_task(task_id, db=db)
+        result = await ProcessingTasks.retry_task(task_id, db=db)
         if result:
             retried.append(task_id)
         else:
@@ -468,7 +471,7 @@ class BulkDeleteRequest(BaseModel):
 async def bulk_delete_tasks(
     request: BulkDeleteRequest,
     user=Depends(get_admin_user),
-    db: Session = Depends(get_session),
+    db: AsyncSession = Depends(get_async_session),
 ):
     """
     Delete multiple completed/failed/cancelled tasks at once.
@@ -485,7 +488,7 @@ async def bulk_delete_tasks(
     ]
 
     for task_id in request.task_ids:
-        task = db.get(ProcessingTask, task_id)
+        task = await db.get(ProcessingTask, task_id)
         if not task:
             failed.append({"task_id": task_id, "reason": "Not found"})
             continue
@@ -494,7 +497,7 @@ async def bulk_delete_tasks(
             failed.append({"task_id": task_id, "reason": "Task is still active"})
             continue
 
-        result = ProcessingTasks.delete_task(task_id, db=db)
+        result = await ProcessingTasks.delete_task(task_id, db=db)
         if result:
             deleted.append(task_id)
         else:
@@ -519,7 +522,7 @@ async def cleanup_old_tasks(
     days: int = Query(30, ge=1, le=365, description="Delete tasks older than this many days"),
     status_filter: Optional[str] = Query(None, alias="status", description="Only delete tasks with this status"),
     user=Depends(get_admin_user),
-    db: Session = Depends(get_session),
+    db: AsyncSession = Depends(get_async_session),
 ):
     """
     Delete old processing tasks to clean up the database.
@@ -540,7 +543,7 @@ async def cleanup_old_tasks(
                 detail=f"Invalid status: {status_filter}",
             )
 
-    count = ProcessingTasks.delete_old_tasks(
+    count = await ProcessingTasks.delete_old_tasks(
         older_than_timestamp=older_than,
         status=status_enum,
         db=db,

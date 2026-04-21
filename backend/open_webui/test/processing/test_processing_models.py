@@ -7,7 +7,7 @@ and the ProcessingTaskTracker helper class.
 
 import pytest
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, AsyncMock, patch
 
 from open_webui.models.processing import (
     ProcessingTask,
@@ -394,75 +394,75 @@ class TestProcessingTaskTracker:
 
     def test_tracker_initialization(self, mock_db, mock_task):
         """Test tracker initialization."""
-        with patch.object(ProcessingTasks, 'get_task_by_id', return_value=mock_task):
+        with patch.object(ProcessingTasks, 'get_task_by_id', new=AsyncMock(return_value=mock_task)):
             tracker = ProcessingTaskTracker("task-123", db=mock_db)
             assert tracker.task_id == "task-123"
 
-    def test_update_stage(self, mock_db, mock_task):
+    @pytest.mark.asyncio
+    async def test_update_stage(self, mock_db, mock_task):
         """Test updating processing stage."""
-        with patch.object(ProcessingTasks, 'get_task_by_id', return_value=mock_task):
-            with patch.object(ProcessingTasks, 'update_task') as mock_update:
+        with patch.object(ProcessingTasks, 'get_task_by_id', new=AsyncMock(return_value=mock_task)):
+            with patch.object(ProcessingTasks, 'update_task', new=AsyncMock()) as mock_update:
                 tracker = ProcessingTaskTracker("task-123", db=mock_db)
-                tracker.update_stage(ProcessingStage.EXTRACTING)
+                await tracker.update_stage(ProcessingStage.EXTRACTING)
 
                 mock_update.assert_called()
                 call_args = mock_update.call_args
                 assert call_args[0][0] == "task-123"
 
-    def test_is_cancelled_returns_false(self, mock_db, mock_task):
+    @pytest.mark.asyncio
+    async def test_is_cancelled_returns_false(self, mock_db, mock_task):
         """Test is_cancelled returns False when not cancelled."""
         mock_task.cancel_requested = False
-        with patch.object(ProcessingTasks, 'get_task_by_id', return_value=mock_task):
+        # get_task_by_id returns a ProcessingTaskModel-like object; the mock task has cancel_requested=False
+        with patch.object(ProcessingTasks, 'get_task_by_id', new=AsyncMock(return_value=mock_task)):
             tracker = ProcessingTaskTracker("task-123", db=mock_db)
-            assert tracker.is_cancelled() is False
+            assert await tracker.is_cancelled() is False
 
-    def test_is_cancelled_returns_true(self, mock_db, mock_task):
+    @pytest.mark.asyncio
+    async def test_is_cancelled_returns_true(self, mock_db, mock_task):
         """Test is_cancelled returns True when cancelled."""
         mock_task.cancel_requested = True
-        with patch.object(ProcessingTasks, 'get_task_by_id', return_value=mock_task):
+        with patch.object(ProcessingTasks, 'get_task_by_id', new=AsyncMock(return_value=mock_task)):
             tracker = ProcessingTaskTracker("task-123", db=mock_db)
-            assert tracker.is_cancelled() is True
+            assert await tracker.is_cancelled() is True
 
-    def test_complete_sets_terminal_state(self, mock_db, mock_task):
-        """Test complete() sets task to COMPLETED."""
-        with patch.object(ProcessingTasks, 'get_task_by_id', return_value=mock_task):
-            with patch.object(ProcessingTasks, 'update_task') as mock_update:
+    @pytest.mark.asyncio
+    async def test_complete_sets_terminal_state(self, mock_db, mock_task):
+        """Test complete() calls complete_task."""
+        with patch.object(ProcessingTasks, 'get_task_by_id', new=AsyncMock(return_value=mock_task)):
+            with patch.object(ProcessingTasks, 'complete_task', new=AsyncMock()) as mock_complete:
                 tracker = ProcessingTaskTracker("task-123", db=mock_db)
-                tracker.complete()
+                await tracker.complete()
 
-                mock_update.assert_called()
-                call_args = mock_update.call_args
-                update_data = call_args[1].get('update_data') or call_args[0][1]
-                assert update_data.status == ProcessingStatus.COMPLETED.value
-                assert update_data.stage == ProcessingStage.COMPLETED.value
-                assert update_data.progress == 1.0
+                mock_complete.assert_called()
+                call_args = mock_complete.call_args
+                assert call_args[0][0] == "task-123"
 
-    def test_fail_sets_error_state(self, mock_db, mock_task):
-        """Test fail() sets task to FAILED with error message."""
-        with patch.object(ProcessingTasks, 'get_task_by_id', return_value=mock_task):
-            with patch.object(ProcessingTasks, 'update_task') as mock_update:
+    @pytest.mark.asyncio
+    async def test_fail_sets_error_state(self, mock_db, mock_task):
+        """Test fail() calls fail_task with error message."""
+        with patch.object(ProcessingTasks, 'get_task_by_id', new=AsyncMock(return_value=mock_task)):
+            with patch.object(ProcessingTasks, 'fail_task', new=AsyncMock()) as mock_fail:
                 tracker = ProcessingTaskTracker("task-123", db=mock_db)
-                tracker.fail("Connection error", {"type": "NetworkError"})
+                await tracker.fail("Connection error", {"type": "NetworkError"})
 
-                mock_update.assert_called()
-                call_args = mock_update.call_args
-                update_data = call_args[1].get('update_data') or call_args[0][1]
-                assert update_data.status == ProcessingStatus.FAILED.value
-                assert update_data.stage == ProcessingStage.FAILED.value
-                assert update_data.error_message == "Connection error"
+                mock_fail.assert_called()
+                call_args = mock_fail.call_args
+                assert call_args[0][0] == "task-123"
+                assert call_args[0][1] == "Connection error"
 
-    def test_cancel_sets_cancelled_state(self, mock_db, mock_task):
-        """Test cancel() sets task to CANCELLED."""
-        with patch.object(ProcessingTasks, 'get_task_by_id', return_value=mock_task):
-            with patch.object(ProcessingTasks, 'update_task') as mock_update:
+    @pytest.mark.asyncio
+    async def test_cancel_sets_cancelled_state(self, mock_db, mock_task):
+        """Test cancel() calls cancel_task."""
+        with patch.object(ProcessingTasks, 'get_task_by_id', new=AsyncMock(return_value=mock_task)):
+            with patch.object(ProcessingTasks, 'cancel_task', new=AsyncMock()) as mock_cancel:
                 tracker = ProcessingTaskTracker("task-123", db=mock_db)
-                tracker.cancel()
+                await tracker.cancel()
 
-                mock_update.assert_called()
-                call_args = mock_update.call_args
-                update_data = call_args[1].get('update_data') or call_args[0][1]
-                assert update_data.status == ProcessingStatus.CANCELLED.value
-                assert update_data.stage == ProcessingStage.CANCELLED.value
+                mock_cancel.assert_called()
+                call_args = mock_cancel.call_args
+                assert call_args[0][0] == "task-123"
 
 
 class TestProcessingTasksTable:
@@ -474,16 +474,10 @@ class TestProcessingTasksTable:
         db = MagicMock()
         return db
 
-    def test_get_metrics_returns_metrics_object(self, mock_db):
+    @pytest.mark.asyncio
+    async def test_get_metrics_returns_metrics_object(self, mock_db):
         """Test get_metrics returns ProcessingMetrics."""
-        # Mock the query to return counts
-        mock_query = MagicMock()
-        mock_db.query.return_value = mock_query
-        mock_query.filter.return_value = mock_query
-        mock_query.count.return_value = 10
-        mock_query.scalar.return_value = 45.5
-
-        with patch.object(ProcessingTasks, 'get_metrics') as mock_get_metrics:
+        with patch.object(ProcessingTasks, 'get_metrics', new=AsyncMock()) as mock_get_metrics:
             mock_get_metrics.return_value = ProcessingMetrics(
                 total_tasks=100,
                 queued=5,
@@ -495,7 +489,7 @@ class TestProcessingTasksTable:
                 success_rate=94.1,
             )
 
-            metrics = ProcessingTasks.get_metrics(since_timestamp=0, db=mock_db)
+            metrics = await ProcessingTasks.get_metrics(since_timestamp=0, db=mock_db)
 
             assert isinstance(metrics, ProcessingMetrics)
             assert metrics.total_tasks == 100

@@ -12,10 +12,10 @@ from enum import Enum
 from typing import Optional, List
 
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import BigInteger, Boolean, Column, Float, Integer, String, Text
-from sqlalchemy.orm import Session
+from sqlalchemy import BigInteger, Boolean, Column, Float, Integer, String, Text, select, delete, func
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from open_webui.internal.db import Base, JSONField, get_db_context
+from open_webui.internal.db import Base, JSONField, get_async_db_context
 
 log = logging.getLogger(__name__)
 
@@ -134,7 +134,9 @@ class ProcessingTask(Base):
     cancelled_at = Column(BigInteger, nullable=True)
 
     # Additional metadata (scraper type, URL, content size, etc.)
-    metadata = Column(JSONField, nullable=True)
+    # NOTE: attribute is 'meta' (DB column stays 'metadata') because 'metadata'
+    # is reserved by SQLAlchemy's Declarative Base.
+    meta = Column("metadata", JSONField, nullable=True)
 
 
 ####################
@@ -175,7 +177,7 @@ class ProcessingTaskModel(BaseModel):
     cancelled_by: Optional[str] = None
     cancelled_at: Optional[int] = None
 
-    metadata: Optional[dict] = None
+    meta: Optional[dict] = None
 
 
 class ProcessingTaskResponse(BaseModel):
@@ -215,7 +217,7 @@ class ProcessingTaskCreate(BaseModel):
     document_type: str = DocumentType.FILE_UPLOAD.value
     chat_id: Optional[str] = None
     knowledge_id: Optional[str] = None
-    metadata: Optional[dict] = None
+    meta: Optional[dict] = None
 
 
 class ProcessingTaskUpdate(BaseModel):
@@ -227,7 +229,7 @@ class ProcessingTaskUpdate(BaseModel):
     current_batch: Optional[int] = None
     error_message: Optional[str] = None
     error_details: Optional[dict] = None
-    metadata: Optional[dict] = None
+    meta: Optional[dict] = None
 
 
 class ProcessingMetrics(BaseModel):
@@ -297,14 +299,14 @@ def get_progress_for_stage(stage: ProcessingStage, stage_progress: float = 0.0) 
 class ProcessingTasksTable:
     """Database operations for ProcessingTask."""
 
-    def create_task(
+    async def create_task(
         self,
         user_id: str,
         form_data: ProcessingTaskCreate,
-        db: Optional[Session] = None
+        db: Optional[AsyncSession] = None
     ) -> Optional[ProcessingTaskModel]:
         """Create a new processing task."""
-        with get_db_context(db) as db:
+        async with get_async_db_context(db) as db:
             try:
                 task_id = str(uuid.uuid4())
                 now = int(time.time())
@@ -321,27 +323,27 @@ class ProcessingTasksTable:
                     stage=ProcessingStage.QUEUED.value,
                     progress=0.0,
                     created_at=now,
-                    metadata=form_data.metadata,
+                    meta=form_data.meta,
                 )
 
                 db.add(task)
-                db.commit()
-                db.refresh(task)
+                await db.commit()
+                await db.refresh(task)
 
                 return ProcessingTaskModel.model_validate(task)
             except Exception as e:
                 log.exception(f"Error creating processing task: {e}")
                 return None
 
-    def get_task_by_id(
+    async def get_task_by_id(
         self,
         task_id: str,
-        db: Optional[Session] = None
+        db: Optional[AsyncSession] = None
     ) -> Optional[ProcessingTaskModel]:
         """Get a processing task by ID."""
-        with get_db_context(db) as db:
+        async with get_async_db_context(db) as db:
             try:
-                task = db.get(ProcessingTask, task_id)
+                task = await db.get(ProcessingTask, task_id)
                 if task:
                     return ProcessingTaskModel.model_validate(task)
                 return None
@@ -349,92 +351,98 @@ class ProcessingTasksTable:
                 log.exception(f"Error getting processing task: {e}")
                 return None
 
-    def get_tasks(
+    async def get_tasks(
         self,
         status: Optional[ProcessingStatus] = None,
         user_id: Optional[str] = None,
         document_type: Optional[DocumentType] = None,
         limit: int = 50,
         offset: int = 0,
-        db: Optional[Session] = None
+        db: Optional[AsyncSession] = None
     ) -> List[ProcessingTaskModel]:
         """Get processing tasks with optional filtering."""
-        with get_db_context(db) as db:
+        async with get_async_db_context(db) as db:
             try:
-                query = db.query(ProcessingTask)
+                stmt = select(ProcessingTask)
 
                 if status:
-                    query = query.filter(ProcessingTask.status == status.value)
+                    stmt = stmt.where(ProcessingTask.status == status.value)
                 if user_id:
-                    query = query.filter(ProcessingTask.user_id == user_id)
+                    stmt = stmt.where(ProcessingTask.user_id == user_id)
                 if document_type:
-                    query = query.filter(ProcessingTask.document_type == document_type.value)
+                    stmt = stmt.where(ProcessingTask.document_type == document_type.value)
 
-                tasks = (
-                    query
-                    .order_by(ProcessingTask.created_at.desc())
+                stmt = (
+                    stmt.order_by(ProcessingTask.created_at.desc())
                     .offset(offset)
                     .limit(limit)
-                    .all()
                 )
+
+                result = await db.execute(stmt)
+                tasks = result.scalars().all()
 
                 return [ProcessingTaskModel.model_validate(task) for task in tasks]
             except Exception as e:
                 log.exception(f"Error getting processing tasks: {e}")
                 return []
 
-    def get_active_tasks(
+    async def get_active_tasks(
         self,
-        db: Optional[Session] = None
+        db: Optional[AsyncSession] = None
     ) -> List[ProcessingTaskModel]:
         """Get all active (non-terminal) processing tasks."""
-        with get_db_context(db) as db:
+        async with get_async_db_context(db) as db:
             try:
-                tasks = (
-                    db.query(ProcessingTask)
-                    .filter(ProcessingTask.status.in_([
+                stmt = (
+                    select(ProcessingTask)
+                    .where(ProcessingTask.status.in_([
                         ProcessingStatus.QUEUED.value,
                         ProcessingStatus.PROCESSING.value
                     ]))
                     .order_by(ProcessingTask.created_at.asc())
-                    .all()
                 )
+                result = await db.execute(stmt)
+                tasks = result.scalars().all()
                 return [ProcessingTaskModel.model_validate(task) for task in tasks]
             except Exception as e:
                 log.exception(f"Error getting active tasks: {e}")
                 return []
 
-    def count_tasks(
+    async def count_tasks(
         self,
         status: Optional[ProcessingStatus] = None,
         since_timestamp: Optional[int] = None,
-        db: Optional[Session] = None
+        db: Optional[AsyncSession] = None
     ) -> int:
         """Count tasks with optional filtering."""
-        with get_db_context(db) as db:
+        async with get_async_db_context(db) as db:
             try:
-                query = db.query(ProcessingTask)
+                stmt = select(func.count()).select_from(ProcessingTask)
 
                 if status:
-                    query = query.filter(ProcessingTask.status == status.value)
+                    stmt = stmt.where(ProcessingTask.status == status.value)
                 if since_timestamp:
-                    query = query.filter(ProcessingTask.created_at >= since_timestamp)
+                    stmt = stmt.where(ProcessingTask.created_at >= since_timestamp)
 
-                return query.count()
+                result = await db.execute(stmt)
+                return result.scalar() or 0
             except Exception as e:
                 log.exception(f"Error counting tasks: {e}")
                 return 0
 
-    def update_task(
+    async def update_task(
         self,
         task_id: str,
         form_data: ProcessingTaskUpdate,
-        db: Optional[Session] = None
+        db: Optional[AsyncSession] = None
     ) -> Optional[ProcessingTaskModel]:
         """Update a processing task."""
-        with get_db_context(db) as db:
+        async with get_async_db_context(db) as db:
             try:
-                task = db.query(ProcessingTask).filter_by(id=task_id).first()
+                result = await db.execute(
+                    select(ProcessingTask).where(ProcessingTask.id == task_id)
+                )
+                task = result.scalar_one_or_none()
                 if not task:
                     return None
 
@@ -467,26 +475,29 @@ class ProcessingTasksTable:
                     task.error_message = form_data.error_message
                 if form_data.error_details is not None:
                     task.error_details = form_data.error_details
-                if form_data.metadata is not None:
-                    task.metadata = {**(task.metadata or {}), **form_data.metadata}
+                if form_data.meta is not None:
+                    task.meta = {**(task.meta or {}), **form_data.meta}
 
-                db.commit()
-                db.refresh(task)
+                await db.commit()
+                await db.refresh(task)
 
                 return ProcessingTaskModel.model_validate(task)
             except Exception as e:
                 log.exception(f"Error updating processing task: {e}")
                 return None
 
-    def start_task(
+    async def start_task(
         self,
         task_id: str,
-        db: Optional[Session] = None
+        db: Optional[AsyncSession] = None
     ) -> Optional[ProcessingTaskModel]:
         """Mark a task as started (transition to EXTRACTING)."""
-        with get_db_context(db) as db:
+        async with get_async_db_context(db) as db:
             try:
-                task = db.query(ProcessingTask).filter_by(id=task_id).first()
+                result = await db.execute(
+                    select(ProcessingTask).where(ProcessingTask.id == task_id)
+                )
+                task = result.scalar_one_or_none()
                 if not task:
                     return None
 
@@ -494,23 +505,26 @@ class ProcessingTasksTable:
                 task.status = ProcessingStatus.PROCESSING.value
                 task.started_at = int(time.time())
 
-                db.commit()
-                db.refresh(task)
+                await db.commit()
+                await db.refresh(task)
 
                 return ProcessingTaskModel.model_validate(task)
             except Exception as e:
                 log.exception(f"Error starting task: {e}")
                 return None
 
-    def complete_task(
+    async def complete_task(
         self,
         task_id: str,
-        db: Optional[Session] = None
+        db: Optional[AsyncSession] = None
     ) -> Optional[ProcessingTaskModel]:
         """Mark a task as completed."""
-        with get_db_context(db) as db:
+        async with get_async_db_context(db) as db:
             try:
-                task = db.query(ProcessingTask).filter_by(id=task_id).first()
+                result = await db.execute(
+                    select(ProcessingTask).where(ProcessingTask.id == task_id)
+                )
+                task = result.scalar_one_or_none()
                 if not task:
                     return None
 
@@ -519,25 +533,28 @@ class ProcessingTasksTable:
                 task.progress = 1.0
                 task.completed_at = int(time.time())
 
-                db.commit()
-                db.refresh(task)
+                await db.commit()
+                await db.refresh(task)
 
                 return ProcessingTaskModel.model_validate(task)
             except Exception as e:
                 log.exception(f"Error completing task: {e}")
                 return None
 
-    def fail_task(
+    async def fail_task(
         self,
         task_id: str,
         error_message: str,
         error_details: Optional[dict] = None,
-        db: Optional[Session] = None
+        db: Optional[AsyncSession] = None
     ) -> Optional[ProcessingTaskModel]:
         """Mark a task as failed."""
-        with get_db_context(db) as db:
+        async with get_async_db_context(db) as db:
             try:
-                task = db.query(ProcessingTask).filter_by(id=task_id).first()
+                result = await db.execute(
+                    select(ProcessingTask).where(ProcessingTask.id == task_id)
+                )
+                task = result.scalar_one_or_none()
                 if not task:
                     return None
 
@@ -547,24 +564,27 @@ class ProcessingTasksTable:
                 task.error_details = error_details
                 task.completed_at = int(time.time())
 
-                db.commit()
-                db.refresh(task)
+                await db.commit()
+                await db.refresh(task)
 
                 return ProcessingTaskModel.model_validate(task)
             except Exception as e:
                 log.exception(f"Error failing task: {e}")
                 return None
 
-    def request_cancellation(
+    async def request_cancellation(
         self,
         task_id: str,
         cancelled_by: str,
-        db: Optional[Session] = None
+        db: Optional[AsyncSession] = None
     ) -> Optional[ProcessingTaskModel]:
         """Request cancellation of a task."""
-        with get_db_context(db) as db:
+        async with get_async_db_context(db) as db:
             try:
-                task = db.query(ProcessingTask).filter_by(id=task_id).first()
+                result = await db.execute(
+                    select(ProcessingTask).where(ProcessingTask.id == task_id)
+                )
+                task = result.scalar_one_or_none()
                 if not task:
                     return None
 
@@ -578,23 +598,26 @@ class ProcessingTasksTable:
                 task.cancelled_by = cancelled_by
                 task.cancelled_at = int(time.time())
 
-                db.commit()
-                db.refresh(task)
+                await db.commit()
+                await db.refresh(task)
 
                 return ProcessingTaskModel.model_validate(task)
             except Exception as e:
                 log.exception(f"Error requesting cancellation: {e}")
                 return None
 
-    def cancel_task(
+    async def cancel_task(
         self,
         task_id: str,
-        db: Optional[Session] = None
+        db: Optional[AsyncSession] = None
     ) -> Optional[ProcessingTaskModel]:
         """Actually cancel a task (called after cancellation is processed)."""
-        with get_db_context(db) as db:
+        async with get_async_db_context(db) as db:
             try:
-                task = db.query(ProcessingTask).filter_by(id=task_id).first()
+                result = await db.execute(
+                    select(ProcessingTask).where(ProcessingTask.id == task_id)
+                )
+                task = result.scalar_one_or_none()
                 if not task:
                     return None
 
@@ -602,23 +625,26 @@ class ProcessingTasksTable:
                 task.status = ProcessingStatus.CANCELLED.value
                 task.completed_at = int(time.time())
 
-                db.commit()
-                db.refresh(task)
+                await db.commit()
+                await db.refresh(task)
 
                 return ProcessingTaskModel.model_validate(task)
             except Exception as e:
                 log.exception(f"Error cancelling task: {e}")
                 return None
 
-    def retry_task(
+    async def retry_task(
         self,
         task_id: str,
-        db: Optional[Session] = None
+        db: Optional[AsyncSession] = None
     ) -> Optional[ProcessingTaskModel]:
         """Retry a failed task."""
-        with get_db_context(db) as db:
+        async with get_async_db_context(db) as db:
             try:
-                task = db.query(ProcessingTask).filter_by(id=task_id).first()
+                result = await db.execute(
+                    select(ProcessingTask).where(ProcessingTask.id == task_id)
+                )
+                task = result.scalar_one_or_none()
                 if not task:
                     return None
 
@@ -641,128 +667,134 @@ class ProcessingTasksTable:
                 task.cancelled_by = None
                 task.cancelled_at = None
 
-                db.commit()
-                db.refresh(task)
+                await db.commit()
+                await db.refresh(task)
 
                 return ProcessingTaskModel.model_validate(task)
             except Exception as e:
                 log.exception(f"Error retrying task: {e}")
                 return None
 
-    def delete_task(
+    async def delete_task(
         self,
         task_id: str,
-        db: Optional[Session] = None
+        db: Optional[AsyncSession] = None
     ) -> bool:
         """Delete a processing task."""
-        with get_db_context(db) as db:
+        async with get_async_db_context(db) as db:
             try:
-                result = db.query(ProcessingTask).filter_by(id=task_id).delete()
-                db.commit()
-                return result > 0
+                result = await db.execute(
+                    delete(ProcessingTask).where(ProcessingTask.id == task_id)
+                )
+                await db.commit()
+                return (result.rowcount or 0) > 0
             except Exception as e:
                 log.exception(f"Error deleting task: {e}")
                 return False
 
-    def delete_old_tasks(
+    async def delete_old_tasks(
         self,
         older_than_timestamp: int,
         status: Optional[ProcessingStatus] = None,
-        db: Optional[Session] = None
+        db: Optional[AsyncSession] = None
     ) -> int:
         """Delete old completed/cancelled tasks for cleanup."""
-        with get_db_context(db) as db:
+        async with get_async_db_context(db) as db:
             try:
-                query = db.query(ProcessingTask).filter(
+                stmt = delete(ProcessingTask).where(
                     ProcessingTask.created_at < older_than_timestamp
                 )
 
                 if status:
-                    query = query.filter(ProcessingTask.status == status.value)
+                    stmt = stmt.where(ProcessingTask.status == status.value)
                 else:
                     # Only delete terminal states by default
-                    query = query.filter(ProcessingTask.status.in_([
+                    stmt = stmt.where(ProcessingTask.status.in_([
                         ProcessingStatus.COMPLETED.value,
                         ProcessingStatus.FAILED.value,
                         ProcessingStatus.CANCELLED.value
                     ]))
 
-                count = query.delete()
-                db.commit()
-                return count
+                result = await db.execute(stmt)
+                await db.commit()
+                return result.rowcount or 0
             except Exception as e:
                 log.exception(f"Error deleting old tasks: {e}")
                 return 0
 
-    def get_metrics(
+    async def get_metrics(
         self,
         since_timestamp: Optional[int] = None,
-        db: Optional[Session] = None
+        db: Optional[AsyncSession] = None
     ) -> ProcessingMetrics:
         """Get aggregate processing metrics."""
-        with get_db_context(db) as db:
+        async with get_async_db_context(db) as db:
             try:
                 # Default to last 24 hours if not specified
                 if since_timestamp is None:
                     since_timestamp = int(time.time()) - 86400
 
                 # Queue depth (queued tasks)
-                queue_depth = (
-                    db.query(ProcessingTask)
-                    .filter(ProcessingTask.status == ProcessingStatus.QUEUED.value)
-                    .count()
+                queue_depth_result = await db.execute(
+                    select(func.count())
+                    .select_from(ProcessingTask)
+                    .where(ProcessingTask.status == ProcessingStatus.QUEUED.value)
                 )
+                queue_depth = queue_depth_result.scalar() or 0
 
                 # Active count (processing tasks)
-                active_count = (
-                    db.query(ProcessingTask)
-                    .filter(ProcessingTask.status == ProcessingStatus.PROCESSING.value)
-                    .count()
+                active_result = await db.execute(
+                    select(func.count())
+                    .select_from(ProcessingTask)
+                    .where(ProcessingTask.status == ProcessingStatus.PROCESSING.value)
                 )
+                active_count = active_result.scalar() or 0
 
                 # Completed today
-                completed_today = (
-                    db.query(ProcessingTask)
-                    .filter(
+                completed_result = await db.execute(
+                    select(func.count())
+                    .select_from(ProcessingTask)
+                    .where(
                         ProcessingTask.status == ProcessingStatus.COMPLETED.value,
-                        ProcessingTask.completed_at >= since_timestamp
+                        ProcessingTask.completed_at >= since_timestamp,
                     )
-                    .count()
                 )
+                completed_today = completed_result.scalar() or 0
 
                 # Failed today
-                failed_today = (
-                    db.query(ProcessingTask)
-                    .filter(
+                failed_result = await db.execute(
+                    select(func.count())
+                    .select_from(ProcessingTask)
+                    .where(
                         ProcessingTask.status == ProcessingStatus.FAILED.value,
-                        ProcessingTask.completed_at >= since_timestamp
+                        ProcessingTask.completed_at >= since_timestamp,
                     )
-                    .count()
                 )
+                failed_today = failed_result.scalar() or 0
 
                 # Cancelled today
-                cancelled_today = (
-                    db.query(ProcessingTask)
-                    .filter(
+                cancelled_result = await db.execute(
+                    select(func.count())
+                    .select_from(ProcessingTask)
+                    .where(
                         ProcessingTask.status == ProcessingStatus.CANCELLED.value,
-                        ProcessingTask.completed_at >= since_timestamp
+                        ProcessingTask.completed_at >= since_timestamp,
                     )
-                    .count()
                 )
+                cancelled_today = cancelled_result.scalar() or 0
 
                 # Average processing time (for completed tasks)
-                from sqlalchemy import func
-                avg_result = (
-                    db.query(func.avg(ProcessingTask.completed_at - ProcessingTask.started_at))
-                    .filter(
+                avg_result = await db.execute(
+                    select(func.avg(ProcessingTask.completed_at - ProcessingTask.started_at))
+                    .where(
                         ProcessingTask.status == ProcessingStatus.COMPLETED.value,
                         ProcessingTask.started_at.isnot(None),
                         ProcessingTask.completed_at.isnot(None),
-                        ProcessingTask.completed_at >= since_timestamp
+                        ProcessingTask.completed_at >= since_timestamp,
                     )
-                    .scalar()
                 )
-                avg_processing_time = float(avg_result) if avg_result else None
+                avg_value = avg_result.scalar()
+                avg_processing_time = float(avg_value) if avg_value else None
 
                 return ProcessingMetrics(
                     queue_depth=queue_depth,
@@ -794,12 +826,12 @@ class ProcessingTaskTracker:
     direct database access at each step.
     """
 
-    def __init__(self, task_id: str, db: Optional[Session] = None):
+    def __init__(self, task_id: str, db: Optional[AsyncSession] = None):
         self.task_id = task_id
         self._db = db
         self._cancelled = False
 
-    def update_stage(
+    async def update_stage(
         self,
         stage: ProcessingStage,
         progress: Optional[float] = None,
@@ -819,7 +851,7 @@ class ProcessingTaskTracker:
             current_batch=current_batch,
         )
 
-        result = ProcessingTasks.update_task(self.task_id, update_data, db=self._db)
+        result = await ProcessingTasks.update_task(self.task_id, update_data, db=self._db)
 
         # Check for cancellation
         if result and result.cancel_requested:
@@ -827,7 +859,7 @@ class ProcessingTaskTracker:
 
         return result
 
-    def update_embedding_progress(
+    async def update_embedding_progress(
         self,
         processed_chunks: int,
         total_chunks: int,
@@ -844,7 +876,7 @@ class ProcessingTaskTracker:
             current_batch=current_batch,
         )
 
-        result = ProcessingTasks.update_task(self.task_id, update_data, db=self._db)
+        result = await ProcessingTasks.update_task(self.task_id, update_data, db=self._db)
 
         # Check for cancellation
         if result and result.cancel_requested:
@@ -852,29 +884,29 @@ class ProcessingTaskTracker:
 
         return result
 
-    def complete(self) -> Optional[ProcessingTaskModel]:
+    async def complete(self) -> Optional[ProcessingTaskModel]:
         """Mark the task as completed."""
-        return ProcessingTasks.complete_task(self.task_id, db=self._db)
+        return await ProcessingTasks.complete_task(self.task_id, db=self._db)
 
-    def fail(self, error_message: str, error_details: Optional[dict] = None) -> Optional[ProcessingTaskModel]:
+    async def fail(self, error_message: str, error_details: Optional[dict] = None) -> Optional[ProcessingTaskModel]:
         """Mark the task as failed."""
-        return ProcessingTasks.fail_task(self.task_id, error_message, error_details, db=self._db)
+        return await ProcessingTasks.fail_task(self.task_id, error_message, error_details, db=self._db)
 
-    def is_cancelled(self) -> bool:
+    async def is_cancelled(self) -> bool:
         """Check if cancellation has been requested."""
         if self._cancelled:
             return True
 
         # Refresh from database
-        task = ProcessingTasks.get_task_by_id(self.task_id, db=self._db)
+        task = await ProcessingTasks.get_task_by_id(self.task_id, db=self._db)
         if task and task.cancel_requested:
             self._cancelled = True
 
         return self._cancelled
 
-    def cancel(self) -> Optional[ProcessingTaskModel]:
+    async def cancel(self) -> Optional[ProcessingTaskModel]:
         """Mark the task as cancelled."""
-        return ProcessingTasks.cancel_task(self.task_id, db=self._db)
+        return await ProcessingTasks.cancel_task(self.task_id, db=self._db)
 
 
 class ProcessingCancelledException(Exception):
