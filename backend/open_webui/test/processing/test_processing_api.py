@@ -22,11 +22,40 @@ from open_webui.models.processing import (
     DocumentType,
     can_cancel,
 )
+from open_webui.utils.auth import get_admin_user
+from open_webui.internal.db import get_async_session
 
 
 # Create a test app with the router
 app = FastAPI()
 app.include_router(router)
+
+
+# Per-test overridable containers. `patch('...')` context managers still used
+# in existing tests set `return_value` on these lambdas via dependency_overrides.
+_current_admin = None
+_current_db = None
+
+
+def _get_admin_override():
+    return _current_admin
+
+
+def _get_async_session_override():
+    return _current_db
+
+
+app.dependency_overrides[get_admin_user] = _get_admin_override
+app.dependency_overrides[get_async_session] = _get_async_session_override
+
+
+@pytest.fixture(autouse=True)
+def _reset_overrides():
+    """Reset per-test override state."""
+    global _current_admin, _current_db
+    yield
+    _current_admin = None
+    _current_db = None
 
 
 def _make_async_db(mock_task=None, scalar_all=None, scalar_value=0):
@@ -83,7 +112,7 @@ def mock_task():
     task.retry_count = 0
     task.error_message = None
     task.cancel_requested = False
-    task.metadata = {}
+    task.meta = {}
     return task
 
 
@@ -108,7 +137,7 @@ def mock_failed_task():
     task.retry_count = 1
     task.error_message = "Connection timeout"
     task.cancel_requested = False
-    task.metadata = {}
+    task.meta = {}
     return task
 
 
@@ -117,46 +146,46 @@ class TestListProcessingTasks:
 
     def test_list_tasks_returns_list(self, mock_admin_user, mock_task):
         """Test that list endpoint returns task list."""
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_async_session') as mock_session:
-                mock_db = _make_async_db(mock_task=mock_task, scalar_all=[mock_task], scalar_value=1)
-                mock_session.return_value = mock_db
+        global _current_admin, _current_db
+        _current_admin = mock_admin_user
+        mock_db = _make_async_db(mock_task=mock_task, scalar_all=[mock_task], scalar_value=1)
+        _current_db = mock_db
 
-                client = TestClient(app)
-                response = client.get("/tasks")
+        client = TestClient(app)
+        response = client.get("/tasks")
 
-                assert response.status_code == 200
-                data = response.json()
-                assert "items" in data
-                assert "total" in data
-                assert data["total"] == 1
+        assert response.status_code == 200
+        data = response.json()
+        assert "items" in data
+        assert "total" in data
+        assert data["total"] == 1
 
     def test_list_tasks_with_status_filter(self, mock_admin_user, mock_task):
         """Test filtering tasks by status."""
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_async_session') as mock_session:
-                mock_db = _make_async_db(mock_task=mock_task, scalar_all=[mock_task], scalar_value=1)
-                mock_session.return_value = mock_db
+        global _current_admin, _current_db
+        _current_admin = mock_admin_user
+        mock_db = _make_async_db(mock_task=mock_task, scalar_all=[mock_task], scalar_value=1)
+        _current_db = mock_db
 
-                client = TestClient(app)
-                response = client.get("/tasks?status=processing")
+        client = TestClient(app)
+        response = client.get("/tasks?status=processing")
 
-                assert response.status_code == 200
+        assert response.status_code == 200
 
     def test_list_tasks_with_pagination(self, mock_admin_user, mock_task):
         """Test pagination parameters."""
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_async_session') as mock_session:
-                mock_db = _make_async_db(mock_task=mock_task, scalar_all=[mock_task], scalar_value=100)
-                mock_session.return_value = mock_db
+        global _current_admin, _current_db
+        _current_admin = mock_admin_user
+        mock_db = _make_async_db(mock_task=mock_task, scalar_all=[mock_task], scalar_value=100)
+        _current_db = mock_db
 
-                client = TestClient(app)
-                response = client.get("/tasks?limit=10&offset=20")
+        client = TestClient(app)
+        response = client.get("/tasks?limit=10&offset=20")
 
-                assert response.status_code == 200
-                data = response.json()
-                assert data["limit"] == 10
-                assert data["offset"] == 20
+        assert response.status_code == 200
+        data = response.json()
+        assert data["limit"] == 10
+        assert data["offset"] == 20
 
 
 class TestGetProcessingTask:
@@ -164,29 +193,29 @@ class TestGetProcessingTask:
 
     def test_get_task_success(self, mock_admin_user, mock_task):
         """Test getting a single task."""
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_async_session') as mock_session:
-                mock_db = _make_async_db(mock_task=mock_task)
-                mock_session.return_value = mock_db
+        global _current_admin, _current_db
+        _current_admin = mock_admin_user
+        mock_db = _make_async_db(mock_task=mock_task)
+        _current_db = mock_db
 
-                client = TestClient(app)
-                response = client.get("/tasks/task-123")
+        client = TestClient(app)
+        response = client.get("/tasks/task-123")
 
-                assert response.status_code == 200
-                data = response.json()
-                assert data["id"] == "task-123"
+        assert response.status_code == 200
+        data = response.json()
+        assert data["id"] == "task-123"
 
     def test_get_task_not_found(self, mock_admin_user):
         """Test getting a non-existent task."""
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_async_session') as mock_session:
-                mock_db = _make_async_db(mock_task=None)
-                mock_session.return_value = mock_db
+        global _current_admin, _current_db
+        _current_admin = mock_admin_user
+        mock_db = _make_async_db(mock_task=None)
+        _current_db = mock_db
 
-                client = TestClient(app)
-                response = client.get("/tasks/nonexistent")
+        client = TestClient(app)
+        response = client.get("/tasks/nonexistent")
 
-                assert response.status_code == 404
+        assert response.status_code == 404
 
 
 class TestCancelProcessingTask:
@@ -197,44 +226,44 @@ class TestCancelProcessingTask:
         mock_task.stage = ProcessingStage.EMBEDDING.value
         mock_task.cancel_requested = False
 
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_async_session') as mock_session:
-                mock_db = _make_async_db(mock_task=mock_task)
-                mock_session.return_value = mock_db
+        global _current_admin, _current_db
+        _current_admin = mock_admin_user
+        mock_db = _make_async_db(mock_task=mock_task)
+        _current_db = mock_db
 
-                client = TestClient(app)
-                response = client.post("/tasks/task-123/cancel")
+        client = TestClient(app)
+        response = client.post("/tasks/task-123/cancel")
 
-                assert response.status_code == 200
-                data = response.json()
-                assert data["success"] is True
-                assert mock_task.cancel_requested is True
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert mock_task.cancel_requested is True
 
     def test_cancel_task_not_found(self, mock_admin_user):
         """Test cancelling a non-existent task."""
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_async_session') as mock_session:
-                mock_db = _make_async_db(mock_task=None)
-                mock_session.return_value = mock_db
+        global _current_admin, _current_db
+        _current_admin = mock_admin_user
+        mock_db = _make_async_db(mock_task=None)
+        _current_db = mock_db
 
-                client = TestClient(app)
-                response = client.post("/tasks/nonexistent/cancel")
+        client = TestClient(app)
+        response = client.post("/tasks/nonexistent/cancel")
 
-                assert response.status_code == 404
+        assert response.status_code == 404
 
     def test_cancel_completed_task_fails(self, mock_admin_user, mock_task):
         """Test that cancelling a completed task fails."""
         mock_task.stage = ProcessingStage.COMPLETED.value
 
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_async_session') as mock_session:
-                mock_db = _make_async_db(mock_task=mock_task)
-                mock_session.return_value = mock_db
+        global _current_admin, _current_db
+        _current_admin = mock_admin_user
+        mock_db = _make_async_db(mock_task=mock_task)
+        _current_db = mock_db
 
-                client = TestClient(app)
-                response = client.post("/tasks/task-123/cancel")
+        client = TestClient(app)
+        response = client.post("/tasks/task-123/cancel")
 
-                assert response.status_code == 400
+        assert response.status_code == 400
 
 
 class TestRetryProcessingTask:
@@ -242,37 +271,40 @@ class TestRetryProcessingTask:
 
     def test_retry_failed_task_success(self, mock_admin_user, mock_failed_task):
         """Test retrying a failed task."""
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_async_session') as mock_session:
-                mock_db = _make_async_db()
-                mock_session.return_value = mock_db
+        global _current_admin, _current_db
+        _current_admin = mock_admin_user
+        mock_db = _make_async_db(mock_task=mock_failed_task)
+        _current_db = mock_db
 
-                with patch.object(ProcessingTasks, 'retry_task', new=AsyncMock()) as mock_retry:
-                    mock_failed_task.retry_count = 2
-                    mock_retry.return_value = mock_failed_task
+        mock_file = MagicMock(id="doc-456", user_id="user-789", filename="test.pdf")
+        with patch('open_webui.models.files.Files.get_file_by_id', new=AsyncMock(return_value=mock_file)), \
+             patch('open_webui.routers.processing.Users.get_user_by_id', return_value=MagicMock(id="user-789")), \
+             patch.object(ProcessingTasks, 'retry_task', new=AsyncMock()) as mock_retry:
+            mock_failed_task.retry_count = 2
+            mock_retry.return_value = mock_failed_task
 
-                    client = TestClient(app)
-                    response = client.post("/tasks/task-failed/retry")
+            client = TestClient(app)
+            response = client.post("/tasks/task-failed/retry")
 
-                    assert response.status_code == 200
-                    data = response.json()
-                    assert data["success"] is True
-                    assert data["retry_count"] == 2
+            assert response.status_code == 200
+            data = response.json()
+            assert data["success"] is True
+            assert data["retry_count"] == 2
 
     def test_retry_active_task_fails(self, mock_admin_user, mock_task):
         """Test that retrying an active task fails."""
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_async_session') as mock_session:
-                mock_db = _make_async_db()
-                mock_session.return_value = mock_db
+        global _current_admin, _current_db
+        _current_admin = mock_admin_user
+        mock_db = _make_async_db(mock_task=mock_task)
+        _current_db = mock_db
 
-                with patch.object(ProcessingTasks, 'retry_task', new=AsyncMock()) as mock_retry:
-                    mock_retry.return_value = None  # Task not retryable
+        with patch.object(ProcessingTasks, 'retry_task', new=AsyncMock()) as mock_retry:
+            mock_retry.return_value = None  # Task not retryable
 
-                    client = TestClient(app)
-                    response = client.post("/tasks/task-123/retry")
+            client = TestClient(app)
+            response = client.post("/tasks/task-123/retry")
 
-                    assert response.status_code == 400
+            assert response.status_code == 400
 
 
 class TestDeleteProcessingTask:
@@ -282,34 +314,34 @@ class TestDeleteProcessingTask:
         """Test deleting a completed task."""
         mock_task.status = ProcessingStatus.COMPLETED.value
 
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_async_session') as mock_session:
-                mock_db = _make_async_db(mock_task=mock_task)
-                mock_session.return_value = mock_db
+        global _current_admin, _current_db
+        _current_admin = mock_admin_user
+        mock_db = _make_async_db(mock_task=mock_task)
+        _current_db = mock_db
 
-                with patch.object(ProcessingTasks, 'delete_task', new=AsyncMock()) as mock_delete:
-                    mock_delete.return_value = True
+        with patch.object(ProcessingTasks, 'delete_task', new=AsyncMock()) as mock_delete:
+            mock_delete.return_value = True
 
-                    client = TestClient(app)
-                    response = client.delete("/tasks/task-123")
+            client = TestClient(app)
+            response = client.delete("/tasks/task-123")
 
-                    assert response.status_code == 200
-                    data = response.json()
-                    assert data["success"] is True
+            assert response.status_code == 200
+            data = response.json()
+            assert data["success"] is True
 
     def test_delete_active_task_fails(self, mock_admin_user, mock_task):
         """Test that deleting an active task fails."""
         mock_task.status = ProcessingStatus.PROCESSING.value
 
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_async_session') as mock_session:
-                mock_db = _make_async_db(mock_task=mock_task)
-                mock_session.return_value = mock_db
+        global _current_admin, _current_db
+        _current_admin = mock_admin_user
+        mock_db = _make_async_db(mock_task=mock_task)
+        _current_db = mock_db
 
-                client = TestClient(app)
-                response = client.delete("/tasks/task-123")
+        client = TestClient(app)
+        response = client.delete("/tasks/task-123")
 
-                assert response.status_code == 400
+        assert response.status_code == 400
 
 
 class TestGetProcessingMetrics:
@@ -317,55 +349,55 @@ class TestGetProcessingMetrics:
 
     def test_get_metrics_success(self, mock_admin_user):
         """Test getting processing metrics."""
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_async_session') as mock_session:
-                mock_db = _make_async_db()
-                mock_session.return_value = mock_db
+        global _current_admin, _current_db
+        _current_admin = mock_admin_user
+        mock_db = _make_async_db()
+        _current_db = mock_db
 
-                with patch.object(ProcessingTasks, 'get_metrics', new=AsyncMock()) as mock_metrics:
-                    mock_metrics.return_value = ProcessingMetrics(
-                        total_tasks=100,
-                        queued=5,
-                        processing=10,
-                        completed=80,
-                        failed=3,
-                        cancelled=2,
-                        avg_processing_time=45.5,
-                        success_rate=94.1,
-                    )
+        with patch.object(ProcessingTasks, 'get_metrics', new=AsyncMock()) as mock_metrics:
+            mock_metrics.return_value = ProcessingMetrics(
+                total_tasks=100,
+                queued=5,
+                processing=10,
+                completed=80,
+                failed=3,
+                cancelled=2,
+                avg_processing_time=45.5,
+                success_rate=94.1,
+            )
 
-                    client = TestClient(app)
-                    response = client.get("/metrics?time_range=24h")
+            client = TestClient(app)
+            response = client.get("/metrics?time_range=24h")
 
-                    assert response.status_code == 200
-                    data = response.json()
-                    assert data["total_tasks"] == 100
-                    assert data["completed"] == 80
+            assert response.status_code == 200
+            data = response.json()
+            assert data["total_tasks"] == 100
+            assert data["completed"] == 80
 
     def test_get_metrics_different_time_ranges(self, mock_admin_user):
         """Test getting metrics with different time ranges."""
         time_ranges = ["1h", "24h", "7d", "30d"]
 
         for time_range in time_ranges:
-            with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-                with patch('open_webui.routers.processing.get_async_session') as mock_session:
-                    mock_db = _make_async_db()
-                    mock_session.return_value = mock_db
+            global _current_admin, _current_db
+            _current_admin = mock_admin_user
+            mock_db = _make_async_db()
+            _current_db = mock_db
 
-                    with patch.object(ProcessingTasks, 'get_metrics', new=AsyncMock()) as mock_metrics:
-                        mock_metrics.return_value = ProcessingMetrics(
-                            total_tasks=100,
-                            queued=5,
-                            processing=10,
-                            completed=80,
-                            failed=3,
-                            cancelled=2,
-                        )
+            with patch.object(ProcessingTasks, 'get_metrics', new=AsyncMock()) as mock_metrics:
+                mock_metrics.return_value = ProcessingMetrics(
+                    total_tasks=100,
+                    queued=5,
+                    processing=10,
+                    completed=80,
+                    failed=3,
+                    cancelled=2,
+                )
 
-                        client = TestClient(app)
-                        response = client.get(f"/metrics?time_range={time_range}")
+                client = TestClient(app)
+                response = client.get(f"/metrics?time_range={time_range}")
 
-                        assert response.status_code == 200
+                assert response.status_code == 200
 
 
 class TestBulkOperations:
@@ -375,64 +407,64 @@ class TestBulkOperations:
         """Test bulk cancelling tasks."""
         mock_task.stage = ProcessingStage.EMBEDDING.value
 
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_async_session') as mock_session:
-                mock_db = _make_async_db(mock_task=mock_task)
-                mock_session.return_value = mock_db
+        global _current_admin, _current_db
+        _current_admin = mock_admin_user
+        mock_db = _make_async_db(mock_task=mock_task)
+        _current_db = mock_db
 
-                client = TestClient(app)
-                response = client.post(
-                    "/tasks/bulk/cancel",
-                    json={"task_ids": ["task-1", "task-2"], "reason": "Batch cleanup"}
-                )
+        client = TestClient(app)
+        response = client.post(
+            "/tasks/bulk/cancel",
+            json={"task_ids": ["task-1", "task-2"], "reason": "Batch cleanup"}
+        )
 
-                assert response.status_code == 200
-                data = response.json()
-                assert data["success"] is True
-                assert "cancelled" in data
-                assert "failed" in data
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert "cancelled" in data
+        assert "failed" in data
 
     def test_bulk_retry_tasks(self, mock_admin_user, mock_failed_task):
         """Test bulk retrying tasks."""
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_async_session') as mock_session:
-                mock_db = _make_async_db()
-                mock_session.return_value = mock_db
+        global _current_admin, _current_db
+        _current_admin = mock_admin_user
+        mock_db = _make_async_db()
+        _current_db = mock_db
 
-                with patch.object(ProcessingTasks, 'retry_task', new=AsyncMock()) as mock_retry:
-                    mock_retry.return_value = mock_failed_task
+        with patch.object(ProcessingTasks, 'retry_task', new=AsyncMock()) as mock_retry:
+            mock_retry.return_value = mock_failed_task
 
-                    client = TestClient(app)
-                    response = client.post(
-                        "/tasks/bulk/retry",
-                        json={"task_ids": ["task-1", "task-2"]}
-                    )
+            client = TestClient(app)
+            response = client.post(
+                "/tasks/bulk/retry",
+                json={"task_ids": ["task-1", "task-2"]}
+            )
 
-                    assert response.status_code == 200
-                    data = response.json()
-                    assert data["success"] is True
+            assert response.status_code == 200
+            data = response.json()
+            assert data["success"] is True
 
     def test_bulk_delete_tasks(self, mock_admin_user, mock_task):
         """Test bulk deleting tasks."""
         mock_task.status = ProcessingStatus.COMPLETED.value
 
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_async_session') as mock_session:
-                mock_db = _make_async_db(mock_task=mock_task)
-                mock_session.return_value = mock_db
+        global _current_admin, _current_db
+        _current_admin = mock_admin_user
+        mock_db = _make_async_db(mock_task=mock_task)
+        _current_db = mock_db
 
-                with patch.object(ProcessingTasks, 'delete_task', new=AsyncMock()) as mock_delete:
-                    mock_delete.return_value = True
+        with patch.object(ProcessingTasks, 'delete_task', new=AsyncMock()) as mock_delete:
+            mock_delete.return_value = True
 
-                    client = TestClient(app)
-                    response = client.post(
-                        "/tasks/bulk/delete",
-                        json={"task_ids": ["task-1", "task-2"]}
-                    )
+            client = TestClient(app)
+            response = client.post(
+                "/tasks/bulk/delete",
+                json={"task_ids": ["task-1", "task-2"]}
+            )
 
-                    assert response.status_code == 200
-                    data = response.json()
-                    assert data["success"] is True
+            assert response.status_code == 200
+            data = response.json()
+            assert data["success"] is True
 
 
 class TestCleanupOldTasks:
@@ -440,36 +472,36 @@ class TestCleanupOldTasks:
 
     def test_cleanup_old_tasks(self, mock_admin_user):
         """Test cleaning up old tasks."""
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_async_session') as mock_session:
-                mock_db = _make_async_db()
-                mock_session.return_value = mock_db
+        global _current_admin, _current_db
+        _current_admin = mock_admin_user
+        mock_db = _make_async_db()
+        _current_db = mock_db
 
-                with patch.object(ProcessingTasks, 'delete_old_tasks', new=AsyncMock()) as mock_cleanup:
-                    mock_cleanup.return_value = 25
+        with patch.object(ProcessingTasks, 'delete_old_tasks', new=AsyncMock()) as mock_cleanup:
+            mock_cleanup.return_value = 25
 
-                    client = TestClient(app)
-                    response = client.post("/cleanup?days=30")
+            client = TestClient(app)
+            response = client.post("/cleanup?days=30")
 
-                    assert response.status_code == 200
-                    data = response.json()
-                    assert data["success"] is True
-                    assert data["deleted_count"] == 25
-                    assert data["older_than_days"] == 30
+            assert response.status_code == 200
+            data = response.json()
+            assert data["success"] is True
+            assert data["deleted_count"] == 25
+            assert data["older_than_days"] == 30
 
     def test_cleanup_with_status_filter(self, mock_admin_user):
         """Test cleanup with status filter."""
-        with patch('open_webui.routers.processing.get_admin_user', return_value=mock_admin_user):
-            with patch('open_webui.routers.processing.get_async_session') as mock_session:
-                mock_db = _make_async_db()
-                mock_session.return_value = mock_db
+        global _current_admin, _current_db
+        _current_admin = mock_admin_user
+        mock_db = _make_async_db()
+        _current_db = mock_db
 
-                with patch.object(ProcessingTasks, 'delete_old_tasks', new=AsyncMock()) as mock_cleanup:
-                    mock_cleanup.return_value = 15
+        with patch.object(ProcessingTasks, 'delete_old_tasks', new=AsyncMock()) as mock_cleanup:
+            mock_cleanup.return_value = 15
 
-                    client = TestClient(app)
-                    response = client.post("/cleanup?days=7&status=failed")
+            client = TestClient(app)
+            response = client.post("/cleanup?days=7&status=failed")
 
-                    assert response.status_code == 200
-                    data = response.json()
-                    assert data["deleted_count"] == 15
+            assert response.status_code == 200
+            data = response.json()
+            assert data["deleted_count"] == 15

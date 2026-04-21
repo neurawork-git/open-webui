@@ -744,23 +744,23 @@ class ProcessingTasksTable:
                 if since_timestamp is None:
                     since_timestamp = int(time.time()) - 86400
 
-                # Queue depth (queued tasks)
-                queue_depth_result = await db.execute(
+                # Queued tasks (current count, not time-filtered)
+                queued_result = await db.execute(
                     select(func.count())
                     .select_from(ProcessingTask)
                     .where(ProcessingTask.status == ProcessingStatus.QUEUED.value)
                 )
-                queue_depth = queue_depth_result.scalar() or 0
+                queued = queued_result.scalar() or 0
 
-                # Active count (processing tasks)
-                active_result = await db.execute(
+                # Processing tasks (current count)
+                processing_result = await db.execute(
                     select(func.count())
                     .select_from(ProcessingTask)
                     .where(ProcessingTask.status == ProcessingStatus.PROCESSING.value)
                 )
-                active_count = active_result.scalar() or 0
+                processing = processing_result.scalar() or 0
 
-                # Completed today
+                # Completed in time range
                 completed_result = await db.execute(
                     select(func.count())
                     .select_from(ProcessingTask)
@@ -769,9 +769,9 @@ class ProcessingTasksTable:
                         ProcessingTask.completed_at >= since_timestamp,
                     )
                 )
-                completed_today = completed_result.scalar() or 0
+                completed = completed_result.scalar() or 0
 
-                # Failed today
+                # Failed in time range
                 failed_result = await db.execute(
                     select(func.count())
                     .select_from(ProcessingTask)
@@ -780,9 +780,9 @@ class ProcessingTasksTable:
                         ProcessingTask.completed_at >= since_timestamp,
                     )
                 )
-                failed_today = failed_result.scalar() or 0
+                failed = failed_result.scalar() or 0
 
-                # Cancelled today
+                # Cancelled in time range
                 cancelled_result = await db.execute(
                     select(func.count())
                     .select_from(ProcessingTask)
@@ -791,7 +791,9 @@ class ProcessingTasksTable:
                         ProcessingTask.completed_at >= since_timestamp,
                     )
                 )
-                cancelled_today = cancelled_result.scalar() or 0
+                cancelled = cancelled_result.scalar() or 0
+
+                total_tasks = queued + processing + completed + failed + cancelled
 
                 # Average processing time (for completed tasks)
                 avg_result = await db.execute(
@@ -806,13 +808,32 @@ class ProcessingTasksTable:
                 avg_value = avg_result.scalar()
                 avg_processing_time = float(avg_value) if avg_value else None
 
+                # Success rate
+                terminal_count = completed + failed
+                success_rate = (completed / terminal_count * 100) if terminal_count > 0 else None
+
+                # Chunks processed
+                chunks_result = await db.execute(
+                    select(func.sum(ProcessingTask.processed_chunks))
+                    .where(
+                        ProcessingTask.status == ProcessingStatus.COMPLETED.value,
+                        ProcessingTask.completed_at >= since_timestamp,
+                    )
+                )
+                chunks_value = chunks_result.scalar()
+                chunks_processed = int(chunks_value) if chunks_value else 0
+
                 return ProcessingMetrics(
-                    queue_depth=queue_depth,
-                    active_count=active_count,
-                    completed_today=completed_today,
-                    failed_today=failed_today,
-                    cancelled_today=cancelled_today,
-                    avg_processing_time_seconds=avg_processing_time,
+                    total_tasks=total_tasks,
+                    queued=queued,
+                    processing=processing,
+                    completed=completed,
+                    failed=failed,
+                    cancelled=cancelled,
+                    avg_processing_time=avg_processing_time,
+                    success_rate=success_rate,
+                    documents_processed=completed,
+                    chunks_processed=chunks_processed,
                 )
             except Exception as e:
                 log.exception(f"Error getting metrics: {e}")

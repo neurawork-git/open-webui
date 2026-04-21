@@ -58,8 +58,7 @@ class TestProcessingEnums:
         """Test that DocumentType has expected values."""
         assert DocumentType.FILE_UPLOAD.value == "file_upload"
         assert DocumentType.WEB_SCRAPE.value == "web_scrape"
-        assert DocumentType.KNOWLEDGE_SYNC.value == "knowledge_sync"
-        assert DocumentType.API_UPLOAD.value == "api_upload"
+        assert DocumentType.URL_IMPORT.value == "url_import"
 
 
 class TestStageProgressRanges:
@@ -114,10 +113,11 @@ class TestValidTransitions:
         assert ProcessingStage.CANCELLED in VALID_TRANSITIONS[ProcessingStage.EXTRACTING]
 
     def test_terminal_states_have_no_transitions(self):
-        """Test that terminal states have no outgoing transitions."""
+        """Test that terminal states have no outgoing transitions (except FAILED which allows retry)."""
         assert len(VALID_TRANSITIONS[ProcessingStage.COMPLETED]) == 0
-        assert len(VALID_TRANSITIONS[ProcessingStage.FAILED]) == 0
         assert len(VALID_TRANSITIONS[ProcessingStage.CANCELLED]) == 0
+        # FAILED allows retry -> QUEUED
+        assert VALID_TRANSITIONS[ProcessingStage.FAILED] == [ProcessingStage.QUEUED]
 
 
 class TestCanTransition:
@@ -234,14 +234,14 @@ class TestGetProgressForStage:
 
     def test_embedding_progress(self):
         """Test progress calculation for EMBEDDING stage."""
-        # EMBEDDING is 0.4 - 0.9 (the main work)
+        # EMBEDDING is 0.30 - 0.95 (the main work)
         progress_at_0 = get_progress_for_stage(ProcessingStage.EMBEDDING, 0.0)
         progress_at_50 = get_progress_for_stage(ProcessingStage.EMBEDDING, 0.5)
         progress_at_100 = get_progress_for_stage(ProcessingStage.EMBEDDING, 1.0)
 
-        assert progress_at_0 == 0.4
-        assert progress_at_50 == pytest.approx(0.65, rel=0.01)
-        assert progress_at_100 == 0.9
+        assert progress_at_0 == pytest.approx(0.30, rel=0.01)
+        assert progress_at_50 == pytest.approx(0.625, rel=0.01)
+        assert progress_at_100 == pytest.approx(0.95, rel=0.01)
 
     def test_completed_progress(self):
         """Test progress calculation for COMPLETED stage."""
@@ -278,23 +278,23 @@ class TestProcessingTaskCreate:
             document_type=DocumentType.FILE_UPLOAD.value,
             chat_id="chat-456",
             knowledge_id="kb-789",
-            metadata={"source": "upload"},
+            meta={"source": "upload"},
         )
         assert task.document_id == "doc-123"
         assert task.document_name == "test.pdf"
         assert task.chat_id == "chat-456"
         assert task.knowledge_id == "kb-789"
-        assert task.metadata == {"source": "upload"}
+        assert task.meta == {"source": "upload"}
 
 
 class TestProcessingTaskUpdate:
     """Tests for ProcessingTaskUpdate Pydantic model."""
 
-    def test_update_status(self):
-        """Test updating status."""
-        update = ProcessingTaskUpdate(status=ProcessingStatus.PROCESSING.value)
-        assert update.status == ProcessingStatus.PROCESSING.value
-        assert update.stage is None
+    def test_update_stage(self):
+        """Test updating stage."""
+        update = ProcessingTaskUpdate(stage=ProcessingStage.EMBEDDING.value)
+        assert update.stage == ProcessingStage.EMBEDDING.value
+        assert update.progress is None
 
     def test_update_progress(self):
         """Test updating progress fields."""

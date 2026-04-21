@@ -1214,26 +1214,11 @@ async def query_collection_with_hybrid_search(
             log.exception(f"Error when querying the collection with hybrid_search: {e}")
             return None, e
 
-    # Prepare tasks for all collections and queries
-    # Avoid running any tasks for collections that:
-    # - Failed to fetch data (have assigned None)
-    # - Have no documents (empty collections)
-    tasks = []
-    for collection_name in collection_names:
-        col_result = collection_results[collection_name]
-        if col_result is None:
-            log.warning(f"[HYBRID_DEBUG] Skipping collection {collection_name}: fetch failed")
-            continue
-        if not col_result.documents or not col_result.documents[0]:
-            log.warning(f"[HYBRID_DEBUG] Skipping collection {collection_name}: no documents")
-            continue
-        for query in queries:
-            tasks.append((collection_name, query))
+    log.info(
+        f"Starting hybrid search for {len(queries)} queries in {len(collection_names)} collections..."
+    )
 
-        log.info(
-            f"Starting hybrid search for {len(queries)} queries in {len(collection_names)} collections..."
-        )
-
+    try:
         # Prepare tasks for all collections and queries
         # Avoid running any tasks for collections that:
         # - Failed to fetch data (have assigned None)

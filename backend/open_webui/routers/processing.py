@@ -195,6 +195,145 @@ async def get_processing_task(
 class CancelTaskRequest(BaseModel):
     immediate: bool = False
     reason: Optional[str] = None
+####################
+
+
+class BulkCancelRequest(BaseModel):
+    task_ids: List[str]
+    reason: Optional[str] = None
+
+
+@router.post("/tasks/bulk/cancel")
+async def bulk_cancel_tasks(
+    request: BulkCancelRequest,
+    user=Depends(get_admin_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Cancel multiple processing tasks at once.
+
+    Admin only endpoint.
+    """
+    cancelled = []
+    failed = []
+    current_time = int(time.time())
+
+    for task_id in request.task_ids:
+        task = await db.get(ProcessingTask, task_id)
+        if not task:
+            failed.append({"task_id": task_id, "reason": "Not found"})
+            continue
+
+        try:
+            current_stage = ProcessingStage(task.stage)
+            if not can_cancel(current_stage):
+                failed.append({"task_id": task_id, "reason": f"Cannot cancel in {task.stage} stage"})
+                continue
+        except ValueError:
+            failed.append({"task_id": task_id, "reason": f"Invalid stage: {task.stage}"})
+            continue
+
+        task.cancel_requested = True
+        task.cancelled_by = user.id
+        task.cancelled_at = current_time
+        if request.reason:
+            task.meta = {**(task.meta or {}), "cancellation_reason": request.reason}
+
+        cancelled.append(task_id)
+
+    await db.commit()
+
+    log.info(f"Bulk cancellation: {len(cancelled)} cancelled, {len(failed)} failed, by user {user.id}")
+
+    return {
+        "success": True,
+        "cancelled": cancelled,
+        "failed": failed,
+    }
+
+
+class BulkRetryRequest(BaseModel):
+    task_ids: List[str]
+
+
+@router.post("/tasks/bulk/retry")
+async def bulk_retry_tasks(
+    request: BulkRetryRequest,
+    user=Depends(get_admin_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Retry multiple failed tasks at once.
+
+    Admin only endpoint.
+    """
+    retried = []
+    failed = []
+
+    for task_id in request.task_ids:
+        result = await ProcessingTasks.retry_task(task_id, db=db)
+        if result:
+            retried.append(task_id)
+        else:
+            failed.append({"task_id": task_id, "reason": "Not found or not in FAILED state"})
+
+    log.info(f"Bulk retry: {len(retried)} retried, {len(failed)} failed, by user {user.id}")
+
+    return {
+        "success": True,
+        "retried": retried,
+        "failed": failed,
+    }
+
+
+class BulkDeleteRequest(BaseModel):
+    task_ids: List[str]
+
+
+@router.post("/tasks/bulk/delete")
+async def bulk_delete_tasks(
+    request: BulkDeleteRequest,
+    user=Depends(get_admin_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Delete multiple completed/failed/cancelled tasks at once.
+
+    Admin only endpoint.
+    """
+    deleted = []
+    failed = []
+
+    terminal_states = [
+        ProcessingStatus.COMPLETED.value,
+        ProcessingStatus.FAILED.value,
+        ProcessingStatus.CANCELLED.value,
+    ]
+
+    for task_id in request.task_ids:
+        task = await db.get(ProcessingTask, task_id)
+        if not task:
+            failed.append({"task_id": task_id, "reason": "Not found"})
+            continue
+
+        if task.status not in terminal_states:
+            failed.append({"task_id": task_id, "reason": "Task is still active"})
+            continue
+
+        result = await ProcessingTasks.delete_task(task_id, db=db)
+        if result:
+            deleted.append(task_id)
+        else:
+            failed.append({"task_id": task_id, "reason": "Delete failed"})
+
+    log.info(f"Bulk delete: {len(deleted)} deleted, {len(failed)} failed, by user {user.id}")
+
+    return {
+        "success": True,
+        "deleted": deleted,
+        "failed": failed,
+    }
+
 
 
 @router.post("/tasks/{task_id}/cancel")
@@ -432,144 +571,6 @@ async def get_processing_metrics(
 
 ####################
 # Bulk Operations
-####################
-
-
-class BulkCancelRequest(BaseModel):
-    task_ids: List[str]
-    reason: Optional[str] = None
-
-
-@router.post("/tasks/bulk/cancel")
-async def bulk_cancel_tasks(
-    request: BulkCancelRequest,
-    user=Depends(get_admin_user),
-    db: AsyncSession = Depends(get_async_session),
-):
-    """
-    Cancel multiple processing tasks at once.
-
-    Admin only endpoint.
-    """
-    cancelled = []
-    failed = []
-    current_time = int(time.time())
-
-    for task_id in request.task_ids:
-        task = await db.get(ProcessingTask, task_id)
-        if not task:
-            failed.append({"task_id": task_id, "reason": "Not found"})
-            continue
-
-        try:
-            current_stage = ProcessingStage(task.stage)
-            if not can_cancel(current_stage):
-                failed.append({"task_id": task_id, "reason": f"Cannot cancel in {task.stage} stage"})
-                continue
-        except ValueError:
-            failed.append({"task_id": task_id, "reason": f"Invalid stage: {task.stage}"})
-            continue
-
-        task.cancel_requested = True
-        task.cancelled_by = user.id
-        task.cancelled_at = current_time
-        if request.reason:
-            task.meta = {**(task.meta or {}), "cancellation_reason": request.reason}
-
-        cancelled.append(task_id)
-
-    await db.commit()
-
-    log.info(f"Bulk cancellation: {len(cancelled)} cancelled, {len(failed)} failed, by user {user.id}")
-
-    return {
-        "success": True,
-        "cancelled": cancelled,
-        "failed": failed,
-    }
-
-
-class BulkRetryRequest(BaseModel):
-    task_ids: List[str]
-
-
-@router.post("/tasks/bulk/retry")
-async def bulk_retry_tasks(
-    request: BulkRetryRequest,
-    user=Depends(get_admin_user),
-    db: AsyncSession = Depends(get_async_session),
-):
-    """
-    Retry multiple failed tasks at once.
-
-    Admin only endpoint.
-    """
-    retried = []
-    failed = []
-
-    for task_id in request.task_ids:
-        result = await ProcessingTasks.retry_task(task_id, db=db)
-        if result:
-            retried.append(task_id)
-        else:
-            failed.append({"task_id": task_id, "reason": "Not found or not in FAILED state"})
-
-    log.info(f"Bulk retry: {len(retried)} retried, {len(failed)} failed, by user {user.id}")
-
-    return {
-        "success": True,
-        "retried": retried,
-        "failed": failed,
-    }
-
-
-class BulkDeleteRequest(BaseModel):
-    task_ids: List[str]
-
-
-@router.post("/tasks/bulk/delete")
-async def bulk_delete_tasks(
-    request: BulkDeleteRequest,
-    user=Depends(get_admin_user),
-    db: AsyncSession = Depends(get_async_session),
-):
-    """
-    Delete multiple completed/failed/cancelled tasks at once.
-
-    Admin only endpoint.
-    """
-    deleted = []
-    failed = []
-
-    terminal_states = [
-        ProcessingStatus.COMPLETED.value,
-        ProcessingStatus.FAILED.value,
-        ProcessingStatus.CANCELLED.value,
-    ]
-
-    for task_id in request.task_ids:
-        task = await db.get(ProcessingTask, task_id)
-        if not task:
-            failed.append({"task_id": task_id, "reason": "Not found"})
-            continue
-
-        if task.status not in terminal_states:
-            failed.append({"task_id": task_id, "reason": "Task is still active"})
-            continue
-
-        result = await ProcessingTasks.delete_task(task_id, db=db)
-        if result:
-            deleted.append(task_id)
-        else:
-            failed.append({"task_id": task_id, "reason": "Delete failed"})
-
-    log.info(f"Bulk delete: {len(deleted)} deleted, {len(failed)} failed, by user {user.id}")
-
-    return {
-        "success": True,
-        "deleted": deleted,
-        "failed": failed,
-    }
 
 
 ####################

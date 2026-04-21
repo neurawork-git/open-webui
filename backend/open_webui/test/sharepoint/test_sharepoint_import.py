@@ -85,24 +85,30 @@ class TestSharePointImport:
     @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
     @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
     @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
-    @patch(f"{_KNOWLEDGE_MOD}.upload_file_handler")
-    @patch(f"{_KNOWLEDGE_MOD}.process_file")
+    @patch(f"{_KNOWLEDGE_MOD}.upload_file_handler", new_callable=AsyncMock)
+    @patch(f"{_KNOWLEDGE_MOD}.process_file", new_callable=AsyncMock)
     async def test_successful_import(
         self, mock_process, mock_upload, mock_graph_cls, mock_oauth, mock_kb
     ):
         """Import 2 files → both succeed."""
         from open_webui.routers.knowledge import import_sharepoint_folder, SharePointImportForm
 
-        mock_kb.get_knowledge_by_id.return_value = _make_knowledge()
-        mock_oauth.get_session_by_provider_and_user_id.return_value = _make_oauth_session()
-        mock_kb.get_file_metadatas_by_id.return_value = []
+        mock_kb.get_knowledge_by_id = AsyncMock(return_value=_make_knowledge())
+
+        mock_kb.add_file_to_knowledge_by_id = AsyncMock()
+
+        mock_kb.update_knowledge_by_id = AsyncMock()
+
+        mock_kb.get_file_metadatas_by_id = AsyncMock(return_value=[])
+        mock_oauth.get_session_by_provider_and_user_id = AsyncMock(return_value=_make_oauth_session())
+        mock_kb.get_file_metadatas_by_id = AsyncMock(return_value=[])
 
         graph_instance = AsyncMock()
         graph_instance.list_folder.return_value = _make_folder_listing()
         graph_instance.download_file.return_value = b"file content"
         mock_graph_cls.return_value = graph_instance
 
-        mock_upload.return_value = {"status": True, "id": "file-id-1"}
+        mock_upload.side_effect = None; mock_upload.return_value = {"status": True, "id": "file-id-1"}
 
         request = MagicMock()
         user = _make_user()
@@ -129,16 +135,22 @@ class TestSharePointImport:
     @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
     @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
     @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
-    @patch(f"{_KNOWLEDGE_MOD}.upload_file_handler")
-    @patch(f"{_KNOWLEDGE_MOD}.process_file")
+    @patch(f"{_KNOWLEDGE_MOD}.upload_file_handler", new_callable=AsyncMock)
+    @patch(f"{_KNOWLEDGE_MOD}.process_file", new_callable=AsyncMock)
     async def test_partial_failure(
         self, mock_process, mock_upload, mock_graph_cls, mock_oauth, mock_kb
     ):
         """1 file succeeds, 1 fails → partial result reported."""
         from open_webui.routers.knowledge import import_sharepoint_folder, SharePointImportForm
 
-        mock_kb.get_knowledge_by_id.return_value = _make_knowledge()
-        mock_oauth.get_session_by_provider_and_user_id.return_value = _make_oauth_session()
+        mock_kb.get_knowledge_by_id = AsyncMock(return_value=_make_knowledge())
+
+        mock_kb.add_file_to_knowledge_by_id = AsyncMock()
+
+        mock_kb.update_knowledge_by_id = AsyncMock()
+
+        mock_kb.get_file_metadatas_by_id = AsyncMock(return_value=[])
+        mock_oauth.get_session_by_provider_and_user_id = AsyncMock(return_value=_make_oauth_session())
 
         graph_instance = AsyncMock()
         graph_instance.list_folder.return_value = _make_folder_listing()
@@ -149,7 +161,7 @@ class TestSharePointImport:
         ]
         mock_graph_cls.return_value = graph_instance
 
-        mock_upload.return_value = {"status": True, "id": "file-id-1"}
+        mock_upload.side_effect = None; mock_upload.return_value = {"status": True, "id": "file-id-1"}
 
         request = MagicMock()
         user = _make_user()
@@ -174,7 +186,7 @@ class TestSharePointImport:
         """Invalid KB ID → 400."""
         from open_webui.routers.knowledge import import_sharepoint_folder, SharePointImportForm
 
-        mock_kb.get_knowledge_by_id.return_value = None
+        mock_kb.get_knowledge_by_id = AsyncMock(return_value=None)
 
         request = MagicMock()
         user = _make_user()
@@ -197,8 +209,8 @@ class TestSharePointImport:
         """User without write access → 400."""
         from open_webui.routers.knowledge import import_sharepoint_folder, SharePointImportForm
 
-        mock_kb.get_knowledge_by_id.return_value = _make_knowledge(user_id="other-user")
-        mock_access.has_access.return_value = False
+        mock_kb.get_knowledge_by_id = AsyncMock(return_value=_make_knowledge(user_id="other-user"))
+        mock_access.has_access = AsyncMock(return_value=False)
 
         request = MagicMock()
         user = _make_user()
@@ -221,8 +233,14 @@ class TestSharePointImport:
         """No Microsoft OAuth session → 401."""
         from open_webui.routers.knowledge import import_sharepoint_folder, SharePointImportForm
 
-        mock_kb.get_knowledge_by_id.return_value = _make_knowledge()
-        mock_oauth.get_session_by_provider_and_user_id.return_value = None
+        mock_kb.get_knowledge_by_id = AsyncMock(return_value=_make_knowledge())
+
+        mock_kb.add_file_to_knowledge_by_id = AsyncMock()
+
+        mock_kb.update_knowledge_by_id = AsyncMock()
+
+        mock_kb.get_file_metadatas_by_id = AsyncMock(return_value=[])
+        mock_oauth.get_session_by_provider_and_user_id = AsyncMock(return_value=None)
 
         request = MagicMock()
         user = _make_user()
@@ -247,8 +265,14 @@ class TestSharePointImport:
         """Graph API returns 401 → clear re-login message."""
         from open_webui.routers.knowledge import import_sharepoint_folder, SharePointImportForm
 
-        mock_kb.get_knowledge_by_id.return_value = _make_knowledge()
-        mock_oauth.get_session_by_provider_and_user_id.return_value = _make_oauth_session()
+        mock_kb.get_knowledge_by_id = AsyncMock(return_value=_make_knowledge())
+
+        mock_kb.add_file_to_knowledge_by_id = AsyncMock()
+
+        mock_kb.update_knowledge_by_id = AsyncMock()
+
+        mock_kb.get_file_metadatas_by_id = AsyncMock(return_value=[])
+        mock_oauth.get_session_by_provider_and_user_id = AsyncMock(return_value=_make_oauth_session())
 
         graph_instance = AsyncMock()
         resp = httpx.Response(401, request=httpx.Request("GET", "https://graph.microsoft.com"))
@@ -280,8 +304,14 @@ class TestSharePointImport:
         """Graph API returns 403 → message about Files.Read.All."""
         from open_webui.routers.knowledge import import_sharepoint_folder, SharePointImportForm
 
-        mock_kb.get_knowledge_by_id.return_value = _make_knowledge()
-        mock_oauth.get_session_by_provider_and_user_id.return_value = _make_oauth_session()
+        mock_kb.get_knowledge_by_id = AsyncMock(return_value=_make_knowledge())
+
+        mock_kb.add_file_to_knowledge_by_id = AsyncMock()
+
+        mock_kb.update_knowledge_by_id = AsyncMock()
+
+        mock_kb.get_file_metadatas_by_id = AsyncMock(return_value=[])
+        mock_oauth.get_session_by_provider_and_user_id = AsyncMock(return_value=_make_oauth_session())
 
         graph_instance = AsyncMock()
         resp = httpx.Response(403, request=httpx.Request("GET", "https://graph.microsoft.com"))
@@ -313,8 +343,14 @@ class TestSharePointImport:
         """Empty folder → success with 0 files."""
         from open_webui.routers.knowledge import import_sharepoint_folder, SharePointImportForm
 
-        mock_kb.get_knowledge_by_id.return_value = _make_knowledge()
-        mock_oauth.get_session_by_provider_and_user_id.return_value = _make_oauth_session()
+        mock_kb.get_knowledge_by_id = AsyncMock(return_value=_make_knowledge())
+
+        mock_kb.add_file_to_knowledge_by_id = AsyncMock()
+
+        mock_kb.update_knowledge_by_id = AsyncMock()
+
+        mock_kb.get_file_metadatas_by_id = AsyncMock(return_value=[])
+        mock_oauth.get_session_by_provider_and_user_id = AsyncMock(return_value=_make_oauth_session())
 
         graph_instance = AsyncMock()
         graph_instance.list_folder.return_value = _make_folder_listing(files=[], folder_name="Empty")
@@ -344,8 +380,14 @@ class TestSharePointImport:
         """Folder with only subfolders → 0 files, skipped_folders populated."""
         from open_webui.routers.knowledge import import_sharepoint_folder, SharePointImportForm
 
-        mock_kb.get_knowledge_by_id.return_value = _make_knowledge()
-        mock_oauth.get_session_by_provider_and_user_id.return_value = _make_oauth_session()
+        mock_kb.get_knowledge_by_id = AsyncMock(return_value=_make_knowledge())
+
+        mock_kb.add_file_to_knowledge_by_id = AsyncMock()
+
+        mock_kb.update_knowledge_by_id = AsyncMock()
+
+        mock_kb.get_file_metadatas_by_id = AsyncMock(return_value=[])
+        mock_oauth.get_session_by_provider_and_user_id = AsyncMock(return_value=_make_oauth_session())
 
         graph_instance = AsyncMock()
         graph_instance.list_folder.return_value = _make_folder_listing(
@@ -373,16 +415,22 @@ class TestSharePointImport:
     @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
     @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
     @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
-    @patch(f"{_KNOWLEDGE_MOD}.upload_file_handler")
-    @patch(f"{_KNOWLEDGE_MOD}.process_file")
+    @patch(f"{_KNOWLEDGE_MOD}.upload_file_handler", new_callable=AsyncMock)
+    @patch(f"{_KNOWLEDGE_MOD}.process_file", new_callable=AsyncMock)
     async def test_file_without_download_url(
         self, mock_process, mock_upload, mock_graph_cls, mock_oauth, mock_kb
     ):
         """File with no download URL → reported as error, not crash."""
         from open_webui.routers.knowledge import import_sharepoint_folder, SharePointImportForm
 
-        mock_kb.get_knowledge_by_id.return_value = _make_knowledge()
-        mock_oauth.get_session_by_provider_and_user_id.return_value = _make_oauth_session()
+        mock_kb.get_knowledge_by_id = AsyncMock(return_value=_make_knowledge())
+
+        mock_kb.add_file_to_knowledge_by_id = AsyncMock()
+
+        mock_kb.update_knowledge_by_id = AsyncMock()
+
+        mock_kb.get_file_metadatas_by_id = AsyncMock(return_value=[])
+        mock_oauth.get_session_by_provider_and_user_id = AsyncMock(return_value=_make_oauth_session())
 
         no_url_file = GraphFileItem(
             id="f-nourl", name="broken.pdf", size=100,
@@ -413,17 +461,23 @@ class TestSharePointImport:
     @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
     @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
     @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
-    @patch(f"{_KNOWLEDGE_MOD}.upload_file_handler")
-    @patch(f"{_KNOWLEDGE_MOD}.process_file")
+    @patch(f"{_KNOWLEDGE_MOD}.upload_file_handler", new_callable=AsyncMock)
+    @patch(f"{_KNOWLEDGE_MOD}.process_file", new_callable=AsyncMock)
     async def test_graph_client_receives_correct_token(
         self, mock_process, mock_upload, mock_graph_cls, mock_oauth, mock_kb
     ):
         """Verify GraphClient is instantiated with the token from oauth_session."""
         from open_webui.routers.knowledge import import_sharepoint_folder, SharePointImportForm
 
-        mock_kb.get_knowledge_by_id.return_value = _make_knowledge()
-        mock_oauth.get_session_by_provider_and_user_id.return_value = _make_oauth_session(
-            access_token="my-specific-token"
+        mock_kb.get_knowledge_by_id = AsyncMock(return_value=_make_knowledge())
+
+        mock_kb.add_file_to_knowledge_by_id = AsyncMock()
+
+        mock_kb.update_knowledge_by_id = AsyncMock()
+
+        mock_kb.get_file_metadatas_by_id = AsyncMock(return_value=[])
+        mock_oauth.get_session_by_provider_and_user_id = AsyncMock(
+            return_value=_make_oauth_session(access_token="my-specific-token")
         )
 
         graph_instance = AsyncMock()
@@ -452,8 +506,8 @@ class TestSharePointReimport:
     @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
     @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
     @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
-    @patch(f"{_KNOWLEDGE_MOD}.upload_file_handler")
-    @patch(f"{_KNOWLEDGE_MOD}.process_file")
+    @patch(f"{_KNOWLEDGE_MOD}.upload_file_handler", new_callable=AsyncMock)
+    @patch(f"{_KNOWLEDGE_MOD}.process_file", new_callable=AsyncMock)
     async def test_reimport_uses_stored_source(
         self, mock_process, mock_upload, mock_graph_cls, mock_oauth, mock_kb
     ):
@@ -470,8 +524,11 @@ class TestSharePointReimport:
                 "last_imported_at": 1000000,
             }
         }
-        mock_kb.get_knowledge_by_id.return_value = kb
-        mock_oauth.get_session_by_provider_and_user_id.return_value = _make_oauth_session()
+        mock_kb.get_knowledge_by_id = AsyncMock(return_value=kb)
+        mock_kb.add_file_to_knowledge_by_id = AsyncMock()
+        mock_kb.update_knowledge_by_id = AsyncMock()
+        mock_kb.get_file_metadatas_by_id = AsyncMock(return_value=[])
+        mock_oauth.get_session_by_provider_and_user_id = AsyncMock(return_value=_make_oauth_session())
 
         graph_instance = AsyncMock()
         graph_instance.list_folder.return_value = _make_folder_listing(
@@ -486,7 +543,7 @@ class TestSharePointReimport:
         graph_instance.download_file.return_value = b"new content"
         mock_graph_cls.return_value = graph_instance
 
-        mock_upload.return_value = {"status": True, "id": "file-reimport-1"}
+        mock_upload.side_effect = None; mock_upload.return_value = {"status": True, "id": "file-reimport-1"}
 
         request = MagicMock()
         user = _make_user()
@@ -510,7 +567,7 @@ class TestSharePointReimport:
 
         kb = _make_knowledge()
         kb.meta = {}
-        mock_kb.get_knowledge_by_id.return_value = kb
+        mock_kb.get_knowledge_by_id = AsyncMock(return_value=kb)
 
         request = MagicMock()
         user = _make_user()
@@ -532,7 +589,7 @@ class TestSharePointReimport:
         """Re-import with invalid KB → 400."""
         from open_webui.routers.knowledge import reimport_sharepoint_folder
 
-        mock_kb.get_knowledge_by_id.return_value = None
+        mock_kb.get_knowledge_by_id = AsyncMock(return_value=None)
 
         request = MagicMock()
         user = _make_user()
