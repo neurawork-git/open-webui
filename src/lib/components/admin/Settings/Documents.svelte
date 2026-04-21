@@ -1483,6 +1483,18 @@
 							<Switch bind:state={RAGConfig.ENABLE_ONEDRIVE_INTEGRATION} />
 						</div>
 					</div>
+
+					{#if RAGConfig.ENABLE_ONEDRIVE_INTEGRATION}
+						<div class="mb-2.5">
+							<div class="text-xs font-medium mb-1">{$i18n.t('OneDrive Business Client ID')}</div>
+							<input
+								class="w-full rounded-lg py-1.5 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+								type="text"
+								placeholder={$i18n.t('Defaults to Microsoft OAuth Client ID')}
+								bind:value={RAGConfig.ONEDRIVE_CLIENT_ID_BUSINESS}
+							/>
+						</div>
+					{/if}
 				</div>
 
 				<div class="mb-3">
