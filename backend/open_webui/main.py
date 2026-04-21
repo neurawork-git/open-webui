@@ -83,6 +83,7 @@ from open_webui.routers import (
     openai,
     retrieval,
     pipelines,
+    # processing,  # TODO: port to async APIs (get_db_context -> get_async_db_context, AsyncSession)
     tasks,
     auths,
     channels,
@@ -1410,6 +1411,7 @@ app.include_router(images.router, prefix='/api/v1/images', tags=['images'])
 
 app.include_router(audio.router, prefix='/api/v1/audio', tags=['audio'])
 app.include_router(retrieval.router, prefix='/api/v1/retrieval', tags=['retrieval'])
+# app.include_router(processing.router, prefix='/api/v1/admin/processing', tags=['processing'])
 
 app.include_router(configs.router, prefix='/api/v1/configs', tags=['configs'])
 
