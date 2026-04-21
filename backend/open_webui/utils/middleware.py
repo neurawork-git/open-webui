@@ -970,6 +970,37 @@ def get_source_context(sources: list, source_ids: dict = None, include_content: 
     return context_string
 
 
+def build_knowledge_bases_string(sources: list) -> str:
+    """
+    Build <kb> tag string from citation sources, listing unique knowledge
+    bases with their name and description. Values are HTML-escaped to
+    prevent injection attacks.
+
+    Format: <kb id="..." name="..." description="..."/>
+    """
+    knowledge_bases_seen = {}
+    for source in sources or []:
+        source_info = source.get('source', {}) or {}
+        kb_id = source_info.get('id')
+        if kb_id and kb_id not in knowledge_bases_seen:
+            knowledge_bases_seen[kb_id] = {
+                'name': source_info.get('name') or '',
+                'description': source_info.get('description') or '',
+            }
+
+    knowledge_bases_string = ''
+    for kb_id, kb_info in knowledge_bases_seen.items():
+        kb_name = html.escape(kb_info['name']) if kb_info['name'] else ''
+        kb_desc = html.escape(kb_info['description']) if kb_info['description'] else ''
+        knowledge_bases_string += (
+            f'<kb id="{html.escape(kb_id)}"'
+            + (f' name="{kb_name}"' if kb_name else '')
+            + (f' description="{kb_desc}"' if kb_desc else '')
+            + '/>\n'
+        )
+    return knowledge_bases_string.strip()
+
+
 def apply_source_context_to_messages(
     request: Request,
     messages: list,
@@ -980,6 +1011,10 @@ def apply_source_context_to_messages(
     """
     Build source context from citation sources and apply to messages.
     Uses RAG template to format context for model consumption.
+
+    Builds two strings for the template:
+    - context: Retrieved document chunks as <source> tags
+    - knowledge_bases: Knowledge base metadata as <kb> tags
 
     When include_content is False, emit <source> tags with id/name but no
     document body — useful when the content is already present elsewhere
@@ -994,15 +1029,27 @@ def apply_source_context_to_messages(
     if not context:
         return messages
 
+    knowledge_bases = build_knowledge_bases_string(sources)
+
     if RAG_SYSTEM_CONTEXT:
         return add_or_update_system_message(
-            rag_template(request.app.state.config.RAG_TEMPLATE, context, user_message),
+            rag_template(
+                request.app.state.config.RAG_TEMPLATE,
+                context,
+                user_message,
+                knowledge_bases,
+            ),
             messages,
             append=True,
         )
     else:
         return add_or_update_user_message(
-            rag_template(request.app.state.config.RAG_TEMPLATE, context, user_message),
+            rag_template(
+                request.app.state.config.RAG_TEMPLATE,
+                context,
+                user_message,
+                knowledge_bases,
+            ),
             messages,
             append=False,
         )
@@ -2004,14 +2051,23 @@ async def chat_completion_files_handler(
         ]
         if knowledge_ids:
             for kid in knowledge_ids:
-                kb = Knowledges.get_knowledge_by_id(kid)
-                if kb and kb.meta and isinstance(kb.meta, dict):
-                    kb_rag = kb.meta.get("rag_settings")
-                    if kb_rag:
-                        per_knowledge_rag_settings[kid] = kb_rag
-                        log.debug(
-                            f"Found per-knowledge RAG settings for {kb.name} ({kid}): {kb_rag}"
-                        )
+                kb = await Knowledges.get_knowledge_by_id(kid)
+                if kb:
+                    # Enrich the item with knowledge base metadata for RAG context
+                    # (used by {{KNOWLEDGE_BASES}} template variable)
+                    for item in files:
+                        if item.get("id") == kid and item.get("type") == "collection":
+                            item["name"] = kb.name
+                            item["description"] = kb.description
+                            break
+
+                    if kb.meta and isinstance(kb.meta, dict):
+                        kb_rag = kb.meta.get("rag_settings")
+                        if kb_rag:
+                            per_knowledge_rag_settings[kid] = kb_rag
+                            log.debug(
+                                f"Found per-knowledge RAG settings for {kb.name} ({kid}): {kb_rag}"
+                            )
 
         # Build global settings dict
         global_settings = {
@@ -4698,10 +4754,15 @@ async def streaming_chat_response_handler(response, ctx):
                             )
                             source_context = source_context.strip()
                             if source_context:
+                                knowledge_bases = build_knowledge_bases_string(
+                                    (metadata.get('sources', []) or [])
+                                    + (all_tool_call_sources or [])
+                                )
                                 rag_content = rag_template(
                                     request.app.state.config.RAG_TEMPLATE,
                                     source_context,
                                     user_message,
+                                    knowledge_bases,
                                 )
                                 if RAG_SYSTEM_CONTEXT:
                                     form_data['messages'] = add_or_update_system_message(
