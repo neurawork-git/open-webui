@@ -450,7 +450,7 @@ def validate_model_schema(model_class, db: Optional[Session] = None) -> list[str
     errors = []
     table_name = model_class.__tablename__
 
-    with get_db_context(db) as session:
+    with get_db() as session:
         inspector = inspect(session.bind)
         tables = inspector.get_table_names()
 
