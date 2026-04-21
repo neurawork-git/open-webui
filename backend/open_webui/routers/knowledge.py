@@ -988,6 +988,12 @@ async def reindex_knowledge_by_id(
     files = await Knowledges.get_files_by_id(id, db=db)
     total_files = len(files)
 
+    if total_files == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Knowledge base has no files to reindex",
+        )
+
     # Delete existing vector collection
     try:
         if await ASYNC_VECTOR_DB_CLIENT.has_collection(collection_name=id):
