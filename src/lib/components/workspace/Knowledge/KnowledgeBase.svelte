@@ -27,6 +27,8 @@
 	import {
 		addFileToKnowledgeById,
 		getKnowledgeById,
+		importSharePointFolder,
+		reimportSharePointFolder,
 		removeFileFromKnowledgeById,
 		resetKnowledgeById,
 		updateFileFromKnowledgeById,
@@ -66,6 +68,8 @@
 
 	let showSyncConfirmModal = false;
 	let showAccessControlModal = false;
+	let showSharePointImportModal = false;
+	let sharePointImporting = false;
 
 	let minSize = 0;
 	type Knowledge = {
@@ -336,6 +340,82 @@
 			}
 		} catch (e) {
 			toast.error(`${e}`);
+		}
+	};
+
+	const sharePointImportHandler = async (driveId: string, itemId: string) => {
+		if (!knowledge) return;
+		sharePointImporting = true;
+
+		try {
+			const result = await importSharePointFolder(
+				localStorage.token,
+				knowledge.id,
+				driveId,
+				itemId
+			);
+
+			if (result) {
+				if (result.imported > 0) {
+					toast.success(
+						$i18n.t('Imported {{count}} files from "{{folder}}"', {
+							count: result.imported,
+							folder: result.folder_name
+						})
+					);
+				}
+				if (result.failed > 0) {
+					toast.warning(
+						$i18n.t('{{count}} files failed to import', { count: result.failed })
+					);
+				}
+				if (result.skipped_folders.length > 0) {
+					toast.info(
+						$i18n.t('Skipped {{count}} subfolders (not supported in v1)', {
+							count: result.skipped_folders.length
+						})
+					);
+				}
+				if (result.imported === 0 && result.failed === 0) {
+					toast.info($i18n.t('Folder is empty — no files to import'));
+				}
+				await getItemsPage();
+			}
+		} catch (e) {
+			toast.error(`${e}`);
+		} finally {
+			sharePointImporting = false;
+			showSharePointImportModal = false;
+		}
+	};
+
+	const sharePointReimportHandler = async () => {
+		if (!knowledge) return;
+		sharePointImporting = true;
+
+		try {
+			const result = await reimportSharePointFolder(localStorage.token, knowledge.id);
+
+			if (result) {
+				if (result.imported > 0) {
+					toast.success(
+						$i18n.t('Re-imported {{count}} files from "{{folder}}"', {
+							count: result.imported,
+							folder: result.folder_name
+						})
+					);
+				}
+				if (result.failed > 0) {
+					toast.warning(
+						$i18n.t('{{count}} files failed to import', { count: result.failed })
+					);
+				}
+				await getItemsPage();
+			}
+		} catch (e) {
+			toast.error(`${e}`);
+		} finally {
+			sharePointImporting = false;
 		}
 	};
 
@@ -806,6 +886,79 @@
 	}}
 />
 
+{#if showSharePointImportModal}
+	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+		<div class="bg-white dark:bg-gray-900 rounded-2xl p-6 w-full max-w-md mx-4 shadow-xl">
+			<h3 class="text-lg font-semibold mb-4">{$i18n.t('Import from SharePoint')}</h3>
+
+			<form
+				on:submit|preventDefault={(e) => {
+					const formData = new FormData(e.target);
+					const driveId = formData.get('driveId')?.toString() ?? '';
+					const itemId = formData.get('itemId')?.toString() ?? '';
+					if (driveId && itemId) {
+						sharePointImportHandler(driveId, itemId);
+					}
+				}}
+			>
+				<div class="mb-3">
+					<label for="sp-drive-id" class="block text-sm font-medium mb-1">
+						{$i18n.t('Drive ID')}
+					</label>
+					<input
+						id="sp-drive-id"
+						name="driveId"
+						type="text"
+						required
+						class="w-full px-3 py-2 text-sm border border-gray-200 dark:border-gray-700 rounded-xl bg-transparent outline-none focus:ring-1 focus:ring-blue-500"
+						placeholder="b!xxxxxxxx..."
+					/>
+				</div>
+
+				<div class="mb-4">
+					<label for="sp-item-id" class="block text-sm font-medium mb-1">
+						{$i18n.t('Folder ID')}
+					</label>
+					<input
+						id="sp-item-id"
+						name="itemId"
+						type="text"
+						required
+						class="w-full px-3 py-2 text-sm border border-gray-200 dark:border-gray-700 rounded-xl bg-transparent outline-none focus:ring-1 focus:ring-blue-500"
+						placeholder="01XXXXXXXX..."
+					/>
+				</div>
+
+				<p class="text-xs text-gray-500 dark:text-gray-400 mb-4">
+					{$i18n.t('Find these IDs in the SharePoint URL or via Microsoft Graph Explorer.')}
+				</p>
+
+				<div class="flex justify-end gap-2">
+					<button
+						type="button"
+						class="px-4 py-2 text-sm rounded-xl hover:bg-gray-100 dark:hover:bg-gray-800"
+						on:click={() => { showSharePointImportModal = false; }}
+					>
+						{$i18n.t('Cancel')}
+					</button>
+					<button
+						type="submit"
+						disabled={sharePointImporting}
+						class="px-4 py-2 text-sm bg-blue-600 text-white rounded-xl hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
+					>
+						{#if sharePointImporting}
+							<Spinner className="size-3" />
+							{$i18n.t('Importing...')}
+						{:else}
+							{$i18n.t('Import')}
+						{/if}
+					</button>
+				</div>
+			</form>
+		</div>
+	</div>
+{/if}
+
 <input
 	id="files-input"
 	bind:files={inputFiles}
@@ -918,6 +1071,39 @@
 			</div>
 		</div>
 
+		{#if knowledge?.meta?.sharepoint_source}
+			<div class="mt-1 mb-1 px-1 flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+				<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" class="size-3.5 flex-shrink-0" fill="none">
+					<mask id="sp-icon" style="mask-type:alpha" maskUnits="userSpaceOnUse" x="0" y="6" width="32" height="20">
+						<path d="M7.82979 26C3.50549 26 0 22.5675 0 18.3333C0 14.1921 3.35322 10.8179 7.54613 10.6716C9.27535 7.87166 12.4144 6 16 6C20.6308 6 24.5169 9.12183 25.5829 13.3335C29.1316 13.3603 32 16.1855 32 19.6667C32 23.0527 29 26 25.8723 25.9914L7.82979 26Z" fill="#C4C4C4"/>
+					</mask>
+					<g mask="url(#sp-icon)">
+						<path d="M7.83 26C5.38 26 3.19 24.9 1.75 23.17L18.04 16.33L30.71 23.46C29.59 24.92 27.91 26 26 25.99H7.83Z" fill="#0364B8"/>
+						<path d="M25.58 13.31L18.04 16.33L30.71 23.46C31.52 22.41 32 21.09 32 19.67C32 16.19 29.13 13.36 25.58 13.33Z" fill="#0078D4"/>
+						<path d="M7.06 10.7L18.04 16.33L25.58 13.31C24.51 9.11 20.62 6 16 6C12.41 6 9.28 7.87 7.55 10.67L7.06 10.7Z" fill="#1490DF"/>
+						<path d="M1.75 23.17L18.04 16.33L7.06 10.7C3.1 11.08 0 14.35 0 18.33C0 20.17.66 21.85 1.75 23.17Z" fill="#28A8EA"/>
+					</g>
+				</svg>
+				<span class="truncate">
+					{$i18n.t('SharePoint: {{folder}}', { folder: knowledge.meta.sharepoint_source.folder_name })}
+				</span>
+				{#if knowledge?.write_access}
+					<button
+						class="ml-auto flex-shrink-0 px-2 py-0.5 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-xs flex items-center gap-1"
+						disabled={sharePointImporting}
+						on:click={sharePointReimportHandler}
+					>
+						{#if sharePointImporting}
+							<Spinner className="size-3" />
+						{:else}
+							<ArrowPath className="size-3" />
+						{/if}
+						{$i18n.t('Re-import')}
+					</button>
+				{/if}
+			</div>
+		{/if}
+
 		<div
 			class="mt-2 mb-2.5 py-2 -mx-0 bg-white dark:bg-gray-900 rounded-3xl border border-gray-100/30 dark:border-gray-850/30 flex-1"
 		>
@@ -939,6 +1125,7 @@
 					{#if knowledge?.write_access}
 						<div>
 							<AddContentMenu
+								showSharePointImport={$config?.features?.enable_onedrive_integration && $config?.features?.enable_onedrive_business}
 								onUpload={(data) => {
 									if (data.type === 'directory') {
 										uploadDirectoryHandler();
@@ -946,6 +1133,8 @@
 										showAddWebpageModal = true;
 									} else if (data.type === 'text') {
 										showAddTextContentModal = true;
+									} else if (data.type === 'sharepoint') {
+										showSharePointImportModal = true;
 									} else {
 										document.getElementById('files-input').click();
 									}
