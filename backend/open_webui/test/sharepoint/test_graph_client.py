@@ -10,9 +10,10 @@ from open_webui.utils.graph_client import (
 )
 
 
-def _make_graph_item(name: str, is_folder: bool = False, size: int = 1024):
+def _make_graph_item(name: str, is_folder: bool = False, size: int = 1024, item_id: str | None = None):
     """Helper to create a Graph API item dict."""
-    item = {"id": f"id-{name}", "name": name, "size": size}
+    resolved_id = item_id or f"id-{name}"
+    item = {"id": resolved_id, "name": name, "size": size}
     if is_folder:
         item["folder"] = {"childCount": 3}
     else:
@@ -38,8 +39,8 @@ class TestListFolder:
     FOLDER = "folder-1"
 
     @pytest.mark.asyncio
-    async def test_single_page_mixed_items(self):
-        """Files are returned, folders are skipped."""
+    async def test_single_page_files_only(self):
+        """Files at root level are returned with empty path."""
 
         def handler(request: httpx.Request) -> httpx.Response:
             url = str(request.url)
@@ -57,7 +58,6 @@ class TestListFolder:
                     json={
                         "value": [
                             _make_graph_item("report.pdf"),
-                            _make_graph_item("Subfolder", is_folder=True),
                             _make_graph_item("notes.docx"),
                         ]
                     },
@@ -69,13 +69,122 @@ class TestListFolder:
 
         assert isinstance(result, GraphFolderListing)
         assert result.folder_name == "TestFolder"
-        assert result.drive_id == self.DRIVE
-        assert result.item_id == self.FOLDER
         assert len(result.files) == 2
         assert result.files[0].name == "report.pdf"
-        assert result.files[1].name == "notes.docx"
+        assert result.files[0].path == ""
         assert result.files[0].download_url == "https://cdn.example.com/report.pdf"
-        assert result.skipped_folders == ["Subfolder"]
+        assert result.truncated is False
+
+    @pytest.mark.asyncio
+    async def test_recursive_walk_captures_subfolder_files(self):
+        """Subfolders are walked recursively; each file carries its relative path."""
+
+        sub_id = "sub-id-1"
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if url == f"{GRAPH_BASE}/drives/{self.DRIVE}/items/{self.FOLDER}":
+                return httpx.Response(
+                    200, json={"name": "Root", "parentReference": {"path": "/"}}
+                )
+            if f"/items/{self.FOLDER}/children" in url:
+                return httpx.Response(
+                    200,
+                    json={
+                        "value": [
+                            _make_graph_item("top.pdf"),
+                            _make_graph_item("Invoices", is_folder=True, item_id=sub_id),
+                        ]
+                    },
+                )
+            if f"/items/{sub_id}/children" in url:
+                return httpx.Response(
+                    200,
+                    json={"value": [_make_graph_item("jan.pdf")]},
+                )
+            return httpx.Response(404)
+
+        client = _make_client(handler)
+        result = await client.list_folder(self.DRIVE, self.FOLDER)
+
+        assert [f.name for f in result.files] == ["top.pdf", "jan.pdf"]
+        assert result.files[0].path == ""
+        assert result.files[1].path == "Invoices/"
+        assert result.truncated is False
+
+    @pytest.mark.asyncio
+    async def test_deeply_nested_path(self):
+        """Path accumulates across multiple nesting levels."""
+
+        sub1 = "sub1"
+        sub2 = "sub2"
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if url == f"{GRAPH_BASE}/drives/{self.DRIVE}/items/{self.FOLDER}":
+                return httpx.Response(
+                    200, json={"name": "Root", "parentReference": {"path": "/"}}
+                )
+            if f"/items/{self.FOLDER}/children" in url:
+                return httpx.Response(
+                    200,
+                    json={
+                        "value": [
+                            _make_graph_item("A", is_folder=True, item_id=sub1),
+                        ]
+                    },
+                )
+            if f"/items/{sub1}/children" in url:
+                return httpx.Response(
+                    200,
+                    json={
+                        "value": [
+                            _make_graph_item("B", is_folder=True, item_id=sub2),
+                        ]
+                    },
+                )
+            if f"/items/{sub2}/children" in url:
+                return httpx.Response(
+                    200,
+                    json={"value": [_make_graph_item("deep.pdf")]},
+                )
+            return httpx.Response(404)
+
+        client = _make_client(handler)
+        result = await client.list_folder(self.DRIVE, self.FOLDER)
+
+        assert len(result.files) == 1
+        assert result.files[0].name == "deep.pdf"
+        assert result.files[0].path == "A/B/"
+
+    @pytest.mark.asyncio
+    async def test_truncation_at_max_files(self):
+        """Recursion stops at max_files, truncated=True."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if url == f"{GRAPH_BASE}/drives/{self.DRIVE}/items/{self.FOLDER}":
+                return httpx.Response(
+                    200, json={"name": "Big", "parentReference": {"path": "/"}}
+                )
+            if f"/items/{self.FOLDER}/children" in url:
+                return httpx.Response(
+                    200,
+                    json={
+                        "value": [
+                            _make_graph_item("a.pdf"),
+                            _make_graph_item("b.pdf"),
+                            _make_graph_item("c.pdf"),
+                        ]
+                    },
+                )
+            return httpx.Response(404)
+
+        client = _make_client(handler)
+        result = await client.list_folder(self.DRIVE, self.FOLDER, max_files=2)
+
+        assert len(result.files) == 2
+        assert result.truncated is True
 
     @pytest.mark.asyncio
     async def test_pagination(self):
@@ -128,35 +237,38 @@ class TestListFolder:
         result = await client.list_folder(self.DRIVE, self.FOLDER)
 
         assert len(result.files) == 0
-        assert len(result.skipped_folders) == 0
+        assert result.truncated is False
 
     @pytest.mark.asyncio
-    async def test_only_folders(self):
-        """Folder containing only subfolders → 0 files, populated skipped_folders."""
+    async def test_only_folders_walks_them(self):
+        """A folder containing only subfolders (all empty) → 0 files, no skipped list."""
 
         def handler(request: httpx.Request) -> httpx.Response:
             url = str(request.url)
             if "/children" not in url and f"/items/{self.FOLDER}" in url:
                 return httpx.Response(
-                    200, json={"name": "OnlyFolders", "parentReference": {"path": "/"}}
+                    200,
+                    json={"name": "OnlyFolders", "parentReference": {"path": "/"}},
                 )
-            if "/children" in url:
+            if f"/items/{self.FOLDER}/children" in url:
                 return httpx.Response(
                     200,
                     json={
                         "value": [
-                            _make_graph_item("Sub1", is_folder=True),
-                            _make_graph_item("Sub2", is_folder=True),
+                            _make_graph_item("Sub1", is_folder=True, item_id="s1"),
+                            _make_graph_item("Sub2", is_folder=True, item_id="s2"),
                         ]
                     },
                 )
+            if "/items/s1/children" in url or "/items/s2/children" in url:
+                return httpx.Response(200, json={"value": []})
             return httpx.Response(404)
 
         client = _make_client(handler)
         result = await client.list_folder(self.DRIVE, self.FOLDER)
 
         assert len(result.files) == 0
-        assert result.skipped_folders == ["Sub1", "Sub2"]
+        assert result.skipped_folders == []
 
     @pytest.mark.asyncio
     async def test_401_raises(self):

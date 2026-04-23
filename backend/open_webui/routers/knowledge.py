@@ -1256,7 +1256,31 @@ class SharePointImportResult(BaseModel):
     imported: int
     failed: int
     errors: list[SharePointImportFileError]
-    skipped_folders: list[str]
+    skipped_folders: list[str] = []
+    truncated: bool = False
+
+
+# Filesystem-safe path separator used when flattening subfolder paths into
+# the uploaded filename (os.path.basename strips "/" and "\\" on Windows).
+SHAREPOINT_PATH_SEPARATOR = " › "
+SHAREPOINT_FILENAME_MAX = 250
+
+
+def _build_display_filename(path: str, name: str) -> str:
+    """Flatten a subfolder path into a display filename.
+
+    Example: path="Invoices/2024/", name="report.pdf"
+             → "Invoices › 2024 › report.pdf"
+    """
+    if not path:
+        return name
+    prefix = path.rstrip("/").replace("/", SHAREPOINT_PATH_SEPARATOR)
+    combined = f"{prefix}{SHAREPOINT_PATH_SEPARATOR}{name}"
+    if len(combined) <= SHAREPOINT_FILENAME_MAX:
+        return combined
+    # Truncate from the front — keep the original filename and its extension intact.
+    overflow = len(combined) - SHAREPOINT_FILENAME_MAX + 1
+    return f"…{combined[overflow:]}"
 
 
 @router.post("/{id}/sharepoint/import", response_model=SharePointImportResult)
@@ -1337,10 +1361,11 @@ async def import_sharepoint_folder(
     errors: list[SharePointImportFileError] = []
 
     for graph_file in listing.files:
+        display_name = _build_display_filename(graph_file.path, graph_file.name)
         try:
             if not graph_file.download_url:
                 errors.append(SharePointImportFileError(
-                    filename=graph_file.name,
+                    filename=display_name,
                     error="No download URL provided by Graph API",
                 ))
                 continue
@@ -1352,7 +1377,7 @@ async def import_sharepoint_folder(
             file_stream = io.BytesIO(content_bytes)
             upload_file = UploadFile(
                 file=file_stream,
-                filename=graph_file.name,
+                filename=display_name,
                 headers={"content-type": graph_file.content_type or "application/octet-stream"},
             )
 
@@ -1385,10 +1410,10 @@ async def import_sharepoint_folder(
 
         except Exception as e:
             log.warning(
-                f"SharePoint import: failed to import {graph_file.name}: {e}"
+                f"SharePoint import: failed to import {display_name}: {e}"
             )
             errors.append(SharePointImportFileError(
-                filename=graph_file.name,
+                filename=display_name,
                 error=str(e),
             ))
 
@@ -1420,6 +1445,7 @@ async def import_sharepoint_folder(
         failed=len(errors),
         errors=errors,
         skipped_folders=listing.skipped_folders,
+        truncated=listing.truncated,
     )
 
 

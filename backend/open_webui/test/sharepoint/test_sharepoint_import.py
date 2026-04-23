@@ -603,3 +603,137 @@ class TestSharePointReimport:
                 db=db,
             )
         assert exc_info.value.status_code == 400
+
+
+class TestDisplayFilename:
+    """Flattening of subfolder paths into the uploaded filename."""
+
+    def test_root_file_unchanged(self):
+        from open_webui.routers.knowledge import _build_display_filename
+
+        assert _build_display_filename("", "doc.pdf") == "doc.pdf"
+
+    def test_single_subfolder(self):
+        from open_webui.routers.knowledge import _build_display_filename
+
+        assert (
+            _build_display_filename("Invoices/", "report.pdf")
+            == "Invoices › report.pdf"
+        )
+
+    def test_nested_subfolders(self):
+        from open_webui.routers.knowledge import _build_display_filename
+
+        assert (
+            _build_display_filename("A/B/C/", "deep.pdf")
+            == "A › B › C › deep.pdf"
+        )
+
+    def test_overflow_truncates_from_front(self):
+        from open_webui.routers.knowledge import (
+            _build_display_filename,
+            SHAREPOINT_FILENAME_MAX,
+        )
+
+        long_path = "/".join([f"Folder{i}" for i in range(100)]) + "/"
+        result = _build_display_filename(long_path, "file.pdf")
+
+        assert len(result) <= SHAREPOINT_FILENAME_MAX
+        assert result.startswith("…")
+        assert result.endswith("file.pdf")
+
+
+class TestPathPrefixFlow:
+    """Subfolder path must be flattened into the filename passed to upload_file_handler."""
+
+    @pytest.mark.asyncio
+    @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
+    @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
+    @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
+    @patch(f"{_KNOWLEDGE_MOD}.upload_file_handler", new_callable=AsyncMock)
+    @patch(f"{_KNOWLEDGE_MOD}.process_file", new_callable=AsyncMock)
+    async def test_subfolder_file_gets_path_prefix(
+        self, mock_process, mock_upload, mock_graph_cls, mock_oauth, mock_kb
+    ):
+        from open_webui.routers.knowledge import (
+            import_sharepoint_folder,
+            SharePointImportForm,
+        )
+
+        mock_kb.get_knowledge_by_id = AsyncMock(return_value=_make_knowledge())
+        mock_kb.add_file_to_knowledge_by_id = AsyncMock()
+        mock_kb.update_knowledge_by_id = AsyncMock()
+        mock_kb.get_file_metadatas_by_id = AsyncMock(return_value=[])
+        mock_oauth.get_session_by_provider_and_user_id = AsyncMock(
+            return_value=_make_oauth_session()
+        )
+
+        nested_file = GraphFileItem(
+            id="f1",
+            name="jan.pdf",
+            size=1024,
+            content_type="application/pdf",
+            download_url="https://cdn.example.com/jan.pdf",
+            path="Invoices/2024/",
+        )
+        graph_instance = AsyncMock()
+        graph_instance.list_folder.return_value = _make_folder_listing(files=[nested_file])
+        graph_instance.download_file.return_value = b"pdf bytes"
+        mock_graph_cls.return_value = graph_instance
+
+        mock_upload.return_value = {"status": True, "id": "file-1"}
+
+        await import_sharepoint_folder(
+            request=MagicMock(),
+            id=KNOWLEDGE_ID,
+            form_data=SharePointImportForm(drive_id=DRIVE_ID, item_id=ITEM_ID),
+            user=_make_user(),
+            db=MagicMock(),
+        )
+
+        upload_file_arg = mock_upload.call_args.kwargs["file"]
+        assert upload_file_arg.filename == "Invoices › 2024 › jan.pdf"
+
+    @pytest.mark.asyncio
+    @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
+    @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
+    @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
+    @patch(f"{_KNOWLEDGE_MOD}.upload_file_handler", new_callable=AsyncMock)
+    @patch(f"{_KNOWLEDGE_MOD}.process_file", new_callable=AsyncMock)
+    async def test_truncated_flag_propagates_to_response(
+        self, mock_process, mock_upload, mock_graph_cls, mock_oauth, mock_kb
+    ):
+        from open_webui.routers.knowledge import (
+            import_sharepoint_folder,
+            SharePointImportForm,
+        )
+
+        mock_kb.get_knowledge_by_id = AsyncMock(return_value=_make_knowledge())
+        mock_kb.add_file_to_knowledge_by_id = AsyncMock()
+        mock_kb.update_knowledge_by_id = AsyncMock()
+        mock_kb.get_file_metadatas_by_id = AsyncMock(return_value=[])
+        mock_oauth.get_session_by_provider_and_user_id = AsyncMock(
+            return_value=_make_oauth_session()
+        )
+
+        listing = GraphFolderListing(
+            folder_name="Huge",
+            folder_path="/",
+            drive_id=DRIVE_ID,
+            item_id=ITEM_ID,
+            files=[],
+            truncated=True,
+        )
+        graph_instance = AsyncMock()
+        graph_instance.list_folder.return_value = listing
+        mock_graph_cls.return_value = graph_instance
+
+        result = await import_sharepoint_folder(
+            request=MagicMock(),
+            id=KNOWLEDGE_ID,
+            form_data=SharePointImportForm(drive_id=DRIVE_ID, item_id=ITEM_ID),
+            user=_make_user(),
+            db=MagicMock(),
+        )
+
+        assert result.truncated is True

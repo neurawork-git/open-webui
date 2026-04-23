@@ -391,11 +391,12 @@
 						$i18n.t('{{count}} files failed to import', { count: result.failed })
 					);
 				}
-				if (result.skipped_folders.length > 0) {
-					toast.info(
-						$i18n.t('Skipped {{count}} subfolders (not supported in v1)', {
-							count: result.skipped_folders.length
-						})
+				if (result.truncated) {
+					toast.warning(
+						$i18n.t(
+							'Folder too large — stopped after {{count}} files. Split into smaller folders and re-import.',
+							{ count: result.total_files }
+						)
 					);
 				}
 				if (result.imported === 0 && result.failed === 0) {
@@ -429,6 +430,14 @@
 				if (result.failed > 0) {
 					toast.warning(
 						$i18n.t('{{count}} files failed to import', { count: result.failed })
+					);
+				}
+				if (result.truncated) {
+					toast.warning(
+						$i18n.t(
+							'Folder too large — stopped after {{count}} files. Split into smaller folders and re-import.',
+							{ count: result.total_files }
+						)
 					);
 				}
 				await getItemsPage();
