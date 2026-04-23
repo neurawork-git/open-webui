@@ -56,6 +56,38 @@ class GraphSiteListing(BaseModel):
     truncated: bool = False
 
 
+class GraphSiteSummary(BaseModel):
+    id: str
+    name: str
+    display_name: str
+    web_url: str
+
+
+class GraphDriveSummary(BaseModel):
+    id: str
+    name: str
+    drive_type: str = ""
+    root_item_id: str
+    total_size: int = 0
+
+
+class GraphChildItem(BaseModel):
+    id: str
+    name: str
+    is_folder: bool
+    size: int = 0
+    child_count: int = 0
+    content_type: Optional[str] = None
+
+
+class GraphChildrenListing(BaseModel):
+    parent_name: str
+    parent_size: int = 0
+    folders: list[GraphChildItem]
+    files: list[GraphChildItem]
+    next_link: Optional[str] = None
+
+
 class GraphClient:
     """Calls Microsoft Graph API using a delegated user token from oauth_session."""
 
@@ -262,6 +294,183 @@ class GraphClient:
             }
             for s in data.get("value", [])
         ]
+
+    async def list_sites_paginated(
+        self,
+        query: str = "*",
+        top: int = 100,
+        next_link: Optional[str] = None,
+    ) -> dict:
+        """Paginated site listing.
+
+        First call: pass `query` (default `*` for everything the caller can see)
+        and `top`. Subsequent calls: pass `next_link` (the opaque
+        `@odata.nextLink` from the previous response). Returns a dict with
+        `sites` (list of GraphSiteSummary-shaped dicts) and `next_link`.
+        """
+        client = self._client()
+        try:
+            if next_link:
+                resp = await client.get(next_link, headers=self.headers)
+            else:
+                resp = await client.get(
+                    f"{GRAPH_BASE}/sites",
+                    headers=self.headers,
+                    params={"search": query, "$top": top},
+                )
+            resp.raise_for_status()
+            data = resp.json()
+        finally:
+            if self._http_client is None:
+                await client.aclose()
+
+        sites = [
+            {
+                "id": s["id"],
+                "name": s.get("name", ""),
+                "display_name": s.get("displayName", ""),
+                "web_url": s.get("webUrl", ""),
+            }
+            for s in data.get("value", [])
+        ]
+        return {
+            "sites": sites,
+            "next_link": data.get("@odata.nextLink"),
+        }
+
+    async def list_site_drives_summary(self, site_id: str) -> dict:
+        """List drives of a site with aggregate size for each.
+
+        Returns `{site_name, site_url, drives: [GraphDriveSummary-dicts]}`.
+        The drive size is read from `drive.quota.used` when available, falling
+        back to the root item's aggregate `size` field.
+        """
+        client = self._client()
+        try:
+            site_resp = await client.get(
+                f"{GRAPH_BASE}/sites/{site_id}", headers=self.headers
+            )
+            site_resp.raise_for_status()
+            site = site_resp.json()
+
+            drives_resp = await client.get(
+                f"{GRAPH_BASE}/sites/{site_id}/drives", headers=self.headers
+            )
+            drives_resp.raise_for_status()
+            drives_data = drives_resp.json()
+
+            drives = []
+            for drive in drives_data.get("value", []):
+                drive_id = drive["id"]
+                root_resp = await client.get(
+                    f"{GRAPH_BASE}/drives/{drive_id}/root?$select=id,size",
+                    headers=self.headers,
+                )
+                root_resp.raise_for_status()
+                root = root_resp.json()
+                quota_used = drive.get("quota", {}).get("used") or 0
+                drives.append(
+                    {
+                        "id": drive_id,
+                        "name": drive.get("name") or "Documents",
+                        "drive_type": drive.get("driveType", ""),
+                        "root_item_id": root["id"],
+                        "total_size": int(quota_used or root.get("size", 0) or 0),
+                    }
+                )
+        finally:
+            if self._http_client is None:
+                await client.aclose()
+
+        return {
+            "site_name": site.get("displayName") or site.get("name", ""),
+            "site_url": site.get("webUrl", ""),
+            "drives": drives,
+        }
+
+    async def list_folder_children(
+        self,
+        drive_id: str,
+        item_id: str,
+        top: int = 200,
+        next_link: Optional[str] = None,
+    ) -> GraphChildrenListing:
+        """One-level listing of folder children with size metadata.
+
+        Each returned folder carries `size` (aggregate recursive bytes from
+        Graph's `driveItem.size`) and `child_count` (direct children). Files
+        carry their own `size` and `content_type`. Paginated via the opaque
+        `@odata.nextLink` passed back in the response.
+
+        On the first page (when `next_link is None`), the parent item is also
+        fetched so the caller can display a breadcrumb with the parent's name
+        and total size.
+        """
+        client = self._client()
+        try:
+            parent_name = ""
+            parent_size = 0
+            if next_link is None:
+                meta_resp = await client.get(
+                    f"{GRAPH_BASE}/drives/{drive_id}/items/{item_id}"
+                    "?$select=name,size",
+                    headers=self.headers,
+                )
+                meta_resp.raise_for_status()
+                meta = meta_resp.json()
+                parent_name = meta.get("name", "")
+                parent_size = int(meta.get("size", 0) or 0)
+
+            if next_link:
+                resp = await client.get(next_link, headers=self.headers)
+            else:
+                resp = await client.get(
+                    f"{GRAPH_BASE}/drives/{drive_id}/items/{item_id}/children",
+                    headers=self.headers,
+                    params={
+                        "$select": "id,name,size,file,folder,@microsoft.graph.downloadUrl",
+                        "$top": top,
+                    },
+                )
+            resp.raise_for_status()
+            data = resp.json()
+        finally:
+            if self._http_client is None:
+                await client.aclose()
+
+        folders: list[GraphChildItem] = []
+        files: list[GraphChildItem] = []
+        for item in data.get("value", []):
+            if "folder" in item:
+                folders.append(
+                    GraphChildItem(
+                        id=item["id"],
+                        name=item.get("name", ""),
+                        is_folder=True,
+                        size=int(item.get("size", 0) or 0),
+                        child_count=int(
+                            item.get("folder", {}).get("childCount", 0) or 0
+                        ),
+                    )
+                )
+            elif "file" in item:
+                files.append(
+                    GraphChildItem(
+                        id=item["id"],
+                        name=item.get("name", ""),
+                        is_folder=False,
+                        size=int(item.get("size", 0) or 0),
+                        content_type=item.get("file", {}).get("mimeType"),
+                    )
+                )
+
+        return GraphChildrenListing(
+            parent_name=parent_name,
+            parent_size=parent_size,
+            folders=folders,
+            files=files,
+            next_link=data.get("@odata.nextLink"),
+        )
 
     async def download_file(self, download_url: str) -> bytes:
         """Download file content from a Graph @microsoft.graph.downloadUrl."""

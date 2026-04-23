@@ -508,6 +508,174 @@ class TestSearchSites:
         }
 
 
+class TestListSitesPaginated:
+    @pytest.mark.asyncio
+    async def test_first_page_and_follow_next_link(self):
+        page2_url = "https://graph.microsoft.com/v1.0/sites?$skiptoken=abc"
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if url == page2_url:
+                return httpx.Response(
+                    200,
+                    json={
+                        "value": [
+                            {
+                                "id": "s2",
+                                "name": "second",
+                                "displayName": "Second Site",
+                                "webUrl": "https://x/s2",
+                            }
+                        ]
+                    },
+                )
+            if url.startswith(f"{GRAPH_BASE}/sites"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "value": [
+                            {
+                                "id": "s1",
+                                "name": "first",
+                                "displayName": "First Site",
+                                "webUrl": "https://x/s1",
+                            }
+                        ],
+                        "@odata.nextLink": page2_url,
+                    },
+                )
+            return httpx.Response(404)
+
+        client = _make_client(handler)
+        page1 = await client.list_sites_paginated()
+        assert len(page1["sites"]) == 1
+        assert page1["sites"][0]["id"] == "s1"
+        assert page1["next_link"] == page2_url
+
+        page2 = await client.list_sites_paginated(next_link=page1["next_link"])
+        assert len(page2["sites"]) == 1
+        assert page2["sites"][0]["id"] == "s2"
+        assert page2["next_link"] is None
+
+    @pytest.mark.asyncio
+    async def test_wildcard_default(self):
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            return httpx.Response(200, json={"value": []})
+
+        client = _make_client(handler)
+        await client.list_sites_paginated()
+        assert "search=%2A" in captured["url"] or "search=*" in captured["url"]
+
+
+class TestListSiteDrivesSummary:
+    SITE = "contoso.sharepoint.com,site-guid,web-guid"
+
+    @pytest.mark.asyncio
+    async def test_drives_include_size(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if url == f"{GRAPH_BASE}/sites/{self.SITE}":
+                return httpx.Response(
+                    200,
+                    json={"id": self.SITE, "displayName": "Contoso", "webUrl": "https://x"},
+                )
+            if url == f"{GRAPH_BASE}/sites/{self.SITE}/drives":
+                return httpx.Response(
+                    200,
+                    json={
+                        "value": [
+                            {
+                                "id": "d1",
+                                "name": "Documents",
+                                "driveType": "documentLibrary",
+                                "quota": {"used": 12345678},
+                            }
+                        ]
+                    },
+                )
+            if "/drives/d1/root" in url:
+                return httpx.Response(200, json={"id": "r1", "size": 999})
+            return httpx.Response(404)
+
+        client = _make_client(handler)
+        out = await client.list_site_drives_summary(self.SITE)
+        assert out["site_name"] == "Contoso"
+        assert len(out["drives"]) == 1
+        d = out["drives"][0]
+        assert d["total_size"] == 12345678
+        assert d["root_item_id"] == "r1"
+
+
+class TestListFolderChildren:
+    DRIVE = "d1"
+    ITEM = "i1"
+
+    @pytest.mark.asyncio
+    async def test_splits_folders_and_files_with_metadata(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if f"/drives/{self.DRIVE}/items/{self.ITEM}" in url and "/children" not in url:
+                return httpx.Response(
+                    200, json={"name": "Parent", "size": 1000000}
+                )
+            if "/children" in url:
+                return httpx.Response(
+                    200,
+                    json={
+                        "value": [
+                            {
+                                "id": "f-a",
+                                "name": "SubA",
+                                "size": 500000,
+                                "folder": {"childCount": 3},
+                            },
+                            {
+                                "id": "file-1",
+                                "name": "report.pdf",
+                                "size": 2048,
+                                "file": {"mimeType": "application/pdf"},
+                            },
+                        ]
+                    },
+                )
+            return httpx.Response(404)
+
+        client = _make_client(handler)
+        out = await client.list_folder_children(self.DRIVE, self.ITEM)
+        assert out.parent_name == "Parent"
+        assert out.parent_size == 1000000
+        assert len(out.folders) == 1 and out.folders[0].name == "SubA"
+        assert out.folders[0].size == 500000
+        assert out.folders[0].child_count == 3
+        assert len(out.files) == 1 and out.files[0].content_type == "application/pdf"
+
+    @pytest.mark.asyncio
+    async def test_pagination_next_link(self):
+        page2 = "https://graph.microsoft.com/v1.0/next-page"
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if url == page2:
+                return httpx.Response(200, json={"value": []})
+            if "/children" in url:
+                return httpx.Response(
+                    200,
+                    json={"value": [], "@odata.nextLink": page2},
+                )
+            if f"/drives/{self.DRIVE}/items/{self.ITEM}" in url:
+                return httpx.Response(200, json={"name": "P", "size": 0})
+            return httpx.Response(404)
+
+        client = _make_client(handler)
+        p1 = await client.list_folder_children(self.DRIVE, self.ITEM)
+        assert p1.next_link == page2
+        p2 = await client.list_folder_children(self.DRIVE, self.ITEM, next_link=page2)
+        assert p2.next_link is None
+
+
 class TestDownloadFile:
     @pytest.mark.asyncio
     async def test_download_returns_bytes(self):

@@ -33,6 +33,8 @@ from open_webui.routers.retrieval import (
 from open_webui.routers.files import upload_file_handler
 from open_webui.storage.provider import Storage
 from open_webui.utils.graph_client import (
+    GraphChildItem,
+    GraphChildrenListing,
     GraphClient,
     GraphFileItem,
     GraphFolderListing,
@@ -1579,6 +1581,126 @@ async def search_sharepoint_sites(
         raise _translate_graph_error(e)
 
     return [SharePointSiteSearchResult(**r) for r in results]
+
+
+class SharePointSitesPage(BaseModel):
+    sites: list[SharePointSiteSearchResult]
+    next_link: Optional[str] = None
+
+
+@router.get("/sharepoint/sites", response_model=SharePointSitesPage)
+async def list_sharepoint_sites(
+    query: str = Query("*", max_length=100),
+    next_link: Optional[str] = Query(None),
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Paginated list of every SharePoint site the caller can read.
+
+    First page: pass `query` (defaults to `*` wildcard). Subsequent pages:
+    pass the opaque `next_link` returned in the previous response. Omit both
+    to get the first wildcard page.
+    """
+    access_token = await _get_microsoft_access_token(user, db)
+    graph = GraphClient(access_token)
+    try:
+        page = await graph.list_sites_paginated(query=query, next_link=next_link)
+    except httpx.HTTPStatusError as e:
+        raise _translate_graph_error(e)
+    return SharePointSitesPage(
+        sites=[SharePointSiteSearchResult(**s) for s in page["sites"]],
+        next_link=page["next_link"],
+    )
+
+
+class SharePointDriveSummary(BaseModel):
+    id: str
+    name: str
+    drive_type: str = ""
+    root_item_id: str
+    total_size: int = 0
+
+
+class SharePointSiteDrivesResponse(BaseModel):
+    site_name: str
+    site_url: str
+    drives: list[SharePointDriveSummary]
+
+
+@router.get(
+    "/sharepoint/sites/{site_id}/drives",
+    response_model=SharePointSiteDrivesResponse,
+)
+async def list_sharepoint_site_drives(
+    site_id: str,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """List all document libraries (drives) of a SharePoint site with size."""
+    access_token = await _get_microsoft_access_token(user, db)
+    graph = GraphClient(access_token)
+    try:
+        summary = await graph.list_site_drives_summary(site_id)
+    except httpx.HTTPStatusError as e:
+        raise _translate_graph_error(e)
+
+    return SharePointSiteDrivesResponse(
+        site_name=summary["site_name"],
+        site_url=summary["site_url"],
+        drives=[SharePointDriveSummary(**d) for d in summary["drives"]],
+    )
+
+
+class SharePointChildItem(BaseModel):
+    id: str
+    name: str
+    is_folder: bool
+    size: int = 0
+    child_count: int = 0
+    content_type: Optional[str] = None
+
+
+class SharePointChildrenResponse(BaseModel):
+    parent_name: str
+    parent_size: int = 0
+    folders: list[SharePointChildItem]
+    files: list[SharePointChildItem]
+    next_link: Optional[str] = None
+
+
+@router.get(
+    "/sharepoint/drives/{drive_id}/items/{item_id}/children",
+    response_model=SharePointChildrenResponse,
+)
+async def list_sharepoint_folder_children(
+    drive_id: str,
+    item_id: str,
+    next_link: Optional[str] = Query(None),
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """One-level directory listing for a folder in a drive.
+
+    Returns `folders` (with aggregate size + direct child count) and `files`
+    (with size + content_type) plus a `next_link` cursor for pagination. First
+    call omits `next_link`; subsequent pages echo back what the previous
+    response returned. Sizes are pulled from Graph's `driveItem.size` so no
+    recursive walk is required.
+    """
+    access_token = await _get_microsoft_access_token(user, db)
+    graph = GraphClient(access_token)
+    try:
+        listing = await graph.list_folder_children(drive_id, item_id, next_link=next_link)
+    except httpx.HTTPStatusError as e:
+        raise _translate_graph_error(e)
+
+    return SharePointChildrenResponse(
+        parent_name=listing.parent_name,
+        parent_size=listing.parent_size,
+        folders=[SharePointChildItem(**f.model_dump()) for f in listing.folders],
+        files=[SharePointChildItem(**f.model_dump()) for f in listing.files],
+        next_link=listing.next_link,
+    )
 
 
 @router.post("/{id}/sharepoint/reimport", response_model=SharePointImportResult)
