@@ -37,6 +37,25 @@ class GraphFolderListing(BaseModel):
     skipped_folders: list[str] = []
 
 
+class GraphDriveInfo(BaseModel):
+    id: str
+    name: str
+    drive_type: str = ""
+    root_item_id: str
+
+
+class GraphSiteListing(BaseModel):
+    site_id: str
+    site_name: str
+    site_url: str
+    drives: list[GraphDriveInfo]
+    # Flat file list spanning all drives; each file's `path` is prefixed with
+    # its drive name (e.g. "Documents/Invoices/report.pdf") so the origin
+    # remains visible in the flattened display filename.
+    files: list[GraphFileItem]
+    truncated: bool = False
+
+
 class GraphClient:
     """Calls Microsoft Graph API using a delegated user token from oauth_session."""
 
@@ -145,6 +164,104 @@ class GraphClient:
                 return True
 
         return False
+
+    async def list_site(
+        self,
+        site_id: str,
+        max_files: int = DEFAULT_MAX_FILES,
+    ) -> GraphSiteListing:
+        """Recursively list every file across every document library of a
+        SharePoint site.
+
+        Each file's `path` is prefixed with the drive name so downstream code
+        can tell which library a file came from (e.g. a site with drives
+        "Documents" and "Shared" produces paths like "Documents/" and
+        "Shared/Invoices/"). Walks stop when `max_files` is reached.
+        """
+        client = self._client()
+        try:
+            site_resp = await client.get(
+                f"{GRAPH_BASE}/sites/{site_id}", headers=self.headers
+            )
+            site_resp.raise_for_status()
+            site = site_resp.json()
+
+            drives_resp = await client.get(
+                f"{GRAPH_BASE}/sites/{site_id}/drives", headers=self.headers
+            )
+            drives_resp.raise_for_status()
+            drives_payload = drives_resp.json()
+
+            drives: list[GraphDriveInfo] = []
+            files: list[GraphFileItem] = []
+            truncated = False
+
+            for drive in drives_payload.get("value", []):
+                drive_id = drive["id"]
+                drive_name = drive.get("name") or "Documents"
+
+                root_resp = await client.get(
+                    f"{GRAPH_BASE}/drives/{drive_id}/root?$select=id",
+                    headers=self.headers,
+                )
+                root_resp.raise_for_status()
+                root_id = root_resp.json()["id"]
+
+                drives.append(
+                    GraphDriveInfo(
+                        id=drive_id,
+                        name=drive_name,
+                        drive_type=drive.get("driveType", ""),
+                        root_item_id=root_id,
+                    )
+                )
+
+                truncated = await self._walk(
+                    client, drive_id, root_id, f"{drive_name}/", files, max_files
+                )
+                if truncated:
+                    break
+        finally:
+            if self._http_client is None:
+                await client.aclose()
+
+        return GraphSiteListing(
+            site_id=site_id,
+            site_name=site.get("displayName") or site.get("name", ""),
+            site_url=site.get("webUrl", ""),
+            drives=drives,
+            files=files,
+            truncated=truncated,
+        )
+
+    async def search_sites(self, query: str, top: int = 25) -> list[dict]:
+        """Search SharePoint sites by title/URL.
+
+        Returns a trimmed list of `{id, name, displayName, webUrl}` dicts
+        suitable for a picker UI. Graph API: GET /sites?search={query}.
+        """
+        client = self._client()
+        try:
+            resp = await client.get(
+                f"{GRAPH_BASE}/sites",
+                headers=self.headers,
+                params={"search": query, "$top": top},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        finally:
+            if self._http_client is None:
+                await client.aclose()
+
+        return [
+            {
+                "id": s["id"],
+                "name": s.get("name", ""),
+                "display_name": s.get("displayName", ""),
+                "web_url": s.get("webUrl", ""),
+            }
+            for s in data.get("value", [])
+        ]
 
     async def download_file(self, download_url: str) -> bytes:
         """Download file content from a Graph @microsoft.graph.downloadUrl."""

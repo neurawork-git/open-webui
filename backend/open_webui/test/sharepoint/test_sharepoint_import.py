@@ -737,3 +737,196 @@ class TestPathPrefixFlow:
         )
 
         assert result.truncated is True
+
+
+SITE_ID = "contoso.sharepoint.com,site-guid,web-guid"
+
+
+def _make_site_listing(files=None, site_name="Contoso"):
+    from open_webui.utils.graph_client import GraphDriveInfo, GraphSiteListing
+
+    if files is None:
+        files = [
+            GraphFileItem(
+                id="f1",
+                name="brief.pdf",
+                size=1024,
+                content_type="application/pdf",
+                download_url="https://cdn.example.com/brief.pdf",
+                path="Documents/",
+            )
+        ]
+    return GraphSiteListing(
+        site_id=SITE_ID,
+        site_name=site_name,
+        site_url=f"https://contoso.sharepoint.com/sites/{site_name.lower()}",
+        drives=[
+            GraphDriveInfo(
+                id="d1", name="Documents", drive_type="documentLibrary", root_item_id="r1"
+            )
+        ],
+        files=files,
+    )
+
+
+class TestSharePointSiteImport:
+    """POST /knowledge/{id}/sharepoint/import-site"""
+
+    @pytest.mark.asyncio
+    @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
+    @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
+    @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
+    @patch(f"{_KNOWLEDGE_MOD}.upload_file_handler", new_callable=AsyncMock)
+    @patch(f"{_KNOWLEDGE_MOD}.process_file", new_callable=AsyncMock)
+    async def test_imports_all_site_files_and_persists_source(
+        self, mock_process, mock_upload, mock_graph_cls, mock_oauth, mock_kb
+    ):
+        from open_webui.routers.knowledge import (
+            import_sharepoint_site,
+            SharePointSiteImportForm,
+        )
+
+        mock_kb.get_knowledge_by_id = AsyncMock(return_value=_make_knowledge())
+        mock_kb.add_file_to_knowledge_by_id = AsyncMock()
+        mock_kb.update_knowledge_by_id = AsyncMock()
+        mock_kb.get_file_metadatas_by_id = AsyncMock(return_value=[])
+        mock_oauth.get_session_by_provider_and_user_id = AsyncMock(
+            return_value=_make_oauth_session()
+        )
+
+        graph_instance = AsyncMock()
+        graph_instance.list_site.return_value = _make_site_listing()
+        graph_instance.download_file.return_value = b"pdf bytes"
+        mock_graph_cls.return_value = graph_instance
+
+        mock_upload.return_value = {"status": True, "id": "file-id-1"}
+
+        result = await import_sharepoint_site(
+            request=MagicMock(),
+            id=KNOWLEDGE_ID,
+            form_data=SharePointSiteImportForm(site_id=SITE_ID),
+            user=_make_user(),
+            db=MagicMock(),
+        )
+
+        assert result.imported == 1
+        assert result.folder_name == "Contoso"
+        upload_file_arg = mock_upload.call_args.kwargs["file"]
+        assert upload_file_arg.filename == "Documents › brief.pdf"
+
+        persisted = mock_kb.update_knowledge_by_id.call_args.kwargs["form_data"]
+        assert persisted.meta["sharepoint_source"]["type"] == "site"
+        assert persisted.meta["sharepoint_source"]["site_id"] == SITE_ID
+        assert persisted.meta["sharepoint_source"]["drive_count"] == 1
+
+    @pytest.mark.asyncio
+    @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
+    @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
+    @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
+    async def test_graph_401_surfaces_as_401(
+        self, mock_graph_cls, mock_oauth, mock_kb
+    ):
+        from open_webui.routers.knowledge import (
+            import_sharepoint_site,
+            SharePointSiteImportForm,
+        )
+
+        mock_kb.get_knowledge_by_id = AsyncMock(return_value=_make_knowledge())
+        mock_oauth.get_session_by_provider_and_user_id = AsyncMock(
+            return_value=_make_oauth_session()
+        )
+
+        graph_instance = AsyncMock()
+        fake_resp = MagicMock()
+        fake_resp.status_code = 401
+        graph_instance.list_site.side_effect = httpx.HTTPStatusError(
+            "expired", request=MagicMock(), response=fake_resp
+        )
+        mock_graph_cls.return_value = graph_instance
+
+        with pytest.raises(Exception) as exc_info:
+            await import_sharepoint_site(
+                request=MagicMock(),
+                id=KNOWLEDGE_ID,
+                form_data=SharePointSiteImportForm(site_id=SITE_ID),
+                user=_make_user(),
+                db=MagicMock(),
+            )
+        assert exc_info.value.status_code == 401
+
+
+class TestReimportDispatch:
+    """/sharepoint/reimport routes to folder or site import based on meta.type."""
+
+    @pytest.mark.asyncio
+    @patch(f"{_KNOWLEDGE_MOD}.import_sharepoint_site", new_callable=AsyncMock)
+    @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
+    async def test_site_source_dispatches_to_site_import(
+        self, mock_kb, mock_site_import
+    ):
+        from open_webui.routers.knowledge import reimport_sharepoint_folder
+
+        kb = _make_knowledge()
+        kb.meta = {
+            "sharepoint_source": {
+                "type": "site",
+                "site_id": SITE_ID,
+                "site_name": "Contoso",
+            }
+        }
+        mock_kb.get_knowledge_by_id = AsyncMock(return_value=kb)
+        mock_site_import.return_value = MagicMock()
+
+        await reimport_sharepoint_folder(
+            request=MagicMock(), id=KNOWLEDGE_ID, user=_make_user(), db=MagicMock()
+        )
+
+        mock_site_import.assert_awaited_once()
+        call = mock_site_import.call_args.kwargs
+        assert call["form_data"].site_id == SITE_ID
+
+    @pytest.mark.asyncio
+    @patch(f"{_KNOWLEDGE_MOD}.import_sharepoint_folder", new_callable=AsyncMock)
+    @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
+    async def test_folder_source_without_type_uses_folder_import(
+        self, mock_kb, mock_folder_import
+    ):
+        """Back-compat: old metadata (no `type` key) is treated as folder."""
+        from open_webui.routers.knowledge import reimport_sharepoint_folder
+
+        kb = _make_knowledge()
+        kb.meta = {
+            "sharepoint_source": {
+                "drive_id": DRIVE_ID,
+                "item_id": ITEM_ID,
+                "folder_name": "Docs",
+            }
+        }
+        mock_kb.get_knowledge_by_id = AsyncMock(return_value=kb)
+        mock_folder_import.return_value = MagicMock()
+
+        await reimport_sharepoint_folder(
+            request=MagicMock(), id=KNOWLEDGE_ID, user=_make_user(), db=MagicMock()
+        )
+
+        mock_folder_import.assert_awaited_once()
+        call = mock_folder_import.call_args.kwargs
+        assert call["form_data"].drive_id == DRIVE_ID
+
+    @pytest.mark.asyncio
+    @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
+    async def test_no_source_raises_400(self, mock_kb):
+        from open_webui.routers.knowledge import reimport_sharepoint_folder
+
+        kb = _make_knowledge()
+        kb.meta = {}
+        mock_kb.get_knowledge_by_id = AsyncMock(return_value=kb)
+
+        with pytest.raises(Exception) as exc_info:
+            await reimport_sharepoint_folder(
+                request=MagicMock(),
+                id=KNOWLEDGE_ID,
+                user=_make_user(),
+                db=MagicMock(),
+            )
+        assert exc_info.value.status_code == 400

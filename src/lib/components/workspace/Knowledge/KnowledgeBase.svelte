@@ -28,6 +28,7 @@
 		addFileToKnowledgeById,
 		getKnowledgeById,
 		importSharePointFolder,
+		importSharePointSite,
 		reimportSharePointFolder,
 		reindexKnowledgeById,
 		removeFileFromKnowledgeById,
@@ -48,6 +49,7 @@
 
 	import AddContentMenu from './KnowledgeBase/AddContentMenu.svelte';
 	import AddTextContentModal from './KnowledgeBase/AddTextContentModal.svelte';
+	import SharePointPicker from './SharePointPicker.svelte';
 
 	import SyncConfirmDialog from '../../common/ConfirmDialog.svelte';
 	import Drawer from '$lib/components/common/Drawer.svelte';
@@ -84,6 +86,7 @@
 
 	let showSyncConfirmModal = false;
 	let showAccessControlModal = false;
+	let showSharePointPicker = false;
 	let sharePointImporting = false;
 
 	let minSize = 0;
@@ -362,6 +365,51 @@
 			}
 		} catch (e) {
 			toast.error(`${e}`);
+		}
+	};
+
+	const sharePointSiteImportHandler = async (siteId: string, siteName: string) => {
+		if (!knowledge) return;
+		sharePointImporting = true;
+
+		try {
+			const result = await importSharePointSite(
+				localStorage.token,
+				knowledge.id,
+				siteId
+			);
+
+			if (result) {
+				if (result.imported > 0) {
+					toast.success(
+						$i18n.t('Imported {{count}} files from site "{{site}}"', {
+							count: result.imported,
+							site: result.folder_name || siteName
+						})
+					);
+				}
+				if (result.failed > 0) {
+					toast.warning(
+						$i18n.t('{{count}} files failed to import', { count: result.failed })
+					);
+				}
+				if (result.truncated) {
+					toast.warning(
+						$i18n.t(
+							'Site too large — stopped after {{count}} files. Pick individual folders instead.',
+							{ count: result.total_files }
+						)
+					);
+				}
+				if (result.imported === 0 && result.failed === 0) {
+					toast.info($i18n.t('Site has no importable files'));
+				}
+				await getItemsPage();
+			}
+		} catch (e) {
+			toast.error(`${e}`);
+		} finally {
+			sharePointImporting = false;
 		}
 	};
 
@@ -920,6 +968,13 @@
 </script>
 
 <FilesOverlay show={dragged} />
+
+<SharePointPicker
+	bind:show={showSharePointPicker}
+	onSiteSelected={(siteId, siteName) => sharePointSiteImportHandler(siteId, siteName)}
+	onFolderSelected={(driveId, itemId) => sharePointImportHandler(driveId, itemId)}
+/>
+
 <SyncConfirmDialog
 	bind:show={showSyncConfirmModal}
 	message={$i18n.t(
@@ -1190,20 +1245,7 @@
 									} else if (data.type === 'text') {
 										showAddTextContentModal = true;
 									} else if (data.type === 'sharepoint') {
-										(async () => {
-											try {
-												const result = await openOneDrivePicker('organizations', 'folders');
-												if (result?.items?.length > 0) {
-													const folder = result.items[0];
-													await sharePointImportHandler(
-														folder.parentReference.driveId,
-														folder.id
-													);
-												}
-											} catch (e) {
-												toast.error(`SharePoint: ${e}`);
-											}
-										})();
+										showSharePointPicker = true;
 									} else {
 										document.getElementById('files-input').click();
 									}

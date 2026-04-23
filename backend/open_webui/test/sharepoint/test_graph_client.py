@@ -320,6 +320,194 @@ class TestListFolder:
 # ---------------------------------------------------------------------------
 
 
+class TestListSite:
+    SITE = "contoso.sharepoint.com,site-guid,web-guid"
+
+    @pytest.mark.asyncio
+    async def test_single_drive_recursive(self):
+        """One drive with a subfolder → files keep drive-prefixed paths."""
+
+        drive_id = "drv-1"
+        root_id = "root-1"
+        sub_id = "sub-1"
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if url == f"{GRAPH_BASE}/sites/{self.SITE}":
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": self.SITE,
+                        "displayName": "Contoso",
+                        "name": "contoso",
+                        "webUrl": "https://contoso.sharepoint.com/sites/contoso",
+                    },
+                )
+            if url == f"{GRAPH_BASE}/sites/{self.SITE}/drives":
+                return httpx.Response(
+                    200,
+                    json={
+                        "value": [
+                            {
+                                "id": drive_id,
+                                "name": "Documents",
+                                "driveType": "documentLibrary",
+                            }
+                        ]
+                    },
+                )
+            if f"/drives/{drive_id}/root" in url:
+                return httpx.Response(200, json={"id": root_id})
+            if f"/items/{root_id}/children" in url:
+                return httpx.Response(
+                    200,
+                    json={
+                        "value": [
+                            _make_graph_item("top.pdf"),
+                            _make_graph_item("Invoices", is_folder=True, item_id=sub_id),
+                        ]
+                    },
+                )
+            if f"/items/{sub_id}/children" in url:
+                return httpx.Response(
+                    200, json={"value": [_make_graph_item("q1.pdf")]}
+                )
+            return httpx.Response(404)
+
+        client = _make_client(handler)
+        result = await client.list_site(self.SITE)
+
+        assert result.site_name == "Contoso"
+        assert result.site_url == "https://contoso.sharepoint.com/sites/contoso"
+        assert len(result.drives) == 1
+        assert result.drives[0].name == "Documents"
+        assert result.drives[0].root_item_id == root_id
+        assert [f.path for f in result.files] == ["Documents/", "Documents/Invoices/"]
+        assert [f.name for f in result.files] == ["top.pdf", "q1.pdf"]
+        assert result.truncated is False
+
+    @pytest.mark.asyncio
+    async def test_multiple_drives(self):
+        """Multiple drives → each drive's name prefixes its files."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if url == f"{GRAPH_BASE}/sites/{self.SITE}":
+                return httpx.Response(
+                    200,
+                    json={"id": self.SITE, "displayName": "S", "webUrl": "https://x"},
+                )
+            if url == f"{GRAPH_BASE}/sites/{self.SITE}/drives":
+                return httpx.Response(
+                    200,
+                    json={
+                        "value": [
+                            {"id": "d1", "name": "Documents"},
+                            {"id": "d2", "name": "Shared"},
+                        ]
+                    },
+                )
+            if "/drives/d1/root" in url:
+                return httpx.Response(200, json={"id": "r1"})
+            if "/drives/d2/root" in url:
+                return httpx.Response(200, json={"id": "r2"})
+            if "/items/r1/children" in url:
+                return httpx.Response(
+                    200, json={"value": [_make_graph_item("a.pdf")]}
+                )
+            if "/items/r2/children" in url:
+                return httpx.Response(
+                    200, json={"value": [_make_graph_item("b.pdf")]}
+                )
+            return httpx.Response(404)
+
+        client = _make_client(handler)
+        result = await client.list_site(self.SITE)
+
+        assert len(result.drives) == 2
+        assert {f.path for f in result.files} == {"Documents/", "Shared/"}
+
+    @pytest.mark.asyncio
+    async def test_truncation_across_drives(self):
+        """Truncation inside one drive prevents walking remaining drives."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if url == f"{GRAPH_BASE}/sites/{self.SITE}":
+                return httpx.Response(200, json={"id": self.SITE, "displayName": "S"})
+            if url == f"{GRAPH_BASE}/sites/{self.SITE}/drives":
+                return httpx.Response(
+                    200,
+                    json={
+                        "value": [
+                            {"id": "d1", "name": "Big"},
+                            {"id": "d2", "name": "Small"},
+                        ]
+                    },
+                )
+            if "/drives/d1/root" in url:
+                return httpx.Response(200, json={"id": "r1"})
+            if "/drives/d2/root" in url:
+                return httpx.Response(200, json={"id": "r2"})
+            if "/items/r1/children" in url:
+                return httpx.Response(
+                    200,
+                    json={
+                        "value": [
+                            _make_graph_item("a.pdf"),
+                            _make_graph_item("b.pdf"),
+                        ]
+                    },
+                )
+            return httpx.Response(404)
+
+        client = _make_client(handler)
+        result = await client.list_site(self.SITE, max_files=1)
+
+        assert result.truncated is True
+        assert len(result.files) == 1
+        # Only first drive got walked; second drive not enumerated.
+
+
+class TestSearchSites:
+    @pytest.mark.asyncio
+    async def test_search_returns_trimmed_dicts(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            assert "/sites?" in url
+            return httpx.Response(
+                200,
+                json={
+                    "value": [
+                        {
+                            "id": "site-1",
+                            "name": "contoso",
+                            "displayName": "Contoso",
+                            "webUrl": "https://contoso.sharepoint.com",
+                            "description": "ignored",
+                        },
+                        {
+                            "id": "site-2",
+                            "name": "fabrikam",
+                            "displayName": "Fabrikam",
+                            "webUrl": "https://fabrikam.sharepoint.com",
+                        },
+                    ]
+                },
+            )
+
+        client = _make_client(handler)
+        results = await client.search_sites("con")
+
+        assert len(results) == 2
+        assert results[0] == {
+            "id": "site-1",
+            "name": "contoso",
+            "display_name": "Contoso",
+            "web_url": "https://contoso.sharepoint.com",
+        }
+
+
 class TestDownloadFile:
     @pytest.mark.asyncio
     async def test_download_returns_bytes(self):
