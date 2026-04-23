@@ -28,6 +28,7 @@ If you remember nothing else, remember: **Alembic solves the merge problem corre
 5. [Writing a new fork-local migration](#5-writing-a-new-fork-local-migration)
 6. [Divergence scenarios and the right response](#6-divergence-scenarios-and-the-right-response)
 7. [Recovery — when the chain is already broken](#7-recovery--when-the-chain-is-already-broken)
+7b. [Clean-break-point — retiring historical repair migrations](#7b-clean-break-point--retiring-historical-repair-migrations)
 8. [Anti-patterns to kill on sight](#8-anti-patterns-to-kill-on-sight)
 9. [Idempotency helpers for fork migrations](#9-idempotency-helpers-for-fork-migrations)
 10. [Troubleshooting recipes](#10-troubleshooting-recipes)
@@ -376,6 +377,49 @@ After the recovery migration deploys, re-run the post-deploy verification (Secti
 ### Step 5 — Post-mortem
 
 Write a short incident note into `docs/incidents/` with: what broke, the `version_num` at recovery time, which tables were missing, what the backfill migration ID is, and the commit that triggered the original break. This is how we stop recurring.
+
+---
+
+## 7b. Clean-break-point — retiring historical repair migrations
+
+A fork that has been running long enough accumulates scar tissue: old repair migrations, backfills for drift that no longer exists on any live database, files whose docstrings admit something went wrong. They are harmless (the revision IDs are stamped into production DBs and can't be removed without breaking those DBs), but they are *ugly* and they drag forward into every future merge.
+
+The way to retire them safely is to wait for a natural consolidation opportunity and execute it deliberately. Do not attempt this outside the window described here.
+
+### When a clean-break-point is allowed
+
+All three of these must be true:
+
+1. Every production and staging database is known to be at a `version_num` **at or later than** the newest historical repair migration. (I.e. every DB has already traversed the debt; none is pinned at an old stamp.)
+2. We are about to do an upstream merge that will itself generate a merge revision anyway — so the chain is already about to be rewritten in a legitimate way.
+3. A full DB backup of every environment exists from within the last 24 hours and a rollback path is documented.
+
+If any is false, defer. The scars stay in for another cycle.
+
+### The procedure
+
+1. **Snapshot every DB's `version_num`**. Record into `docs/incidents/clean-break-<date>.md` the revision each cluster reports. If any cluster is behind the clean-break candidate, upgrade it first (normal deploy) and re-snapshot.
+2. **Introduce a sentinel revision** — a normal fork migration with empty `upgrade()` / `downgrade()` whose job is to be the "line in the sand". Deploy it. Every cluster's `version_num` advances to the sentinel.
+3. **Verify every cluster's `version_num` equals the sentinel**, from the actual DB, not from hope. Redo the snapshot in step 1.
+4. **On a branch, rewrite the chain**. The sentinel's `down_revision` now points at a pre-existing revision that is strictly *after* the last repair migration in the historical order. Delete the repair migration files and any intermediate revisions between the repairs and the sentinel. The sentinel now sits directly after the clean tail of the pre-repair chain.
+5. **Verify the rewritten chain** locally:
+   - `alembic history --verbose` produces a linear walk with no missing parents.
+   - `rm -f /tmp/x.db && DATABASE_URL=sqlite:///tmp/x.db alembic upgrade head` succeeds on a fresh DB.
+   - `alembic upgrade head` also succeeds against a disposable copy of production **with the `alembic_version` already set to the sentinel**, which it should no-op through. If this second check errors (because Alembic can't find the stamped revision anywhere in the chain), the rewrite is wrong — the sentinel must remain reachable.
+6. **Deploy the rewritten chain**. Because every live DB is already at the sentinel, and the sentinel is still in the chain, Alembic finds it and does nothing. The deleted repair migrations are now invisible to every live system.
+7. **Document**: the incident note from step 1 gets a postscript listing the retired revision IDs. `git log` preserves the old files for anyone archaeologising a future incident.
+
+### What makes this NOT a rule-2 violation
+
+Rule 2 forbids *rewriting `down_revision` on an existing migration after it has shipped*. The clean-break-point does not edit any migration that a live DB still needs to traverse — it deletes migrations that every live DB has already walked past and whose revision IDs are no longer the last-known-good stamp on any cluster. The sentinel is the seam that makes this safe.
+
+If you can't truthfully answer "every live database already has `version_num` ≥ sentinel", this becomes a rule-2 violation and you must stop.
+
+### Anti-sequence — how this goes wrong
+
+- **"Let's also delete the sentinel itself"** — no. The sentinel is the proof that the retired tail was once reachable. Keep it forever.
+- **"One cluster is behind but we'll upgrade it as part of the same deploy"** — no. Two separate deploys. First upgrade the lagging cluster to the sentinel, verify, then ship the rewrite. Never combine.
+- **"Let's do the clean-break-point without a merge revision nearby"** — you can, but you're introducing chain rewrite risk for cosmetic benefit. Prefer to piggyback on a real merge.
 
 ---
 
