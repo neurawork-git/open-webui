@@ -454,27 +454,29 @@ async def retry_processing_task(
     log.info(f"Task {task_id} queued for retry by user {user.id}, retry_count={result.retry_count}")
 
     # Get the file owner for processing
-    file_user = Users.get_user_by_id(file.user_id)
+    file_user = await Users.get_user_by_id(file.user_id)
     if not file_user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="File owner not found",
         )
 
-    # Re-trigger file processing in background
-    def reprocess_file():
-        from open_webui.internal.db import SessionLocal
-        with SessionLocal() as new_db:
+    # Re-trigger file processing in background via the retrieval pipeline.
+    # Uses a fresh AsyncSession so the request-scoped session can close cleanly.
+    from open_webui.routers.retrieval import ProcessFileForm, process_file
+    from open_webui.internal.db import get_async_db_context
+
+    document_id = task.document_id
+    collection_name = file.meta.get("collection_name") if file.meta else None
+
+    async def reprocess_file():
+        form_data = ProcessFileForm(file_id=document_id, collection_name=collection_name)
+        async with get_async_db_context() as new_db:
             try:
-                tracker = ProcessingTaskTracker(task_id, db=new_db)
-                form_data = ProcessFileForm(
-                    file_id=task.document_id,
-                    collection_name=file.meta.get("collection_name") if file.meta else None,
-                )
-                _process_file_impl(request, form_data, file_user, new_db, tracker)
+                await process_file(request, form_data, user=file_user, db=new_db)
             except Exception as e:
-                log.exception(f"Error reprocessing file {task.document_id}: {e}")
-                ProcessingTasks.fail_task(task_id, str(e), db=new_db)
+                log.exception(f"Error reprocessing file {document_id}: {e}")
+                await ProcessingTasks.fail_task(task_id, str(e), db=new_db)
 
     background_tasks.add_task(reprocess_file)
 
