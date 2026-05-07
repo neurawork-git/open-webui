@@ -2491,6 +2491,7 @@ async def query_collection_handler(
             )
         else:
             return await query_collection(
+                request,
                 collection_names=form_data.collection_names,
                 queries=[form_data.query],
                 embedding_function=lambda query, prefix: request.app.state.EMBEDDING_FUNCTION(
