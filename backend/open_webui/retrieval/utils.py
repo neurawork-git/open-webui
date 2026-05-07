@@ -1655,7 +1655,7 @@ def get_embedding_function(
             azure_api_version=azure_api_version,
         )
 
-        async def async_embedding_function(query, prefix=None, user=None, doc_name=None):
+        async def async_embedding_function(query, prefix=None, user=None, doc_name=None, tracker=None):
             if isinstance(query, list):
                 total_items = len(query)
                 batches = [
