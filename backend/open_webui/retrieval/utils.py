@@ -1105,11 +1105,39 @@ def get_all_items_from_collections(collection_names: list[str]) -> dict:
 
 
 async def query_collection(
-    collection_names: list[str],
-    queries: list[str],
-    embedding_function,
-    k: int,
+    request=None,
+    collection_names: list[str] = None,
+    queries: list[str] = None,
+    embedding_function=None,
+    k: int = None,
 ) -> dict:
+    # FORK: KB-deterministic-inject — restore upstream 0.8.11 hybrid wrapper
+    # (commit 9a2c60d5) lost during fork merge. When request is provided AND
+    # ENABLE_RAG_HYBRID_SEARCH is on, delegate to hybrid+rerank pipeline so
+    # the query_knowledge_files tool path matches middleware RAG behavior.
+    # Vector-only fallback preserved below for callers that pass request=None.
+    if request and getattr(request.app.state.config, 'ENABLE_RAG_HYBRID_SEARCH', False):
+        try:
+            reranking_function = (
+                (lambda query, documents: request.app.state.RERANKING_FUNCTION(query, documents))
+                if getattr(request.app.state, 'RERANKING_FUNCTION', None)
+                else None
+            )
+            return await query_collection_with_hybrid_search(
+                collection_names=collection_names,
+                queries=queries,
+                embedding_function=embedding_function,
+                k=k,
+                reranking_function=reranking_function,
+                k_reranker=request.app.state.config.TOP_K_RERANKER,
+                r=request.app.state.config.RELEVANCE_THRESHOLD,
+                hybrid_bm25_weight=request.app.state.config.HYBRID_BM25_WEIGHT,
+                enable_enriched_texts=request.app.state.config.ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS,
+                enable_reranking=getattr(request.app.state.config, 'ENABLE_RAG_RERANKING', True),
+            )
+        except Exception as e:
+            log.debug(f'Hybrid search failed in query_collection wrapper, falling back to vector-only: {e}')
+
     results = []
     error = False
 
