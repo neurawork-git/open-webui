@@ -2849,6 +2849,11 @@ BYPASS_EMBEDDING_AND_RETRIEVAL = PersistentConfig(
     os.environ.get('BYPASS_EMBEDDING_AND_RETRIEVAL', 'False').lower() == 'true',
 )
 
+RAG_NATIVE_FC_FORCE_RETRIEVAL = PersistentConfig(
+    'RAG_NATIVE_FC_FORCE_RETRIEVAL',
+    'rag.native_fc_force_retrieval',
+    os.environ.get('RAG_NATIVE_FC_FORCE_RETRIEVAL', 'True').lower() == 'true',
+)
 
 RAG_TOP_K = PersistentConfig('RAG_TOP_K', 'rag.top_k', int(os.environ.get('RAG_TOP_K', '3')))
 RAG_TOP_K_RERANKER = PersistentConfig(

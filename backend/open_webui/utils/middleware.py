@@ -2507,21 +2507,40 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             if 'system_prompt' in folder.data:
                 form_data = apply_system_prompt_to_body(folder.data['system_prompt'], form_data, metadata, user)
             if 'files' in folder.data:
-                if metadata.get('params', {}).get('function_calling') != 'native':
+                # FORK: KB-deterministic-inject — when force_retrieval enabled,
+                # always inject folder knowledge for full RAG pipeline (multi-query,
+                # hybrid, reranker, full_context, per-KB settings) even on native FC.
+                # KB tools remain registered in tools.py:439 for agentic deep-dive.
+                # NOTE: Intentional dual-path when force_retrieval=True on native FC —
+                # RAG context injection PLUS query_knowledge_files tool registration.
+                # Overlap accepted: deterministic retrieval > token efficiency.
+                # Modell kann tool zusätzlich für Deep-Dive-Queries aufrufen.
+                force_retrieval = getattr(request.app.state.config, 'RAG_NATIVE_FC_FORCE_RETRIEVAL', True)
+                if metadata.get('params', {}).get('function_calling') != 'native' or force_retrieval:
                     form_data['files'] = [
                         *folder.data['files'],
                         *form_data.get('files', []),
                     ]
-                else:
-                    # Native FC: skip RAG injection, builtin tools
-                    # will read folder knowledge from metadata.
+                # Always populate folder_knowledge sidecar so builtin tools can reference it
+                if metadata.get('params', {}).get('function_calling') == 'native':
                     metadata['folder_knowledge'] = folder.data['files']
 
     # Model "Knowledge" handling
     user_message = get_last_user_message(form_data['messages'])
     model_knowledge = model.get('info', {}).get('meta', {}).get('knowledge', False)
 
-    if model_knowledge and metadata.get('params', {}).get('function_calling') != 'native':
+    # FORK: KB-deterministic-inject — see folder_knowledge above for rationale
+    # NOTE: Intentional dual-path when force_retrieval=True on native FC —
+    # RAG context injection PLUS query_knowledge_files tool registration.
+    # Overlap accepted: deterministic retrieval > token efficiency.
+    # Modell kann tool zusätzlich für Deep-Dive-Queries aufrufen.
+    # NOTE: model_knowledge needs no sidecar — tools.py:434 reads it directly
+    # from model.info.meta.knowledge. Only folder_knowledge needs the sidecar
+    # because folders are scoped to chat-context, not model-config.
+    force_retrieval = getattr(request.app.state.config, 'RAG_NATIVE_FC_FORCE_RETRIEVAL', True)
+    if model_knowledge and (
+        metadata.get('params', {}).get('function_calling') != 'native' or force_retrieval
+    ):
         await event_emitter(
             {
                 'type': 'status',

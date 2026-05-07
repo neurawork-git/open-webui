@@ -277,6 +277,8 @@
 	"by {{name}}": "",
 	"By {{name}}": "",
 	"Bypass Embedding and Retrieval": "",
+	"Force knowledge retrieval on native tool calling": "",
+	"Ensures Knowledge Bases are deterministically injected into context even when Native Function Calling is enabled. KB tools remain additionally available.": "",
 	"Bypass Web Loader": "",
 	"Cache Base Model List": "",
 	"Calendar": "",

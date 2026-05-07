@@ -277,6 +277,8 @@
 	"by {{name}}": "von {{name}}",
 	"By {{name}}": "Von {{name}}",
 	"Bypass Embedding and Retrieval": "Embedding und Retrieval umgehen",
+	"Force knowledge retrieval on native tool calling": "Wissensdatenbank-Retrieval bei nativem Tool-Calling erzwingen",
+	"Ensures Knowledge Bases are deterministically injected into context even when Native Function Calling is enabled. KB tools remain additionally available.": "Stellt sicher, dass Wissensdatenbanken auch bei aktiviertem Native Function Calling deterministisch in den Kontext geladen werden. KB-Tools bleiben zusätzlich verfügbar.",
 	"Bypass Web Loader": "Web-Loader umgehen",
 	"Cache Base Model List": "Basismodell-Liste cachen",
 	"Calendar": "Kalender",

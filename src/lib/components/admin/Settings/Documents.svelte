@@ -785,6 +785,22 @@
 						</div>
 					</div>
 
+					<div class="  mb-2.5 flex w-full justify-between">
+						<div class=" self-center text-xs font-medium">
+							<Tooltip
+								content={$i18n.t(
+									'Ensures Knowledge Bases are deterministically injected into context even when Native Function Calling is enabled. KB tools remain additionally available.'
+								)}
+								placement="top-start"
+							>
+								{$i18n.t('Force knowledge retrieval on native tool calling')}
+							</Tooltip>
+						</div>
+						<div class="flex items-center relative">
+							<Switch bind:state={RAGConfig.RAG_NATIVE_FC_FORCE_RETRIEVAL} />
+						</div>
+					</div>
+
 					{#if !RAGConfig.BYPASS_EMBEDDING_AND_RETRIEVAL}
 						<div class="  mb-2.5 flex w-full justify-between">
 							<div class=" self-center text-xs font-medium">{$i18n.t('Text Splitter')}</div>

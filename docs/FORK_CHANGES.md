@@ -114,6 +114,7 @@ Large tree of planning / research documents. Zero conflict risk. Files:
   - RAG enhancements,
   - SharePoint / Graph API credentials,
   - Pseudonymizer feature flags.
+  - `RAG_NATIVE_FC_FORCE_RETRIEVAL` (default `True`) — KB-deterministic-inject feature flag.
   Detector: `git diff upstream/main..HEAD -- backend/open_webui/config.py` at next merge.
 
 ### `backend/open_webui/env.py`
@@ -183,7 +184,13 @@ Large tree of planning / research documents. Zero conflict risk. Files:
 |---|---|---|
 | `backend/open_webui/retrieval/utils.py` | **2008 lines** (hotspot, 99.4th percentile churn) | RAG enhancements: BM25, hybrid search, per-level settings, citation improvements. Highest merge-risk file in the fork. |
 | `backend/open_webui/routers/knowledge.py` | **649 lines** | Knowledge-base ACL + SharePoint import + RAG settings endpoints. |
-| `backend/open_webui/utils/middleware.py` | 166 lines (hotspot, 99.7th percentile) | Pseudonymizer hooks, fork-local logging, possibly auth header extensions. |
+| `backend/open_webui/utils/middleware.py` | 166 lines (hotspot, 99.7th percentile) | Pseudonymizer hooks, fork-local logging, possibly auth header extensions. **KB-deterministic-inject** (marker: `# FORK: KB-deterministic-inject`): two conditional sites patched so `RAG_NATIVE_FC_FORCE_RETRIEVAL=True` (default) restores deterministic KB injection even on `function_calling=native`. Sidecar `metadata['folder_knowledge']` always populated on native FC so `tools.py:436` can register query tools. Detector: `grep -rn "FORK: KB-deterministic-inject" backend/ src/` |
+| `backend/open_webui/main.py` | Import + state-binding | **KB-deterministic-inject**: imports `RAG_NATIVE_FC_FORCE_RETRIEVAL` from `config.py` and binds it to `request.app.state.config` on startup so middleware can read it via `getattr`. Detector: `grep -n "RAG_NATIVE_FC_FORCE_RETRIEVAL" backend/open_webui/main.py` |
+| `backend/open_webui/routers/retrieval.py` | ConfigForm field + GET/POST endpoints (~Z.449 + ~Z.1156) | **KB-deterministic-inject**: `RAG_NATIVE_FC_FORCE_RETRIEVAL` added to `ConfigForm`, exposed on GET `/api/v1/retrieval/config` and persisted on POST. Detector: `grep -n "RAG_NATIVE_FC_FORCE_RETRIEVAL" backend/open_webui/routers/retrieval.py` |
+| `src/lib/components/admin/Settings/Documents.svelte` | Toggle directly after BYPASS-Toggle | **KB-deterministic-inject**: admin UI toggle for `RAG_NATIVE_FC_FORCE_RETRIEVAL`. Detector: `grep -n "RAG_NATIVE_FC_FORCE_RETRIEVAL" src/lib/components/admin/Settings/Documents.svelte` |
+| `src/lib/i18n/locales/de-DE/translation.json` | Label + Tooltip strings | **KB-deterministic-inject**: German UI strings for the force-retrieval toggle. Detector: `grep -n "nativeForceRetrieval\|Native FC Force" src/lib/i18n/locales/de-DE/translation.json` |
+| `src/lib/i18n/locales/en-US/translation.json` | Empty strings (upstream convention) | **KB-deterministic-inject**: matching keys with empty values per upstream i18n convention. Detector: same grep on `en-US`. |
+| `backend/open_webui/test/retrieval/test_native_fc_force_retrieval.py` | New test file | **KB-deterministic-inject**: 15 tests covering folder-inject, model-inject, config-state-access, and folder_knowledge sidecar population (including both force_retrieval=True and force_retrieval=False sidecar cases). |
 | `backend/open_webui/models/knowledge.py` | 58 lines | KB shape additions for ACL / SharePoint source tracking. |
 | `src/lib/components/workspace/Knowledge/KnowledgeBase.svelte` | 302 lines | SharePoint import UI, per-KB RAG settings UI. |
 | `src/lib/components/admin/Settings/Documents.svelte` | 85 lines | Admin document-processing settings. |
