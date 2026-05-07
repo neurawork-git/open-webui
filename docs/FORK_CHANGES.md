@@ -152,6 +152,14 @@ Large tree of planning / research documents. Zero conflict risk. Files:
   with `"Invalid schema for function 'X': In context=(), object schema missing properties"`.
   Detector: `grep -n "OpenAI strict-mode rejects object schemas" backend/open_webui/utils/tools.py`
 
+### `backend/open_webui/utils/mcp/client.py`
+
+- `list_tool_specs` injects empty `properties: {}` into `inputSchema` for parameter-less
+  MCP tools. The MCP code path bypasses `clean_openai_tool_schema` entirely
+  (middleware.py packs `tool_spec` directly into `mcp_tools_dict`), so the fix has to
+  live at the MCP-client boundary as well.
+  Detector: `grep -n "OpenAI strict-mode rejects object schemas" backend/open_webui/utils/mcp/client.py`
+
 ### `backend/requirements.txt`
 
 - 2-line diff (probably `ddgs` pin per commit `9776af725`).
