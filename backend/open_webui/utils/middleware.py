@@ -2104,7 +2104,7 @@ async def chat_completion_files_handler(
         model_rag_settings = None
         model_id = body.get("model")
         if model_id:
-            model = Models.get_model_by_id(model_id)
+            model = await Models.get_model_by_id(model_id)
             if model and model.meta:
                 model_meta = (
                     model.meta
