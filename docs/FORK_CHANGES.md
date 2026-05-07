@@ -144,6 +144,14 @@ Large tree of planning / research documents. Zero conflict risk. Files:
 - 4-line fork diff.
   Detector: `git diff upstream/main..HEAD -- backend/open_webui/retrieval/vector/dbs/chroma.py`
 
+### `backend/open_webui/utils/tools.py`
+
+- `clean_openai_tool_schema` injects empty `properties: {}` for parameter-less object schemas
+  before downstream cleaning. Required because MCP servers (Dropbox, others) emit
+  `{"type":"object"}` for tools without args, which OpenAI strict-mode function calling rejects
+  with `"Invalid schema for function 'X': In context=(), object schema missing properties"`.
+  Detector: `grep -n "OpenAI strict-mode rejects object schemas" backend/open_webui/utils/tools.py`
+
 ### `backend/requirements.txt`
 
 - 2-line diff (probably `ddgs` pin per commit `9776af725`).
