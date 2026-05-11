@@ -29,6 +29,7 @@
 	import AccessControlModal from '../common/AccessControlModal.svelte';
 	import LockClosed from '$lib/components/icons/LockClosed.svelte';
 	import { updateModelAccessGrants } from '$lib/apis/models';
+	import RagSettingsModal from '$lib/components/common/RagSettingsModal.svelte';
 
 	const i18n = getContext('i18n');
 
@@ -105,6 +106,31 @@
 	let accessGrants = [];
 	let terminalId = '';
 	let tts = { voice: '' };
+
+	// RAG Settings
+	let showRagSettingsModal = false;
+	let ragSettings: {
+		top_k?: number | null;
+		top_k_reranker?: number | null;
+		relevance_threshold?: number | null;
+		enable_hybrid_search?: boolean | null;
+		enable_reranking?: boolean | null;
+		hybrid_bm25_weight?: number | null;
+		full_context?: boolean | null;
+	} = {};
+
+	const addUsage = (base_model_id) => {
+		const baseModel = $models.find((m) => m.id === base_model_id);
+
+		if (baseModel) {
+			if (baseModel.owned_by === 'openai') {
+				capabilities.usage = baseModel?.meta?.capabilities?.usage ?? false;
+			} else {
+				delete capabilities.usage;
+			}
+			capabilities = capabilities;
+		}
+	};
 
 	const submitHandler = async () => {
 		loading = true;
@@ -228,6 +254,15 @@
 			}
 		}
 
+		// Save RAG settings
+		if (Object.keys(ragSettings).length > 0) {
+			info.meta.rag_settings = ragSettings;
+		} else {
+			if (info.meta.rag_settings) {
+				delete info.meta.rag_settings;
+			}
+		}
+
 		info.params.system = system.trim() === '' ? null : system;
 		info.params.stop = params.stop
 			? (typeof params.stop === 'string' ? params.stop.split(',') : params.stop).filter((s) =>
@@ -328,6 +363,7 @@
 			builtinTools = model?.meta?.builtinTools ?? builtinTools;
 			terminalId = model?.meta?.terminalId ?? '';
 			tts = { voice: model?.meta?.tts?.voice ?? '' };
+			ragSettings = model?.meta?.rag_settings ?? {};
 
 			accessGrants = model?.access_grants ?? [];
 
@@ -766,6 +802,31 @@
 						<Knowledge bind:selectedItems={knowledge} />
 					</div>
 
+					<div class="my-2">
+						<div class="flex w-full justify-between items-center">
+							<div class="flex items-center gap-2">
+								<div class="text-sm font-medium">{$i18n.t('RAG Settings')}</div>
+								{#if Object.keys(ragSettings).length > 0}
+									<span class="text-xs text-green-500 dark:text-green-400">
+										({$i18n.t('Custom')})
+									</span>
+								{/if}
+							</div>
+							<button
+								class="p-1 px-3 text-xs flex rounded-sm transition"
+								type="button"
+								on:click={() => {
+									showRagSettingsModal = true;
+								}}
+							>
+								<span class="ml-2 self-center">{$i18n.t('Configure')}</span>
+							</button>
+						</div>
+						<div class="text-xs text-gray-500 mt-1">
+							{$i18n.t('Override global RAG settings for this model')}
+						</div>
+					</div>
+
 					<div class="my-4">
 						<ToolsSelector bind:selectedToolIds={toolIds} tools={$tools ?? []} />
 					</div>
@@ -921,3 +982,11 @@
 		{/if}
 	</div>
 {/if}
+
+<RagSettingsModal
+	bind:show={showRagSettingsModal}
+	{ragSettings}
+	on:save={(e) => {
+		ragSettings = e.detail;
+	}}
+/>

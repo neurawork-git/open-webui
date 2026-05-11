@@ -113,9 +113,43 @@ class KnowledgeUserResponse(KnowledgeUserModel):
     pass
 
 
+####################
+# RAG Settings Models
+# FORK: rag-settings-cascade
+####################
+
+
+class RagSettings(BaseModel):
+    """Per-level RAG settings that can override global defaults."""
+
+    top_k: Optional[int] = None
+    top_k_reranker: Optional[int] = None
+    relevance_threshold: Optional[float] = None
+    enable_hybrid_search: Optional[bool] = None
+    hybrid_bm25_weight: Optional[float] = None
+    full_context: Optional[bool] = None
+    enable_reranking: Optional[bool] = None  # Override global reranking setting
+
+    model_config = ConfigDict(extra="ignore")
+
+
+class KnowledgeMeta(BaseModel):
+    """Metadata for Knowledge including RAG settings overrides."""
+
+    rag_settings: Optional[RagSettings] = None
+
+    model_config = ConfigDict(extra="allow")
+
+
+####################
+# Forms
+####################
+
+
 class KnowledgeForm(BaseModel):
     name: str
     description: str
+    meta: Optional[dict] = None
     access_grants: Optional[list[dict]] = None
 
 
@@ -644,21 +678,16 @@ class KnowledgeTable:
     async def update_knowledge_data_by_id(
         self, id: str, data: dict, db: Optional[AsyncSession] = None
     ) -> Optional[KnowledgeModel]:
-        try:
-            async with get_async_db_context(db) as db:
-                await db.execute(
-                    update(Knowledge)
-                    .filter_by(id=id)
-                    .values(
-                        data=data,
-                        updated_at=int(time.time()),
-                    )
-                )
-                await db.commit()
-                return await self.get_knowledge_by_id(id=id, db=db)
-        except Exception as e:
-            log.exception(e)
-            return None
+        """
+        DEPRECATED: The 'data' column was removed from the Knowledge table.
+        File associations are now tracked via the KnowledgeFile junction table.
+        This method is kept for API compatibility but does nothing.
+        """
+        log.warning(
+            "update_knowledge_data_by_id is deprecated - 'data' column no longer exists. "
+            "Use KnowledgeFile table for file associations."
+        )
+        return await self.get_knowledge_by_id(id=id, db=db)
 
     async def delete_knowledge_by_id(self, id: str, db: Optional[AsyncSession] = None) -> bool:
         try:

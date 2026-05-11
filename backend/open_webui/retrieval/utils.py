@@ -62,6 +62,50 @@ from typing import Any
 from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from langchain_core.retrievers import BaseRetriever
 
+####################
+# RAG Settings Merge
+# FORK: rag-settings-cascade
+####################
+
+
+def merge_rag_settings(*settings_dicts: Optional[dict]) -> dict:
+    """
+    Merge RAG settings from multiple sources with priority cascade.
+    Later arguments override earlier ones. None values are skipped.
+
+    Priority order (pass in this order): global, user, model, chat, knowledge
+    The last non-None value for each key wins.
+
+    Whitelist-strict: only the six RAG-specific keys propagate; unrelated
+    keys in caller dicts are ignored.
+
+    Args:
+        *settings_dicts: Variable number of settings dictionaries
+
+    Returns:
+        Merged settings dict with all populated fields
+    """
+    merged = {}
+    rag_keys = [
+        "top_k",
+        "top_k_reranker",
+        "relevance_threshold",
+        "enable_hybrid_search",
+        "hybrid_bm25_weight",
+        "full_context",
+    ]
+
+    for settings in settings_dicts:
+        if settings is None:
+            continue
+        for key in rag_keys:
+            if key in settings and settings[key] is not None:
+                merged[key] = settings[key]
+
+    return merged
+
+
+
 
 def is_youtube_url(url: str) -> bool:
     youtube_regex = r'^(https?://)?(www\.)?(youtube\.com|youtu\.be)/.+$'
