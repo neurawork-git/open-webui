@@ -2674,7 +2674,14 @@ ENABLE_ONEDRIVE_INTEGRATION = PersistentConfig(
 
 ONEDRIVE_CLIENT_ID = os.environ.get('ONEDRIVE_CLIENT_ID', '')
 ONEDRIVE_CLIENT_ID_PERSONAL = os.environ.get('ONEDRIVE_CLIENT_ID_PERSONAL', ONEDRIVE_CLIENT_ID)
-ONEDRIVE_CLIENT_ID_BUSINESS = os.environ.get('ONEDRIVE_CLIENT_ID_BUSINESS', ONEDRIVE_CLIENT_ID)
+# FORK: sharepoint-kb-integration
+# Persistent config so admin can override the OneDrive Business OAuth client at runtime
+# (falls back to ONEDRIVE_CLIENT_ID or the MICROSOFT_CLIENT_ID PersistentConfig value).
+ONEDRIVE_CLIENT_ID_BUSINESS = PersistentConfig(
+    'ONEDRIVE_CLIENT_ID_BUSINESS',
+    'onedrive.client_id_business',
+    os.environ.get('ONEDRIVE_CLIENT_ID_BUSINESS', ONEDRIVE_CLIENT_ID or MICROSOFT_CLIENT_ID.value),
+)
 
 ENABLE_ONEDRIVE_PERSONAL = os.environ.get('ENABLE_ONEDRIVE_PERSONAL', 'True').lower() == 'true' and bool(
     ONEDRIVE_CLIENT_ID_PERSONAL

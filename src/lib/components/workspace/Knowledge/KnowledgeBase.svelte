@@ -1,3 +1,6 @@
+<!-- FORK: sharepoint-kb-integration (SharePoint+Reindex+RagSettings-modal-trigger) -->
+<!-- FORK: rag-settings-cascade (modal-trigger deferred from #3) -->
+
 <script lang="ts">
 	import Fuse from 'fuse.js';
 	import { toast } from 'svelte-sonner';
@@ -27,6 +30,10 @@
 	import {
 		addFileToKnowledgeById,
 		getKnowledgeById,
+		importSharePointFolder,
+		importSharePointSite,
+		reimportSharePointFolder,
+		reindexKnowledgeById,
 		removeFileFromKnowledgeById,
 		resetKnowledgeById,
 		updateFileFromKnowledgeById,
@@ -37,6 +44,7 @@
 	import { processWeb, processYoutubeVideo } from '$lib/apis/retrieval';
 
 	import { blobToFile, isYoutubeUrl } from '$lib/utils';
+	import { openOneDrivePicker } from '$lib/utils/onedrive-file-picker';
 
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import Files from './KnowledgeBase/Files.svelte';
@@ -44,13 +52,18 @@
 
 	import AddContentMenu from './KnowledgeBase/AddContentMenu.svelte';
 	import AddTextContentModal from './KnowledgeBase/AddTextContentModal.svelte';
+	import SharePointPicker from './SharePointPicker.svelte';
 
 	import SyncConfirmDialog from '../../common/ConfirmDialog.svelte';
 	import Drawer from '$lib/components/common/Drawer.svelte';
 	import ChevronLeft from '$lib/components/icons/ChevronLeft.svelte';
 	import LockClosed from '$lib/components/icons/LockClosed.svelte';
 	import AccessControlModal from '../common/AccessControlModal.svelte';
+	import RagSettingsModal from '$lib/components/common/RagSettingsModal.svelte';
 	import Search from '$lib/components/icons/Search.svelte';
+	import ArrowPath from '$lib/components/icons/ArrowPath.svelte';
+	import AdjustmentsHorizontal from '$lib/components/icons/AdjustmentsHorizontal.svelte';
+	import Textarea from '$lib/components/common/Textarea.svelte';
 	import FilesOverlay from '$lib/components/chat/MessageInput/FilesOverlay.svelte';
 	import DropdownOptions from '$lib/components/common/DropdownOptions.svelte';
 	import Pagination from '$lib/components/common/Pagination.svelte';
@@ -61,11 +74,23 @@
 	let pane;
 	let showSidepanel = true;
 
+	type RagSettings = {
+		top_k?: number | null;
+		top_k_reranker?: number | null;
+		relevance_threshold?: number | null;
+		enable_hybrid_search?: boolean | null;
+		enable_reranking?: boolean | null;
+		hybrid_bm25_weight?: number | null;
+		full_context?: boolean | null;
+	};
+
 	let showAddWebpageModal = false;
 	let showAddTextContentModal = false;
 
 	let showSyncConfirmModal = false;
 	let showAccessControlModal = false;
+	let showSharePointPicker = false;
+	let sharePointImporting = false;
 
 	let minSize = 0;
 	type Knowledge = {
@@ -75,6 +100,9 @@
 		data: {
 			file_ids: string[];
 		};
+		meta?: {
+			rag_settings?: RagSettings;
+		} | null;
 		files: any[];
 		access_grants?: any[];
 		write_access?: boolean;
@@ -87,6 +115,10 @@
 	let selectedFileId = null;
 	let selectedFile = null;
 	let selectedFileContent = '';
+
+	let showReindexConfirmModal = false;
+	let isReindexing = false;
+	let showRagSettingsModal = false;
 
 	let inputFiles = null;
 
@@ -339,6 +371,135 @@
 		}
 	};
 
+	const sharePointSiteImportHandler = async (siteId: string, siteName: string) => {
+		if (!knowledge) return;
+		sharePointImporting = true;
+
+		try {
+			const result = await importSharePointSite(
+				localStorage.token,
+				knowledge.id,
+				siteId
+			);
+
+			if (result) {
+				if (result.imported > 0) {
+					toast.success(
+						$i18n.t('Imported {{count}} files from site "{{site}}"', {
+							count: result.imported,
+							site: result.folder_name || siteName
+						})
+					);
+				}
+				if (result.failed > 0) {
+					toast.warning(
+						$i18n.t('{{count}} files failed to import', { count: result.failed })
+					);
+				}
+				if (result.truncated) {
+					toast.warning(
+						$i18n.t(
+							'Site too large — stopped after {{count}} files. Pick individual folders instead.',
+							{ count: result.total_files }
+						)
+					);
+				}
+				if (result.imported === 0 && result.failed === 0) {
+					toast.info($i18n.t('Site has no importable files'));
+				}
+				await getItemsPage();
+			}
+		} catch (e) {
+			toast.error(`${e}`);
+		} finally {
+			sharePointImporting = false;
+		}
+	};
+
+	const sharePointImportHandler = async (driveId: string, itemId: string) => {
+		if (!knowledge) return;
+		sharePointImporting = true;
+
+		try {
+			const result = await importSharePointFolder(
+				localStorage.token,
+				knowledge.id,
+				driveId,
+				itemId
+			);
+
+			if (result) {
+				if (result.imported > 0) {
+					toast.success(
+						$i18n.t('Imported {{count}} files from "{{folder}}"', {
+							count: result.imported,
+							folder: result.folder_name
+						})
+					);
+				}
+				if (result.failed > 0) {
+					toast.warning(
+						$i18n.t('{{count}} files failed to import', { count: result.failed })
+					);
+				}
+				if (result.truncated) {
+					toast.warning(
+						$i18n.t(
+							'Folder too large — stopped after {{count}} files. Split into smaller folders and re-import.',
+							{ count: result.total_files }
+						)
+					);
+				}
+				if (result.imported === 0 && result.failed === 0) {
+					toast.info($i18n.t('Folder is empty — no files to import'));
+				}
+				await getItemsPage();
+			}
+		} catch (e) {
+			toast.error(`${e}`);
+		} finally {
+			sharePointImporting = false;
+		}
+	};
+
+	const sharePointReimportHandler = async () => {
+		if (!knowledge) return;
+		sharePointImporting = true;
+
+		try {
+			const result = await reimportSharePointFolder(localStorage.token, knowledge.id);
+
+			if (result) {
+				if (result.imported > 0) {
+					toast.success(
+						$i18n.t('Re-imported {{count}} files from "{{folder}}"', {
+							count: result.imported,
+							folder: result.folder_name
+						})
+					);
+				}
+				if (result.failed > 0) {
+					toast.warning(
+						$i18n.t('{{count}} files failed to import', { count: result.failed })
+					);
+				}
+				if (result.truncated) {
+					toast.warning(
+						$i18n.t(
+							'Folder too large — stopped after {{count}} files. Split into smaller folders and re-import.',
+							{ count: result.total_files }
+						)
+					);
+				}
+				await getItemsPage();
+			}
+		} catch (e) {
+			toast.error(`${e}`);
+		} finally {
+			sharePointImporting = false;
+		}
+	};
+
 	const uploadDirectoryHandler = async () => {
 		// Check if File System Access API is supported
 		const isFileSystemAccessSupported = 'showDirectoryPicker' in window;
@@ -527,6 +688,35 @@
 			}
 		} else {
 			uploadDirectoryHandler();
+		}
+	};
+
+	const reindexHandler = async () => {
+		isReindexing = true;
+		try {
+			const res = await reindexKnowledgeById(localStorage.token, id);
+			if (res && res.success) {
+				toast.success(
+					$i18n.t('Reindex completed: {{processed}}/{{total}} files processed', {
+						processed: res.processed_files,
+						total: res.total_files
+					})
+				);
+				if (res.failed_files && res.failed_files.length > 0) {
+					toast.warning(
+						$i18n.t('{{count}} files failed to reindex', { count: res.failed_files.length })
+					);
+				}
+				// Refresh the knowledge base data
+				knowledge = await getKnowledgeById(localStorage.token, id);
+				_knowledge.set(await getKnowledgeBases(localStorage.token));
+			} else {
+				toast.error($i18n.t('Reindex failed'));
+			}
+		} catch (e) {
+			toast.error(`${e}`);
+		} finally {
+			isReindexing = false;
 		}
 	};
 
@@ -781,6 +971,13 @@
 </script>
 
 <FilesOverlay show={dragged} />
+
+<SharePointPicker
+	bind:show={showSharePointPicker}
+	onSiteSelected={(siteId, siteName) => sharePointSiteImportHandler(siteId, siteName)}
+	onFolderSelected={(driveId, itemId) => sharePointImportHandler(driveId, itemId)}
+/>
+
 <SyncConfirmDialog
 	bind:show={showSyncConfirmModal}
 	message={$i18n.t(
@@ -788,6 +985,16 @@
 	)}
 	on:confirm={() => {
 		syncDirectoryHandler();
+	}}
+/>
+
+<SyncConfirmDialog
+	bind:show={showReindexConfirmModal}
+	message={$i18n.t(
+		'This will delete and re-create all vector embeddings for this knowledge base. This may take a while for large collections. Do you wish to continue?'
+	)}
+	on:confirm={() => {
+		reindexHandler();
 	}}
 />
 
@@ -805,6 +1012,7 @@
 		uploadFileHandler(file);
 	}}
 />
+
 
 <input
 	id="files-input"
@@ -849,6 +1057,32 @@
 			}}
 			accessRoles={['read', 'write']}
 		/>
+		<RagSettingsModal
+			bind:show={showRagSettingsModal}
+			ragSettings={knowledge.meta?.rag_settings ?? {}}
+			on:save={async (e) => {
+				const newRagSettings = e.detail;
+				// Update knowledge meta with new RAG settings
+				knowledge.meta = {
+					...(knowledge.meta ?? {}),
+					rag_settings: Object.keys(newRagSettings).length > 0 ? newRagSettings : undefined
+				};
+				// Trigger save
+				const res = await updateKnowledgeById(localStorage.token, id, {
+					name: knowledge.name,
+					description: knowledge.description,
+					meta: knowledge.meta,
+					access_grants: knowledge.access_grants
+				}).catch((err) => {
+					toast.error(`${err}`);
+					return null;
+				});
+				if (res) {
+					toast.success($i18n.t('RAG settings updated'));
+					_knowledge.set(await getKnowledgeBases(localStorage.token));
+				}
+			}}
+		/>
 		<div class="w-full px-2">
 			<div class=" flex w-full">
 				<div class="flex-1">
@@ -879,7 +1113,21 @@
 						</div>
 
 						{#if knowledge?.write_access}
-							<div class="self-center shrink-0">
+							<div class="self-center shrink-0 flex gap-1">
+								<button
+									class="bg-gray-50 hover:bg-gray-100 text-black dark:bg-gray-850 dark:hover:bg-gray-800 dark:text-white transition px-2 py-1 rounded-full flex gap-1 items-center"
+									type="button"
+									on:click={() => {
+										showRagSettingsModal = true;
+									}}
+									title={$i18n.t('RAG Settings')}
+								>
+									<AdjustmentsHorizontal strokeWidth="2.5" className="size-3.5" />
+
+									<div class="text-sm font-medium shrink-0">
+										{$i18n.t('RAG')}
+									</div>
+								</button>
 								<button
 									class="bg-gray-50 hover:bg-gray-100 text-black dark:bg-gray-850 dark:hover:bg-gray-800 dark:text-white transition px-2 py-1 rounded-full flex gap-1 items-center"
 									type="button"
@@ -891,6 +1139,25 @@
 
 									<div class="text-sm font-medium shrink-0">
 										{$i18n.t('Access')}
+									</div>
+								</button>
+								<button
+									class="bg-gray-50 hover:bg-gray-100 text-black dark:bg-gray-850 dark:hover:bg-gray-800 dark:text-white transition px-2 py-1 rounded-full flex gap-1 items-center disabled:opacity-50 disabled:cursor-not-allowed"
+									type="button"
+									disabled={isReindexing}
+									on:click={() => {
+										showReindexConfirmModal = true;
+									}}
+									title={$i18n.t('Re-index all files in this knowledge base')}
+								>
+									{#if isReindexing}
+										<Spinner className="size-3.5" />
+									{:else}
+										<ArrowPath strokeWidth="2.5" className="size-3.5" />
+									{/if}
+
+									<div class="text-sm font-medium shrink-0">
+										{$i18n.t('Reindex')}
 									</div>
 								</button>
 							</div>
@@ -918,6 +1185,39 @@
 			</div>
 		</div>
 
+		{#if knowledge?.meta?.sharepoint_source}
+			<div class="mt-1 mb-1 px-1 flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+				<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" class="size-3.5 flex-shrink-0" fill="none">
+					<mask id="sp-icon" style="mask-type:alpha" maskUnits="userSpaceOnUse" x="0" y="6" width="32" height="20">
+						<path d="M7.82979 26C3.50549 26 0 22.5675 0 18.3333C0 14.1921 3.35322 10.8179 7.54613 10.6716C9.27535 7.87166 12.4144 6 16 6C20.6308 6 24.5169 9.12183 25.5829 13.3335C29.1316 13.3603 32 16.1855 32 19.6667C32 23.0527 29 26 25.8723 25.9914L7.82979 26Z" fill="#C4C4C4"/>
+					</mask>
+					<g mask="url(#sp-icon)">
+						<path d="M7.83 26C5.38 26 3.19 24.9 1.75 23.17L18.04 16.33L30.71 23.46C29.59 24.92 27.91 26 26 25.99H7.83Z" fill="#0364B8"/>
+						<path d="M25.58 13.31L18.04 16.33L30.71 23.46C31.52 22.41 32 21.09 32 19.67C32 16.19 29.13 13.36 25.58 13.33Z" fill="#0078D4"/>
+						<path d="M7.06 10.7L18.04 16.33L25.58 13.31C24.51 9.11 20.62 6 16 6C12.41 6 9.28 7.87 7.55 10.67L7.06 10.7Z" fill="#1490DF"/>
+						<path d="M1.75 23.17L18.04 16.33L7.06 10.7C3.1 11.08 0 14.35 0 18.33C0 20.17.66 21.85 1.75 23.17Z" fill="#28A8EA"/>
+					</g>
+				</svg>
+				<span class="truncate">
+					{$i18n.t('SharePoint: {{folder}}', { folder: knowledge.meta.sharepoint_source.folder_name })}
+				</span>
+				{#if knowledge?.write_access}
+					<button
+						class="ml-auto flex-shrink-0 px-2 py-0.5 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-xs flex items-center gap-1"
+						disabled={sharePointImporting}
+						on:click={sharePointReimportHandler}
+					>
+						{#if sharePointImporting}
+							<Spinner className="size-3" />
+						{:else}
+							<ArrowPath className="size-3" />
+						{/if}
+						{$i18n.t('Re-import')}
+					</button>
+				{/if}
+			</div>
+		{/if}
+
 		<div
 			class="mt-2 mb-2.5 py-2 -mx-0 bg-white dark:bg-gray-900 rounded-3xl border border-gray-100/30 dark:border-gray-850/30 flex-1"
 		>
@@ -939,6 +1239,7 @@
 					{#if knowledge?.write_access}
 						<div>
 							<AddContentMenu
+								showSharePointImport={$config?.features?.enable_onedrive_integration && $config?.features?.enable_onedrive_business}
 								onUpload={(data) => {
 									if (data.type === 'directory') {
 										uploadDirectoryHandler();
@@ -946,6 +1247,8 @@
 										showAddWebpageModal = true;
 									} else if (data.type === 'text') {
 										showAddTextContentModal = true;
+									} else if (data.type === 'sharepoint') {
+										showSharePointPicker = true;
 									} else {
 										document.getElementById('files-input').click();
 									}

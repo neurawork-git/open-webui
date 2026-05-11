@@ -1108,6 +1108,8 @@ app.state.config.BYPASS_WEB_SEARCH_WEB_LOADER = BYPASS_WEB_SEARCH_WEB_LOADER
 
 app.state.config.ENABLE_GOOGLE_DRIVE_INTEGRATION = ENABLE_GOOGLE_DRIVE_INTEGRATION
 app.state.config.ENABLE_ONEDRIVE_INTEGRATION = ENABLE_ONEDRIVE_INTEGRATION
+# FORK: sharepoint-kb-integration
+app.state.config.ONEDRIVE_CLIENT_ID_BUSINESS = ONEDRIVE_CLIENT_ID_BUSINESS
 
 app.state.config.OLLAMA_CLOUD_WEB_SEARCH_API_KEY = OLLAMA_CLOUD_WEB_SEARCH_API_KEY
 app.state.config.SEARXNG_QUERY_URL = SEARXNG_QUERY_URL
@@ -2445,7 +2447,7 @@ async def get_app_config(request: Request):
                 },
                 'onedrive': {
                     'client_id_personal': ONEDRIVE_CLIENT_ID_PERSONAL,
-                    'client_id_business': ONEDRIVE_CLIENT_ID_BUSINESS,
+                    'client_id_business': app.state.config.ONEDRIVE_CLIENT_ID_BUSINESS,
                     'sharepoint_url': ONEDRIVE_SHAREPOINT_URL.value,
                     'sharepoint_tenant_id': ONEDRIVE_SHAREPOINT_TENANT_ID.value,
                 },
