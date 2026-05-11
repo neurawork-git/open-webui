@@ -5,6 +5,7 @@ from typing import Awaitable, Optional, Union
 import requests
 import aiohttp
 import asyncio
+import gc
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
 import time
@@ -105,6 +106,186 @@ def merge_rag_settings(*settings_dicts: Optional[dict]) -> dict:
     return merged
 
 
+####################
+# BM25 Tokenization
+# FORK: bm25-hybrid-highlight
+####################
+
+
+def tokenize_for_bm25(text: str) -> list[str]:
+    """
+    Tokenize text for BM25 scoring with proper punctuation handling.
+
+    - Converts to lowercase
+    - Removes punctuation from word boundaries
+    - Preserves German umlauts and internal hyphens/periods
+    - Filters empty tokens
+
+    Args:
+        text: The text to tokenize
+
+    Returns:
+        List of cleaned lowercase tokens
+    """
+    text = text.lower()
+    tokens = text.split()
+    cleaned = []
+    for token in tokens:
+        # Strip non-word chars from boundaries, keep internal (hyphens, decimals)
+        # \w matches [a-zA-Z0-9_] plus Unicode letters (umlauts etc.)
+        cleaned_token = re.sub(r'^[^\w]+|[^\w]+$', '', token, flags=re.UNICODE)
+        if cleaned_token:
+            cleaned.append(cleaned_token)
+    return cleaned
+
+
+def extract_matched_keywords(query: str, document_text: str) -> list[str]:
+    """
+    Extract which BM25 query tokens matched in the document.
+
+    Used for keyword highlighting in the citation UI.
+
+    Args:
+        query: User query string
+        document_text: Document content to check against
+
+    Returns:
+        List of matched keyword tokens (lowercased), in original query order
+    """
+    query_tokens = tokenize_for_bm25(query)
+    document_tokens = set(tokenize_for_bm25(document_text))
+
+    matched = []
+    seen = set()
+    for token in query_tokens:
+        if token in document_tokens and token not in seen:
+            matched.append(token)
+            seen.add(token)
+    return matched
+
+
+####################
+# Scoring BM25 Retriever
+# FORK: bm25-hybrid-highlight
+# Note: We use custom ScoringBM25Retriever instead of langchain's BM25Retriever
+# to expose normalized BM25 scores in document metadata for thresholds and display.
+####################
+
+
+class ScoringBM25Retriever(BaseRetriever):
+    """
+    A BM25 retriever that stores normalized BM25 scores in document metadata.
+
+    Unlike langchain's BM25Retriever which does not expose scores, this retriever
+    normalizes BM25 scores to 0-1 range and stores them in metadata["score"]
+    for compatibility with relevance thresholds and display.
+    """
+    texts: list[str]
+    metadatas: list[dict]
+    bm25_scores: list[float]  # Pre-computed BM25 scores for all documents
+    k: int = 4
+
+    class Config:
+        arbitrary_types_allowed = True
+
+    def _get_relevant_documents(
+        self, query: str, *, run_manager: CallbackManagerForRetrieverRun
+    ) -> list[Document]:
+        """Sync version - returns empty as we use async."""
+        return []
+
+    async def _aget_relevant_documents(
+        self,
+        query: str,
+        *,
+        run_manager: CallbackManagerForRetrieverRun,
+    ) -> list[Document]:
+        """
+        Return top-k documents with normalized BM25 scores in metadata.
+
+        BM25 scores are normalized to 0-1 range using min-max normalization
+        to be comparable with vector similarity scores for threshold filtering.
+        """
+        scored_docs = list(zip(self.bm25_scores, self.texts, self.metadatas))
+        scored_docs_sorted = sorted(scored_docs, key=lambda x: x[0], reverse=True)
+        top_k_docs = scored_docs_sorted[:self.k]
+
+        if not top_k_docs:
+            return []
+
+        scores_in_topk = [doc[0] for doc in top_k_docs]
+        max_score = max(scores_in_topk) if scores_in_topk else 1.0
+
+        results = []
+        for bm25_score, text, metadata in top_k_docs:
+            meta_copy = metadata.copy() if metadata else {}
+
+            # Normalize BM25 score to 0-1 range (0% to 100%)
+            if bm25_score <= 0:
+                normalized_score = 0.0
+            elif max_score > 0:
+                normalized_score = bm25_score / max_score
+            else:
+                normalized_score = 0.0
+
+            meta_copy["score"] = normalized_score
+            meta_copy["bm25_raw_score"] = bm25_score
+
+            log.debug(
+                f"[HYBRID_DEBUG] ScoringBM25: raw={bm25_score:.4f}, "
+                f"normalized={normalized_score:.4f}, text='{text[:50]}...'"
+            )
+
+            results.append(Document(
+                page_content=text,
+                metadata=meta_copy,
+            ))
+
+        return results
+
+    @classmethod
+    def from_texts_and_scores(
+        cls,
+        texts: list[str],
+        metadatas: list[dict],
+        bm25_scores: list[float],
+        k: int = 4,
+    ) -> "ScoringBM25Retriever":
+        """
+        Create a ScoringBM25Retriever from texts, metadata, and pre-computed BM25 scores.
+
+        Args:
+            texts: Document texts
+            metadatas: Document metadata dicts
+            bm25_scores: Pre-computed BM25 scores (from BM25Okapi.get_scores())
+            k: Number of documents to retrieve
+        """
+        return cls(
+            texts=texts,
+            metadatas=metadatas,
+            bm25_scores=bm25_scores,
+            k=k,
+        )
+
+
+####################
+# Memory Management Helpers
+# FORK: bm25-hybrid-highlight
+####################
+
+
+def cleanup_memory():
+    """
+    Clean up memory after heavy operations like embedding generation or RAG searches.
+    Triggers garbage collection and clears CUDA cache if available.
+    """
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass  # torch not installed, skip CUDA cleanup
 
 
 def is_youtube_url(url: str) -> bool:
@@ -385,6 +566,7 @@ async def query_doc_with_hybrid_search(
     r: float,
     hybrid_bm25_weight: float,
     enable_enriched_texts: bool = False,
+    enable_reranking: bool = True,
 ) -> dict:
     try:
         # First check if collection_result has the required attributes
@@ -415,11 +597,21 @@ async def query_doc_with_hybrid_search(
 
         bm25_texts = get_enriched_texts(collection_result) if enable_enriched_texts else original_texts
 
-        bm25_retriever = BM25Retriever.from_texts(
+        # FORK: bm25-hybrid-highlight
+        # Pre-compute BM25 scores so ScoringBM25Retriever can expose them in metadata.
+        from rank_bm25 import BM25Okapi
+
+        tokenized_docs = [tokenize_for_bm25(doc) for doc in bm25_texts]
+        bm25_index = BM25Okapi(tokenized_docs)
+        tokenized_query = tokenize_for_bm25(query)
+        bm25_scores = bm25_index.get_scores(tokenized_query).tolist()
+
+        bm25_retriever = ScoringBM25Retriever.from_texts_and_scores(
             texts=bm25_texts,
             metadatas=bm25_metadatas,
+            bm25_scores=bm25_scores,
+            k=k,
         )
-        bm25_retriever.k = k
 
         vector_search_retriever = VectorSearchRetriever(
             collection_name=collection_name,
@@ -452,6 +644,7 @@ async def query_doc_with_hybrid_search(
             top_n=k_reranker,
             reranking_function=reranking_function,
             r_score=r,
+            enable_reranking=enable_reranking,
         )
 
         compression_retriever = ContextualCompressionRetriever(
@@ -459,6 +652,20 @@ async def query_doc_with_hybrid_search(
         )
 
         result = await compression_retriever.ainvoke(query)
+
+        # FORK: bm25-hybrid-highlight — inject BM25 matched keywords into doc metadata
+        # for downstream citation highlighting.
+        keywords_added_count = 0
+        for doc in result:
+            matched_keywords = extract_matched_keywords(query, doc.page_content)
+            if matched_keywords:
+                doc.metadata["bm25_matched_keywords"] = matched_keywords
+                keywords_added_count += 1
+        if keywords_added_count > 0:
+            log.info(
+                f"[BM25_KEYWORDS] Added matched keywords to "
+                f"{keywords_added_count}/{len(result)} docs for query: '{query}'"
+            )
 
         distances = [d.metadata.get('score') for d in result]
         documents = [d.page_content for d in result]
@@ -529,16 +736,37 @@ def merge_and_sort_query_results(query_results: list[dict], k: int) -> dict:
                 doc_hash = hashlib.sha256(document.encode()).hexdigest()  # Compute a hash for uniqueness
 
                 if doc_hash not in combined.keys():
-                    combined[doc_hash] = (distance, document, metadata)
+                    # Copy metadata to avoid mutating callers' dicts
+                    combined[doc_hash] = (distance, document, dict(metadata) if metadata else {})
                     continue  # if doc is new, no further comparison is needed
 
-                # if doc is alredy in, but new distance is better, update
-                if distance > combined[doc_hash][0]:
-                    combined[doc_hash] = (distance, document, metadata)
+                existing_distance, existing_doc, existing_metadata = combined[doc_hash]
+
+                # FORK: bm25-hybrid-highlight
+                # Merge bm25_matched_keywords regardless of which has higher score.
+                # Keywords come from hybrid search; we want to preserve them even if
+                # vector search has a higher score for the same document.
+                keywords_to_preserve = None
+                if metadata and metadata.get("bm25_matched_keywords"):
+                    keywords_to_preserve = metadata["bm25_matched_keywords"]
+                elif existing_metadata and existing_metadata.get("bm25_matched_keywords"):
+                    keywords_to_preserve = existing_metadata["bm25_matched_keywords"]
+
+                # Treat None distances (pure BM25 path) as 0 for comparison
+                dist_val = distance if distance is not None else 0
+                existing_dist_val = existing_distance if existing_distance is not None else 0
+
+                if dist_val > existing_dist_val:
+                    merged_metadata = dict(metadata) if metadata else {}
+                    if keywords_to_preserve and not merged_metadata.get("bm25_matched_keywords"):
+                        merged_metadata["bm25_matched_keywords"] = keywords_to_preserve
+                    combined[doc_hash] = (distance, document, merged_metadata)
+                elif keywords_to_preserve and not existing_metadata.get("bm25_matched_keywords"):
+                    existing_metadata["bm25_matched_keywords"] = keywords_to_preserve
 
     combined = list(combined.values())
-    # Sort the list based on distances
-    combined.sort(key=lambda x: x[0], reverse=True)
+    # Sort the list based on distances (treat None as 0 for sorting)
+    combined.sort(key=lambda x: x[0] if x[0] is not None else 0, reverse=True)
 
     # Slice to keep only the top k elements
     sorted_distances, sorted_documents, sorted_metadatas = zip(*combined[:k]) if combined else ([], [], [])
@@ -569,18 +797,22 @@ def get_all_items_from_collections(collection_names: list[str]) -> dict:
 
 
 async def query_collection(
-    request,
-    collection_names: list[str],
-    queries: list[str],
-    embedding_function,
-    k: int,
+    request=None,
+    collection_names: list[str] = None,
+    queries: list[str] = None,
+    embedding_function=None,
+    k: int = None,
 ) -> dict:
-    # When request is provided, try hybrid search + reranking if enabled
-    if request and request.app.state.config.ENABLE_RAG_HYBRID_SEARCH:
+    # FORK: KB-deterministic-inject - hybrid wrapper hardened
+    # When request is provided AND ENABLE_RAG_HYBRID_SEARCH is on, delegate to
+    # hybrid+rerank pipeline so the query_knowledge_files tool path matches
+    # middleware RAG behavior. Vector-only fallback preserved below for
+    # callers that pass request=None or for hybrid-disabled deployments.
+    if request and getattr(request.app.state.config, 'ENABLE_RAG_HYBRID_SEARCH', False):
         try:
             reranking_function = (
                 (lambda query, documents: request.app.state.RERANKING_FUNCTION(query, documents))
-                if request.app.state.RERANKING_FUNCTION
+                if getattr(request.app.state, 'RERANKING_FUNCTION', None)
                 else None
             )
             return await query_collection_with_hybrid_search(
@@ -593,9 +825,10 @@ async def query_collection(
                 r=request.app.state.config.RELEVANCE_THRESHOLD,
                 hybrid_bm25_weight=request.app.state.config.HYBRID_BM25_WEIGHT,
                 enable_enriched_texts=request.app.state.config.ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS,
+                enable_reranking=getattr(request.app.state.config, 'ENABLE_RAG_RERANKING', True),
             )
         except Exception as e:
-            log.debug(f'Hybrid search failed, falling back to vector search: {e}')
+            log.debug(f'Hybrid search failed in query_collection wrapper, falling back to vector-only: {e}')
 
     results = []
     error = False
@@ -622,28 +855,32 @@ async def query_collection(
         log.warning('query_collection: all queries were None or empty, returning empty results')
         return {'distances': [[]], 'documents': [[]], 'metadatas': [[]]}
 
-    # Generate all query embeddings (in one call)
-    query_embeddings = await embedding_function(queries, prefix=RAG_EMBEDDING_QUERY_PREFIX)
-    log.debug(f'query_collection: processing {len(queries)} queries across {len(collection_names)} collections')
+    try:
+        # Generate all query embeddings (in one call)
+        query_embeddings = await embedding_function(queries, prefix=RAG_EMBEDDING_QUERY_PREFIX)
+        log.debug(f'query_collection: processing {len(queries)} queries across {len(collection_names)} collections')
 
-    with ThreadPoolExecutor() as executor:
-        future_results = []
-        for query_embedding in query_embeddings:
-            for collection_name in collection_names:
-                result = executor.submit(process_query_collection, collection_name, query_embedding)
-                future_results.append(result)
-        task_results = [future.result() for future in future_results]
+        with ThreadPoolExecutor() as executor:
+            future_results = []
+            for query_embedding in query_embeddings:
+                for collection_name in collection_names:
+                    result = executor.submit(process_query_collection, collection_name, query_embedding)
+                    future_results.append(result)
+            task_results = [future.result() for future in future_results]
 
-    for result, err in task_results:
-        if err is not None:
-            error = True
-        elif result is not None:
-            results.append(result)
+        for result, err in task_results:
+            if err is not None:
+                error = True
+            elif result is not None:
+                results.append(result)
 
-    if error and not results:
-        log.warning('All collection queries failed. No results returned.')
+        if error and not results:
+            log.warning('All collection queries failed. No results returned.')
 
-    return merge_and_sort_query_results(results, k=k)
+        return merge_and_sort_query_results(results, k=k)
+    finally:
+        # FORK: bm25-hybrid-highlight - clean up memory after RAG search
+        cleanup_memory()
 
 
 async def query_collection_with_hybrid_search(
@@ -656,6 +893,7 @@ async def query_collection_with_hybrid_search(
     r: float,
     hybrid_bm25_weight: float,
     enable_enriched_texts: bool = False,
+    enable_reranking: bool = True,
 ) -> dict:
     results = []
     error = False
@@ -693,6 +931,7 @@ async def query_collection_with_hybrid_search(
                 r=r,
                 hybrid_bm25_weight=hybrid_bm25_weight,
                 enable_enriched_texts=enable_enriched_texts,
+                enable_reranking=enable_reranking,
             )
             return result, None
         except Exception as e:
@@ -1468,6 +1707,7 @@ class RerankCompressor(BaseDocumentCompressor):
     top_n: int
     reranking_function: Any
     r_score: float
+    enable_reranking: bool = True  # FORK: bm25-hybrid-highlight - When False, pass through with original ensemble scores
 
     class Config:
         extra = 'forbid'
@@ -1498,6 +1738,24 @@ class RerankCompressor(BaseDocumentCompressor):
         query: str,
         callbacks: Optional[Callbacks] = None,
     ) -> Sequence[Document]:
+        # FORK: bm25-hybrid-highlight
+        # If reranking is disabled, pass through documents with original scores
+        # (preserves ensemble scores from BM25+vector retrieval).
+        if not self.enable_reranking:
+            log.debug("[HYBRID_DEBUG] === RERANKING DISABLED - PASS-THROUGH ===")
+            result_docs = []
+            docs_to_process = list(documents[: self.top_n])
+            for idx, doc in enumerate(docs_to_process):
+                metadata = doc.metadata.copy()
+                # Use existing score if present; otherwise assign rank-based score
+                if "score" not in metadata or metadata["score"] is None:
+                    metadata["score"] = 1.0 / (idx + 1)
+                result_docs.append(Document(
+                    page_content=doc.page_content,
+                    metadata=metadata,
+                ))
+            return result_docs
+
         reranking = self.reranking_function is not None
 
         scores = None
