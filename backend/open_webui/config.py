@@ -2924,6 +2924,25 @@ ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS = PersistentConfig(
     os.environ.get('ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS', 'False').lower() == 'true',
 )
 
+# FORK: KB-deterministic-inject
+# Force classic RAG injection on native function-calling chats. When False,
+# native FC models must call query_knowledge_files tool explicitly; many
+# models do not, causing KB content to disappear silently.
+RAG_NATIVE_FC_FORCE_RETRIEVAL = PersistentConfig(
+    'RAG_NATIVE_FC_FORCE_RETRIEVAL',
+    'rag.native_fc_force_retrieval',
+    os.environ.get('RAG_NATIVE_FC_FORCE_RETRIEVAL', 'True').lower() == 'true',
+)
+
+# FORK: bm25-hybrid-highlight
+# When False, RerankCompressor passes through ensemble scores from BM25+vector
+# without invoking reranking_function or embedding-cosine fallback.
+ENABLE_RAG_RERANKING = PersistentConfig(
+    'ENABLE_RAG_RERANKING',
+    'rag.enable_reranking',
+    os.environ.get('ENABLE_RAG_RERANKING', 'True').lower() == 'true',
+)
+
 RAG_FULL_CONTEXT = PersistentConfig(
     'RAG_FULL_CONTEXT',
     'rag.full_context',

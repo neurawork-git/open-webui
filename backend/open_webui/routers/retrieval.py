@@ -436,9 +436,12 @@ async def get_rag_config(request: Request, user=Depends(get_admin_user)):
         # Hybrid search settings
         'ENABLE_RAG_HYBRID_SEARCH': request.app.state.config.ENABLE_RAG_HYBRID_SEARCH,
         'ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS': request.app.state.config.ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS,
+        'ENABLE_RAG_RERANKING': request.app.state.config.ENABLE_RAG_RERANKING,
         'TOP_K_RERANKER': request.app.state.config.TOP_K_RERANKER,
         'RELEVANCE_THRESHOLD': request.app.state.config.RELEVANCE_THRESHOLD,
         'HYBRID_BM25_WEIGHT': request.app.state.config.HYBRID_BM25_WEIGHT,
+        # FORK: KB-deterministic-inject
+        'RAG_NATIVE_FC_FORCE_RETRIEVAL': request.app.state.config.RAG_NATIVE_FC_FORCE_RETRIEVAL,
         # Content extraction settings
         'CONTENT_EXTRACTION_ENGINE': request.app.state.config.CONTENT_EXTRACTION_ENGINE,
         'PDF_EXTRACT_IMAGES': request.app.state.config.PDF_EXTRACT_IMAGES,
@@ -642,9 +645,13 @@ class ConfigForm(BaseModel):
     # Hybrid search settings
     ENABLE_RAG_HYBRID_SEARCH: Optional[bool] = None
     ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS: Optional[bool] = None
+    ENABLE_RAG_RERANKING: Optional[bool] = None
     TOP_K_RERANKER: Optional[int] = None
     RELEVANCE_THRESHOLD: Optional[float] = None
     HYBRID_BM25_WEIGHT: Optional[float] = None
+
+    # FORK: KB-deterministic-inject
+    RAG_NATIVE_FC_FORCE_RETRIEVAL: Optional[bool] = None
 
     # Content extraction settings
     CONTENT_EXTRACTION_ENGINE: Optional[str] = None
@@ -743,6 +750,18 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
         form_data.ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS
         if form_data.ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS is not None
         else request.app.state.config.ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS
+    )
+    # FORK: bm25-hybrid-highlight
+    request.app.state.config.ENABLE_RAG_RERANKING = (
+        form_data.ENABLE_RAG_RERANKING
+        if form_data.ENABLE_RAG_RERANKING is not None
+        else request.app.state.config.ENABLE_RAG_RERANKING
+    )
+    # FORK: KB-deterministic-inject
+    request.app.state.config.RAG_NATIVE_FC_FORCE_RETRIEVAL = (
+        form_data.RAG_NATIVE_FC_FORCE_RETRIEVAL
+        if form_data.RAG_NATIVE_FC_FORCE_RETRIEVAL is not None
+        else request.app.state.config.RAG_NATIVE_FC_FORCE_RETRIEVAL
     )
 
     request.app.state.config.TOP_K_RERANKER = (
