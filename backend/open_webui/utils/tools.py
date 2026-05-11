@@ -733,6 +733,16 @@ def clean_openai_tool_schema(spec: dict) -> dict:
 
     cleaned_spec = copy.deepcopy(spec)
 
+    # FORK: mcp-empty-properties
+    # OpenAI strict-mode rejects object schemas without 'properties' (even when empty).
+    # MCP servers (e.g. Dropbox) emit {'type':'object'} for parameter-less tools,
+    # which is JSON-Schema-valid but breaks OpenAI strict function calling with
+    # "Invalid schema for function 'X': In context=(), object schema missing properties".
+    # Inject empty properties so strict-mode-compatible providers accept the spec.
+    params = cleaned_spec.get('parameters')
+    if isinstance(params, dict) and params.get('type') == 'object' and 'properties' not in params:
+        params['properties'] = {}
+
     if 'parameters' in cleaned_spec:
         clean_properties(cleaned_spec['parameters'])
 

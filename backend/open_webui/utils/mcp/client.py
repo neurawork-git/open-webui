@@ -91,6 +91,18 @@ class MCPClient:
 
             inputSchema = tool.inputSchema
 
+            # FORK: mcp-empty-properties
+            # OpenAI strict-mode rejects object schemas without 'properties'.
+            # Some MCP servers (e.g. Dropbox) emit {'type':'object'} for
+            # parameter-less tools, which breaks strict function calling with
+            # "Invalid schema for function 'X': In context=(), object schema missing properties".
+            if (
+                isinstance(inputSchema, dict)
+                and inputSchema.get('type') == 'object'
+                and 'properties' not in inputSchema
+            ):
+                inputSchema = {**inputSchema, 'properties': {}}
+
             # TODO: handle outputSchema if needed
             outputSchema = getattr(tool, 'outputSchema', None)
 
