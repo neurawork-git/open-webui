@@ -779,6 +779,51 @@ def merge_and_sort_query_results(query_results: list[dict], k: int) -> dict:
     }
 
 
+# FORK: per-kb-independent-retrieval
+def filter_results_by_relevance(query_result: dict, relevance_threshold: float) -> dict:
+    """
+    Filter query results by distance/score threshold.
+    Only keeps documents with distance/score >= relevance_threshold.
+
+    Args:
+        query_result: Dict with 'distances', 'documents', 'metadatas' keys
+        relevance_threshold: Minimum score to keep (0.0-1.0)
+
+    Returns:
+        Filtered query result dict (or original if no filtering applies)
+    """
+    if not query_result or not relevance_threshold or relevance_threshold <= 0:
+        return query_result
+
+    distances = query_result.get("distances", [[]])[0]
+    documents = query_result.get("documents", [[]])[0]
+    metadatas = query_result.get("metadatas", [[]])[0]
+
+    if not distances:
+        return query_result
+
+    filtered = [
+        (d, doc, meta)
+        for d, doc, meta in zip(distances, documents, metadatas)
+        if d >= relevance_threshold
+    ]
+
+    if not filtered:
+        return {
+            "distances": [[]],
+            "documents": [[]],
+            "metadatas": [[]],
+        }
+
+    filtered_distances, filtered_documents, filtered_metadatas = zip(*filtered)
+
+    return {
+        "distances": [list(filtered_distances)],
+        "documents": [list(filtered_documents)],
+        "metadatas": [list(filtered_metadatas)],
+    }
+
+
 def get_all_items_from_collections(collection_names: list[str]) -> dict:
     results = []
 
@@ -1405,6 +1450,10 @@ async def get_sources_from_items(
     hybrid_search,
     full_context=False,
     user: Optional[UserModel] = None,
+    # FORK: per-kb-independent-retrieval
+    enable_reranking: bool = True,
+    per_knowledge_settings: Optional[dict] = None,
+    base_settings: Optional[dict] = None,
 ):
     log.debug(f'items: {items} {queries} {embedding_function} {reranking_function} {full_context}')
 
@@ -1537,8 +1586,10 @@ async def get_sources_from_items(
                     collection_names.append(f'file-{item["id"]}')
 
         elif item.get('type') == 'collection':
-            # Manual Full Mode Toggle for Collection
-            knowledge_base = await Knowledges.get_knowledge_by_id(item.get('id'))
+            # FORK: per-kb-independent-retrieval
+            # Each KB queried independently with its own rag_settings overrides.
+            knowledge_id = item.get('id')
+            knowledge_base = await Knowledges.get_knowledge_by_id(knowledge_id)
 
             if knowledge_base and (
                 user.role == 'admin'
@@ -1550,41 +1601,95 @@ async def get_sources_from_items(
                     permission='read',
                 )
             ):
-                if item.get('context') == 'full' or request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL:
-                    if knowledge_base and (
-                        user.role == 'admin'
-                        or knowledge_base.user_id == user.id
-                        or await AccessGrants.has_access(
-                            user_id=user.id,
-                            resource_type='knowledge',
-                            resource_id=knowledge_base.id,
-                            permission='read',
-                        )
-                    ):
-                        files = await Knowledges.get_files_by_id(knowledge_base.id)
+                # Cascade lookup: kb_settings (highest precedence below UI toggle)
+                kb_settings = {}
+                if per_knowledge_settings and knowledge_id in per_knowledge_settings:
+                    kb_settings = per_knowledge_settings[knowledge_id]
+                    log.debug(f'Using per-KB settings for {knowledge_id}: {kb_settings}')
 
-                        documents = []
-                        metadatas = []
-                        for file in files:
-                            documents.append(file.data.get('content', ''))
-                            metadatas.append(
-                                {
-                                    'file_id': file.id,
-                                    'name': file.filename,
-                                    'source': file.filename,
-                                }
-                            )
-
-                        query_result = {
-                            'documents': [documents],
-                            'metadatas': [metadatas],
-                        }
+                # Cascade: UI toggle > per-KB setting > caller default
+                ui_full_context = item.get('context') == 'full'
+                kb_full_context = kb_settings.get('full_context')
+                if ui_full_context:
+                    effective_full_context = True
+                elif kb_full_context is not None:
+                    effective_full_context = kb_full_context
                 else:
-                    # Fallback to collection names
+                    effective_full_context = full_context
+
+                # Compute effective retrieval params for this KB
+                effective_r = kb_settings.get('relevance_threshold', r)
+                effective_k = kb_settings.get('top_k', k)
+                effective_k_reranker = kb_settings.get('top_k_reranker', k_reranker)
+                effective_hybrid_search = kb_settings.get('enable_hybrid_search', hybrid_search)
+                effective_hybrid_bm25_weight = kb_settings.get('hybrid_bm25_weight', hybrid_bm25_weight)
+                effective_enable_reranking = kb_settings.get('enable_reranking', enable_reranking)
+
+                log.info(
+                    f'KB retrieval: {knowledge_base.name} ({knowledge_id}) '
+                    f'full_context={effective_full_context} k={effective_k} '
+                    f'k_reranker={effective_k_reranker} r={effective_r} '
+                    f'hybrid={effective_hybrid_search} '
+                    f'bm25_weight={effective_hybrid_bm25_weight} '
+                    f'reranking={effective_enable_reranking}'
+                )
+
+                if effective_full_context or request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL:
+                    files = await Knowledges.get_files_by_id(knowledge_base.id)
+
+                    documents = []
+                    metadatas = []
+                    for file in files:
+                        documents.append(file.data.get('content', ''))
+                        metadatas.append(
+                            {
+                                'file_id': file.id,
+                                'name': file.filename,
+                                'source': file.filename,
+                            }
+                        )
+
+                    query_result = {
+                        'documents': [documents],
+                        'metadatas': [metadatas],
+                    }
+                else:
+                    # Independent KB-vector-search with effective_* params
                     if item.get('legacy'):
-                        collection_names = item.get('collection_names', [])
+                        kb_collection_names = item.get('collection_names', [])
                     else:
-                        collection_names.append(item['id'])
+                        kb_collection_names = [knowledge_id]
+
+                    kb_collection_names_set = set(kb_collection_names).difference(extracted_collections)
+                    if kb_collection_names_set:
+                        try:
+                            if effective_hybrid_search:
+                                query_result = await query_collection_with_hybrid_search(
+                                    collection_names=list(kb_collection_names_set),
+                                    queries=queries,
+                                    embedding_function=embedding_function,
+                                    k=effective_k,
+                                    reranking_function=reranking_function,
+                                    k_reranker=effective_k_reranker,
+                                    r=effective_r,
+                                    hybrid_bm25_weight=effective_hybrid_bm25_weight,
+                                    enable_enriched_texts=request.app.state.config.ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS,
+                                    enable_reranking=effective_enable_reranking,
+                                )
+                            else:
+                                query_result = await query_collection(
+                                    request,
+                                    collection_names=list(kb_collection_names_set),
+                                    queries=queries,
+                                    embedding_function=embedding_function,
+                                    k=effective_k,
+                                )
+                                if query_result and effective_r and effective_r > 0:
+                                    query_result = filter_results_by_relevance(query_result, effective_r)
+
+                            extracted_collections.extend(kb_collection_names_set)
+                        except Exception as e:
+                            log.exception(e)
 
         elif item.get('docs'):
             # BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL

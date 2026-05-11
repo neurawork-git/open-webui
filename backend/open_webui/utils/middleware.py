@@ -2049,11 +2049,30 @@ async def chat_completion_files_handler(
         if len(queries) == 0:
             queries = [get_last_user_message(body['messages']) or '']
 
+        # FORK: per-kb-independent-retrieval
+        # Build per-KB rag_settings dict for downstream get_sources_from_items.
+        # Each KB's meta.rag_settings is read and indexed by knowledge_id; the
+        # downstream branch then queries each KB with its own effective_* params.
+        per_knowledge_rag_settings = {}
+        knowledge_ids = [
+            item.get("id")
+            for item in files
+            if item.get("type") == "collection" and item.get("id")
+        ]
+        if knowledge_ids:
+            for kid in knowledge_ids:
+                kb = await Knowledges.get_knowledge_by_id(kid)
+                if kb and kb.meta and isinstance(kb.meta, dict):
+                    kb_rag = kb.meta.get("rag_settings")
+                    if kb_rag:
+                        per_knowledge_rag_settings[kid] = kb_rag
+                        log.debug(
+                            f"Found per-knowledge RAG settings for {kb.name} ({kid}): {kb_rag}"
+                        )
+
         # FORK: rag-settings-cascade
-        # Build global < user < model cascade. Per-KB cascade is deferred to a
-        # follow-up commit which extends get_sources_from_items with
-        # per_knowledge_settings; introducing it here without downstream support
-        # would be a pass-through stub (see tracker-Drift learning).
+        # Build global < user < model cascade (per-KB cascade applied independently
+        # inside get_sources_from_items per knowledge_id).
         global_settings = {
             "top_k": request.app.state.config.TOP_K,
             "top_k_reranker": request.app.state.config.TOP_K_RERANKER,
@@ -2129,6 +2148,13 @@ async def chat_completion_files_handler(
                     "full_context", request.app.state.config.RAG_FULL_CONTEXT
                 ),
                 user=user,
+                # FORK: per-kb-independent-retrieval
+                enable_reranking=base_settings.get(
+                    "enable_reranking",
+                    request.app.state.config.ENABLE_RAG_RERANKING,
+                ),
+                per_knowledge_settings=per_knowledge_rag_settings,
+                base_settings=base_settings,
             )
         except Exception as e:
             log.exception(e)
