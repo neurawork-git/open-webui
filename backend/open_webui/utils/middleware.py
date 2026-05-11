@@ -70,8 +70,9 @@ from open_webui.utils.files import (
 from open_webui.models.users import UserModel
 from open_webui.models.functions import Functions
 from open_webui.models.models import Models
+from open_webui.models.knowledge import Knowledges
 
-from open_webui.retrieval.utils import get_sources_from_items
+from open_webui.retrieval.utils import get_sources_from_items, merge_rag_settings
 
 
 from open_webui.utils.sanitize import sanitize_code
@@ -994,15 +995,28 @@ async def apply_source_context_to_messages(
     if not context:
         return messages
 
+    # FORK: knowledge-bases-template
+    knowledge_bases = build_knowledge_bases_string(sources)
+
     if RAG_SYSTEM_CONTEXT:
         return add_or_update_system_message(
-            await rag_template(request.app.state.config.RAG_TEMPLATE, context, user_message),
+            await rag_template(
+                request.app.state.config.RAG_TEMPLATE,
+                context,
+                user_message,
+                knowledge_bases,
+            ),
             messages,
             append=True,
         )
     else:
         return add_or_update_user_message(
-            await rag_template(request.app.state.config.RAG_TEMPLATE, context, user_message),
+            await rag_template(
+                request.app.state.config.RAG_TEMPLATE,
+                context,
+                user_message,
+                knowledge_bases,
+            ),
             messages,
             append=False,
         )
@@ -1948,6 +1962,38 @@ async def chat_image_generation_handler(request: Request, form_data: dict, extra
     return form_data
 
 
+# FORK: knowledge-bases-template
+def build_knowledge_bases_string(sources: list) -> str:
+    """
+    Build <kb> tag string from citation sources, listing unique knowledge
+    bases with their name and description. Values are HTML-escaped to
+    prevent injection attacks.
+
+    Format: <kb id="..." name="..." description="..."/>
+    """
+    knowledge_bases_seen = {}
+    for source in sources or []:
+        source_info = source.get('source', {}) or {}
+        kb_id = source_info.get('id')
+        if kb_id and kb_id not in knowledge_bases_seen:
+            knowledge_bases_seen[kb_id] = {
+                'name': source_info.get('name') or '',
+                'description': source_info.get('description') or '',
+            }
+
+    knowledge_bases_string = ''
+    for kb_id, kb_info in knowledge_bases_seen.items():
+        kb_name = html.escape(kb_info['name']) if kb_info['name'] else ''
+        kb_desc = html.escape(kb_info['description']) if kb_info['description'] else ''
+        knowledge_bases_string += (
+            f'<kb id="{html.escape(kb_id)}"'
+            + (f' name="{kb_name}"' if kb_name else '')
+            + (f' description="{kb_desc}"' if kb_desc else '')
+            + '/>' + chr(10)
+        )
+    return knowledge_bases_string.strip()
+
+
 async def chat_completion_files_handler(
     request: Request, body: dict, extra_params: dict, user: UserModel
 ) -> tuple[dict, dict[str, list]]:
@@ -2003,8 +2049,55 @@ async def chat_completion_files_handler(
         if len(queries) == 0:
             queries = [get_last_user_message(body['messages']) or '']
 
+        # FORK: rag-settings-cascade
+        # Build global < user < model cascade. Per-KB cascade is deferred to a
+        # follow-up commit which extends get_sources_from_items with
+        # per_knowledge_settings; introducing it here without downstream support
+        # would be a pass-through stub (see tracker-Drift learning).
+        global_settings = {
+            "top_k": request.app.state.config.TOP_K,
+            "top_k_reranker": request.app.state.config.TOP_K_RERANKER,
+            "relevance_threshold": request.app.state.config.RELEVANCE_THRESHOLD,
+            "enable_hybrid_search": request.app.state.config.ENABLE_RAG_HYBRID_SEARCH,
+            "hybrid_bm25_weight": request.app.state.config.HYBRID_BM25_WEIGHT,
+            "full_context": request.app.state.config.RAG_FULL_CONTEXT,
+        }
+
+        user_rag_settings = None
+        if user and hasattr(user, "settings") and user.settings:
+            user_settings_dict = (
+                user.settings
+                if isinstance(user.settings, dict)
+                else user.settings.model_dump()
+            )
+            user_rag_settings = user_settings_dict.get("rag_settings")
+            if user_rag_settings:
+                log.debug(f"Using per-user RAG settings: {user_rag_settings}")
+
+        model_rag_settings = None
+        model_id = body.get("model")
+        if model_id:
+            model = await Models.get_model_by_id(model_id)
+            if model and model.meta:
+                model_meta = (
+                    model.meta
+                    if isinstance(model.meta, dict)
+                    else model.meta.model_dump()
+                )
+                model_rag_settings = model_meta.get("rag_settings")
+                if model_rag_settings:
+                    log.debug(
+                        f"Using per-model RAG settings from {model_id}: {model_rag_settings}"
+                    )
+
+        base_settings = merge_rag_settings(
+            global_settings, user_rag_settings, model_rag_settings
+        )
+        log.debug(f"Base RAG settings (global < user < model): {base_settings}")
+
         try:
             # Directly await async get_sources_from_items (no thread needed - fully async now)
+            # FORK: rag-settings-cascade — base_settings overrides 6 RAG params
             sources = await get_sources_from_items(
                 request=request,
                 items=files,
@@ -2012,17 +2105,29 @@ async def chat_completion_files_handler(
                 embedding_function=lambda query, prefix: request.app.state.EMBEDDING_FUNCTION(
                     query, prefix=prefix, user=user
                 ),
-                k=request.app.state.config.TOP_K,
+                k=base_settings.get("top_k", request.app.state.config.TOP_K),
                 reranking_function=(
                     (lambda query, documents: request.app.state.RERANKING_FUNCTION(query, documents, user=user))
                     if request.app.state.RERANKING_FUNCTION
                     else None
                 ),
-                k_reranker=request.app.state.config.TOP_K_RERANKER,
-                r=request.app.state.config.RELEVANCE_THRESHOLD,
-                hybrid_bm25_weight=request.app.state.config.HYBRID_BM25_WEIGHT,
-                hybrid_search=request.app.state.config.ENABLE_RAG_HYBRID_SEARCH,
-                full_context=all_full_context or request.app.state.config.RAG_FULL_CONTEXT,
+                k_reranker=base_settings.get(
+                    "top_k_reranker", request.app.state.config.TOP_K_RERANKER
+                ),
+                r=base_settings.get(
+                    "relevance_threshold", request.app.state.config.RELEVANCE_THRESHOLD
+                ),
+                hybrid_bm25_weight=base_settings.get(
+                    "hybrid_bm25_weight", request.app.state.config.HYBRID_BM25_WEIGHT
+                ),
+                hybrid_search=base_settings.get(
+                    "enable_hybrid_search",
+                    request.app.state.config.ENABLE_RAG_HYBRID_SEARCH,
+                ),
+                full_context=all_full_context
+                or base_settings.get(
+                    "full_context", request.app.state.config.RAG_FULL_CONTEXT
+                ),
                 user=user,
             )
         except Exception as e:
@@ -4753,10 +4858,16 @@ async def streaming_chat_response_handler(response, ctx):
                             )
                             source_context = source_context.strip()
                             if source_context:
+                                # FORK: knowledge-bases-template
+                                knowledge_bases = build_knowledge_bases_string(
+                                    (metadata.get('sources', []) or [])
+                                    + (all_tool_call_sources or [])
+                                )
                                 rag_content = await rag_template(
                                     request.app.state.config.RAG_TEMPLATE,
                                     source_context,
                                     user_message,
+                                    knowledge_bases,
                                 )
                                 if RAG_SYSTEM_CONTEXT:
                                     form_data['messages'] = add_or_update_system_message(
