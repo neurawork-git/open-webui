@@ -609,6 +609,9 @@
 			size: file.size,
 			error: '',
 			itemId: tempItemId,
+			// Default chat file uploads to full-context injection instead of RAG retrieval.
+			// Images skip this — they bypass the doc pipeline entirely and go multimodal.
+			...(file.type?.startsWith('image/') ? {} : { context: 'full' }),
 			...itemData
 		};
 
