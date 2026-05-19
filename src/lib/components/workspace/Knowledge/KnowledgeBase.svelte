@@ -27,8 +27,10 @@
 	import {
 		addFileToKnowledgeById,
 		getKnowledgeById,
-		importSharePointFolder,
-		importSharePointSite,
+		listSharePointFolder,
+		listSharePointSiteFiles,
+		importSharePointFile,
+		persistSharePointSource,
 		reimportSharePointFolder,
 		reindexKnowledgeById,
 		removeFileFromKnowledgeById,
@@ -368,44 +370,104 @@
 		}
 	};
 
+	// Per-file streaming import: list once, then call /import-file for each
+	// entry so the file list updates after every item (mirrors the local
+	// folder-upload UX). Progress + per-file errors are surfaced via toast.
+	const runSharePointPerFileImport = async (
+		listing: Awaited<ReturnType<typeof listSharePointFolder>>,
+		label: string
+	) => {
+		if (!knowledge) return;
+
+		const files = listing.files ?? [];
+		const total = files.length;
+
+		if (total === 0) {
+			toast.info($i18n.t('{{label}} has no importable files', { label }));
+			return;
+		}
+
+		if (listing.truncated) {
+			toast.warning(
+				$i18n.t(
+					'{{label}} too large — stopped after {{count}} files. Split into smaller folders and re-import.',
+					{ label, count: total }
+				)
+			);
+		}
+
+		let imported = 0;
+		let failed = 0;
+		const progressToastId = `sharepoint-progress-${knowledge.id}`;
+		const updateProgress = () => {
+			const done = imported + failed;
+			const percentage = (done / total) * 100;
+			toast.info(
+				$i18n.t('Upload Progress: {{uploadedFiles}}/{{totalFiles}} ({{percentage}}%)', {
+					uploadedFiles: done,
+					totalFiles: total,
+					percentage: percentage.toFixed(0)
+				}),
+				{ id: progressToastId }
+			);
+		};
+
+		updateProgress();
+
+		for (const file of files) {
+			try {
+				await importSharePointFile(
+					localStorage.token,
+					knowledge.id,
+					file.drive_id,
+					file.item_id,
+					file.path
+				);
+				imported++;
+			} catch (e) {
+				failed++;
+				console.error('SharePoint per-file import failed', file.display_name, e);
+				toast.error(
+					$i18n.t('Failed to import "{{file}}": {{error}}', {
+						file: file.display_name,
+						error: typeof e === 'string' ? e : (e as Error)?.message ?? 'unknown'
+					})
+				);
+			}
+			updateProgress();
+			// Refresh the visible file list so each new file pops in.
+			await getItemsPage();
+		}
+
+		toast.dismiss(progressToastId);
+
+		if (imported > 0) {
+			toast.success(
+				$i18n.t('Imported {{count}} files from "{{folder}}"', {
+					count: imported,
+					folder: listing.folder_name
+				})
+			);
+			if (listing.source) {
+				await persistSharePointSource(localStorage.token, knowledge.id, listing.source);
+			}
+		}
+		if (failed > 0) {
+			toast.warning($i18n.t('{{count}} files failed to import', { count: failed }));
+		}
+	};
+
 	const sharePointSiteImportHandler = async (siteId: string, siteName: string) => {
 		if (!knowledge) return;
 		sharePointImporting = true;
 
 		try {
-			const result = await importSharePointSite(
+			const listing = await listSharePointSiteFiles(
 				localStorage.token,
 				knowledge.id,
 				siteId
 			);
-
-			if (result) {
-				if (result.imported > 0) {
-					toast.success(
-						$i18n.t('Imported {{count}} files from site "{{site}}"', {
-							count: result.imported,
-							site: result.folder_name || siteName
-						})
-					);
-				}
-				if (result.failed > 0) {
-					toast.warning(
-						$i18n.t('{{count}} files failed to import', { count: result.failed })
-					);
-				}
-				if (result.truncated) {
-					toast.warning(
-						$i18n.t(
-							'Site too large — stopped after {{count}} files. Pick individual folders instead.',
-							{ count: result.total_files }
-						)
-					);
-				}
-				if (result.imported === 0 && result.failed === 0) {
-					toast.info($i18n.t('Site has no importable files'));
-				}
-				await getItemsPage();
-			}
+			await runSharePointPerFileImport(listing, listing.folder_name || siteName);
 		} catch (e) {
 			toast.error(`${e}`);
 		} finally {
@@ -418,40 +480,13 @@
 		sharePointImporting = true;
 
 		try {
-			const result = await importSharePointFolder(
+			const listing = await listSharePointFolder(
 				localStorage.token,
 				knowledge.id,
 				driveId,
 				itemId
 			);
-
-			if (result) {
-				if (result.imported > 0) {
-					toast.success(
-						$i18n.t('Imported {{count}} files from "{{folder}}"', {
-							count: result.imported,
-							folder: result.folder_name
-						})
-					);
-				}
-				if (result.failed > 0) {
-					toast.warning(
-						$i18n.t('{{count}} files failed to import', { count: result.failed })
-					);
-				}
-				if (result.truncated) {
-					toast.warning(
-						$i18n.t(
-							'Folder too large — stopped after {{count}} files. Split into smaller folders and re-import.',
-							{ count: result.total_files }
-						)
-					);
-				}
-				if (result.imported === 0 && result.failed === 0) {
-					toast.info($i18n.t('Folder is empty — no files to import'));
-				}
-				await getItemsPage();
-			}
+			await runSharePointPerFileImport(listing, listing.folder_name);
 		} catch (e) {
 			toast.error(`${e}`);
 		} finally {

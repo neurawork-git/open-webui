@@ -1351,6 +1351,75 @@ def _translate_graph_error(e: httpx.HTTPStatusError) -> HTTPException:
     )
 
 
+async def _import_single_graph_file(
+    request: Request,
+    knowledge_id: str,
+    graph: GraphClient,
+    graph_file: GraphFileItem,
+    user,
+    db: AsyncSession,
+) -> str:
+    """Download one Graph file and feed it through the KB upload pipeline.
+
+    Returns the new file_id on success. Caller is responsible for wrapping
+    exceptions into per-file error records.
+    """
+    display_name = _build_display_filename(graph_file.path, graph_file.name)
+
+    if graph_file.download_url:
+        content_bytes = await graph.download_file(graph_file.download_url)
+    elif graph_file.drive_id:
+        # Tenant policy (Sensitivity Label / DLP) can strip
+        # @microsoft.graph.downloadUrl from $select responses. Fall back
+        # to the explicit /content endpoint which respects the Bearer
+        # token's Files.Read.All scope.
+        log.info(
+            f"SharePoint import: downloadUrl missing for {display_name}, "
+            f"using /content fallback (drive={graph_file.drive_id})"
+        )
+        content_bytes = await graph.download_file_by_id(
+            graph_file.drive_id, graph_file.id
+        )
+    else:
+        raise RuntimeError("No download URL provided by Graph API")
+
+    upload_file = UploadFile(
+        file=io.BytesIO(content_bytes),
+        filename=display_name,
+        headers={
+            "content-type": graph_file.content_type
+            or "application/octet-stream"
+        },
+    )
+
+    file_item = await upload_file_handler(
+        request,
+        file=upload_file,
+        metadata={"knowledge_id": knowledge_id},
+        process=True,
+        process_in_background=False,
+        user=user,
+        db=db,
+    )
+    file_id = (
+        file_item.get("id") if isinstance(file_item, dict) else file_item.id
+    )
+
+    await process_file(
+        request,
+        ProcessFileForm(file_id=file_id, collection_name=knowledge_id),
+        user=user,
+        db=db,
+    )
+    await Knowledges.add_file_to_knowledge_by_id(
+        knowledge_id=knowledge_id,
+        file_id=file_id,
+        user_id=user.id,
+        db=db,
+    )
+    return file_id
+
+
 async def _import_graph_files(
     request: Request,
     knowledge_id: str,
@@ -1363,7 +1432,8 @@ async def _import_graph_files(
 
     Returns (imported_count, errors). Files without a download URL and any
     exception during download/processing are captured per-file instead of
-    aborting the whole import.
+    aborting the whole import. Kept for legacy bulk endpoints — new frontends
+    should drive the per-file loop themselves.
     """
     imported = 0
     errors: list[SharePointImportFileError] = []
@@ -1371,64 +1441,8 @@ async def _import_graph_files(
     for graph_file in files:
         display_name = _build_display_filename(graph_file.path, graph_file.name)
         try:
-            if graph_file.download_url:
-                content_bytes = await graph.download_file(graph_file.download_url)
-            elif graph_file.drive_id:
-                # Tenant policy (Sensitivity Label / DLP) can strip
-                # @microsoft.graph.downloadUrl from $select responses. Fall
-                # back to the explicit /content endpoint which respects the
-                # Bearer token's Files.Read.All scope.
-                log.info(
-                    f"SharePoint import: downloadUrl missing for {display_name}, "
-                    f"using /content fallback (drive={graph_file.drive_id})"
-                )
-                content_bytes = await graph.download_file_by_id(
-                    graph_file.drive_id, graph_file.id
-                )
-            else:
-                log.warning(
-                    f"SharePoint import: no download URL and no drive_id for "
-                    f"{display_name} (size={graph_file.size}, mime={graph_file.content_type})"
-                )
-                errors.append(SharePointImportFileError(
-                    filename=display_name,
-                    error="No download URL provided by Graph API",
-                ))
-                continue
-
-            upload_file = UploadFile(
-                file=io.BytesIO(content_bytes),
-                filename=display_name,
-                headers={
-                    "content-type": graph_file.content_type
-                    or "application/octet-stream"
-                },
-            )
-
-            file_item = await upload_file_handler(
-                request,
-                file=upload_file,
-                metadata={"knowledge_id": knowledge_id},
-                process=True,
-                process_in_background=False,
-                user=user,
-                db=db,
-            )
-            file_id = (
-                file_item.get("id") if isinstance(file_item, dict) else file_item.id
-            )
-
-            await process_file(
-                request,
-                ProcessFileForm(file_id=file_id, collection_name=knowledge_id),
-                user=user,
-                db=db,
-            )
-            await Knowledges.add_file_to_knowledge_by_id(
-                knowledge_id=knowledge_id,
-                file_id=file_id,
-                user_id=user.id,
-                db=db,
+            await _import_single_graph_file(
+                request, knowledge_id, graph, graph_file, user, db
             )
             imported += 1
         except Exception as e:
@@ -1566,6 +1580,232 @@ async def import_sharepoint_site(
         skipped_folders=[],
         truncated=listing.truncated,
     )
+
+
+############################
+# SharePoint per-file streaming endpoints (preferred over bulk import)
+############################
+
+
+class SharePointFileEntry(BaseModel):
+    """One importable file, returned by the list endpoints. Mirrors the
+    relevant fields of GraphFileItem so the frontend can hold state without
+    a second Graph round-trip per file."""
+
+    drive_id: str
+    item_id: str
+    name: str
+    size: int
+    content_type: Optional[str] = None
+    path: str = ""
+    display_name: str
+
+
+class SharePointListResult(BaseModel):
+    knowledge_id: str
+    folder_name: str
+    files: list[SharePointFileEntry]
+    skipped_folders: list[str] = []
+    truncated: bool = False
+    # Echoed back so the frontend can persist the import source after the
+    # per-file loop finishes (legacy bulk endpoint did this server-side).
+    source: dict
+
+
+def _to_file_entries(files: list[GraphFileItem]) -> list[SharePointFileEntry]:
+    return [
+        SharePointFileEntry(
+            drive_id=f.drive_id,
+            item_id=f.id,
+            name=f.name,
+            size=f.size,
+            content_type=f.content_type,
+            path=f.path,
+            display_name=_build_display_filename(f.path, f.name),
+        )
+        for f in files
+    ]
+
+
+@router.post("/{id}/sharepoint/list-folder", response_model=SharePointListResult)
+async def list_sharepoint_folder(
+    id: str,
+    form_data: SharePointImportForm,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """List every importable file under a SharePoint/OneDrive folder.
+
+    Walks subfolders recursively but does NOT download anything. The
+    frontend then loops over the returned entries and calls
+    `/sharepoint/import-file` for each, mirroring the local folder-upload UX.
+    """
+    knowledge = await Knowledges.get_knowledge_by_id(id=id, db=db)
+    await _assert_knowledge_write_access(knowledge, user, db)
+
+    access_token = await _get_microsoft_access_token(user, db)
+    graph = GraphClient(access_token)
+    try:
+        listing = await graph.list_folder(form_data.drive_id, form_data.item_id)
+    except httpx.HTTPStatusError as e:
+        raise _translate_graph_error(e)
+
+    return SharePointListResult(
+        knowledge_id=id,
+        folder_name=listing.folder_name,
+        files=_to_file_entries(listing.files),
+        skipped_folders=listing.skipped_folders,
+        truncated=listing.truncated,
+        source={
+            "type": "folder",
+            "drive_id": form_data.drive_id,
+            "item_id": form_data.item_id,
+            "folder_name": listing.folder_name,
+            "folder_path": listing.folder_path,
+        },
+    )
+
+
+@router.post("/{id}/sharepoint/list-site", response_model=SharePointListResult)
+async def list_sharepoint_site(
+    id: str,
+    form_data: SharePointSiteImportForm,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """List every importable file across every document library of a SharePoint site."""
+    knowledge = await Knowledges.get_knowledge_by_id(id=id, db=db)
+    await _assert_knowledge_write_access(knowledge, user, db)
+
+    access_token = await _get_microsoft_access_token(user, db)
+    graph = GraphClient(access_token)
+    try:
+        listing = await graph.list_site(form_data.site_id)
+    except httpx.HTTPStatusError as e:
+        raise _translate_graph_error(e)
+
+    return SharePointListResult(
+        knowledge_id=id,
+        folder_name=listing.site_name,
+        files=_to_file_entries(listing.files),
+        skipped_folders=[],
+        truncated=listing.truncated,
+        source={
+            "type": "site",
+            "site_id": listing.site_id,
+            "site_name": listing.site_name,
+            "site_url": listing.site_url,
+            "drive_count": len(listing.drives),
+        },
+    )
+
+
+class SharePointImportFileForm(BaseModel):
+    drive_id: str
+    item_id: str
+    # Path prefix from the listing (e.g. "Invoices/2024/"). Used to rebuild
+    # the same display filename the bulk endpoint produces. Empty for
+    # root-level imports.
+    path: str = ""
+
+
+class SharePointImportFileResult(BaseModel):
+    knowledge_id: str
+    filename: str
+    file_id: str
+
+
+@router.post(
+    "/{id}/sharepoint/import-file",
+    response_model=SharePointImportFileResult,
+)
+async def import_sharepoint_file(
+    request: Request,
+    id: str,
+    form_data: SharePointImportFileForm,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Import exactly one SharePoint file into the knowledge base.
+
+    Designed to be called in a loop by the frontend, one HTTP request per
+    file, so the UI can stream per-file progress like local folder upload.
+    """
+    knowledge = await Knowledges.get_knowledge_by_id(id=id, db=db)
+    await _assert_knowledge_write_access(knowledge, user, db)
+
+    access_token = await _get_microsoft_access_token(user, db)
+    graph = GraphClient(access_token)
+
+    # Resolve current metadata (name, size, MIME) from Graph. We don't trust
+    # the frontend to echo back the name — the file may have been renamed
+    # between list and import.
+    try:
+        meta_resp = await graph._client().get(
+            f"{GRAPH_BASE}/drives/{form_data.drive_id}/items/{form_data.item_id}"
+            f"?$select=id,name,size,file,@microsoft.graph.downloadUrl",
+            headers=graph.headers,
+        )
+        meta_resp.raise_for_status()
+        meta = meta_resp.json()
+    except httpx.HTTPStatusError as e:
+        raise _translate_graph_error(e)
+
+    graph_file = GraphFileItem(
+        id=meta["id"],
+        name=meta.get("name", form_data.item_id),
+        size=meta.get("size", 0),
+        content_type=meta.get("file", {}).get("mimeType"),
+        download_url=meta.get("@microsoft.graph.downloadUrl"),
+        path=form_data.path,
+        drive_id=form_data.drive_id,
+    )
+
+    display_name = _build_display_filename(graph_file.path, graph_file.name)
+    try:
+        file_id = await _import_single_graph_file(
+            request, id, graph, graph_file, user, db
+        )
+    except Exception as e:
+        log.warning(f"SharePoint import-file: failed for {display_name}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Import failed for {display_name}: {e}",
+        )
+
+    return SharePointImportFileResult(
+        knowledge_id=id,
+        filename=display_name,
+        file_id=file_id,
+    )
+
+
+class SharePointPersistSourceForm(BaseModel):
+    """Frontend calls this once after the per-file loop completes, so the
+    KB remembers where it was imported from (parity with legacy bulk path)."""
+
+    source: dict
+
+
+@router.post("/{id}/sharepoint/persist-source")
+async def persist_sharepoint_source(
+    id: str,
+    form_data: SharePointPersistSourceForm,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    knowledge = await Knowledges.get_knowledge_by_id(id=id, db=db)
+    await _assert_knowledge_write_access(knowledge, user, db)
+
+    source = dict(form_data.source)
+    source["last_imported_at"] = int(time.time())
+    await _persist_sharepoint_source(knowledge, source, db)
+    return {"ok": True}
+
+
+############################
+# SharePoint site search (used by both legacy and per-file flows)
+############################
 
 
 class SharePointSiteSearchResult(BaseModel):

@@ -830,3 +830,126 @@ export const exportKnowledgeById = async (token: string, id: string) => {
 
 	return res;
 };
+
+// ---------------------------------------------------------------------------
+// SharePoint per-file streaming API (preferred over the bulk import endpoints)
+// ---------------------------------------------------------------------------
+
+export type SharePointFileEntry = {
+	drive_id: string;
+	item_id: string;
+	name: string;
+	size: number;
+	content_type: string | null;
+	path: string;
+	display_name: string;
+};
+
+export type SharePointListResult = {
+	knowledge_id: string;
+	folder_name: string;
+	files: SharePointFileEntry[];
+	skipped_folders: string[];
+	truncated: boolean;
+	source: Record<string, unknown>;
+};
+
+const postSharePointList = async (
+	token: string,
+	url: string,
+	body: Record<string, unknown>
+): Promise<SharePointListResult> => {
+	let error = null;
+	const res = await fetch(url, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify(body)
+	})
+		.then(async (r) => {
+			if (!r.ok) throw await r.json();
+			return r.json();
+		})
+		.catch((err) => {
+			error = err.detail ?? err;
+			console.error(err);
+			return null;
+		});
+	if (error) throw error;
+	return res;
+};
+
+export const listSharePointFolder = (
+	token: string,
+	id: string,
+	driveId: string,
+	itemId: string
+): Promise<SharePointListResult> =>
+	postSharePointList(
+		token,
+		`${WEBUI_API_BASE_URL}/knowledge/${id}/sharepoint/list-folder`,
+		{ drive_id: driveId, item_id: itemId }
+	);
+
+export const listSharePointSiteFiles = (
+	token: string,
+	id: string,
+	siteId: string
+): Promise<SharePointListResult> =>
+	postSharePointList(
+		token,
+		`${WEBUI_API_BASE_URL}/knowledge/${id}/sharepoint/list-site`,
+		{ site_id: siteId }
+	);
+
+export const importSharePointFile = async (
+	token: string,
+	id: string,
+	driveId: string,
+	itemId: string,
+	path: string = ''
+): Promise<{ knowledge_id: string; filename: string; file_id: string }> => {
+	let error = null;
+	const res = await fetch(
+		`${WEBUI_API_BASE_URL}/knowledge/${id}/sharepoint/import-file`,
+		{
+			method: 'POST',
+			headers: {
+				Accept: 'application/json',
+				'Content-Type': 'application/json',
+				authorization: `Bearer ${token}`
+			},
+			body: JSON.stringify({ drive_id: driveId, item_id: itemId, path })
+		}
+	)
+		.then(async (r) => {
+			if (!r.ok) throw await r.json();
+			return r.json();
+		})
+		.catch((err) => {
+			error = err.detail ?? err;
+			console.error(err);
+			return null;
+		});
+	if (error) throw error;
+	return res;
+};
+
+export const persistSharePointSource = async (
+	token: string,
+	id: string,
+	source: Record<string, unknown>
+): Promise<void> => {
+	await fetch(`${WEBUI_API_BASE_URL}/knowledge/${id}/sharepoint/persist-source`, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify({ source })
+	}).catch((err) => console.error(err));
+};
