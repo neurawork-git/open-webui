@@ -1371,14 +1371,30 @@ async def _import_graph_files(
     for graph_file in files:
         display_name = _build_display_filename(graph_file.path, graph_file.name)
         try:
-            if not graph_file.download_url:
+            if graph_file.download_url:
+                content_bytes = await graph.download_file(graph_file.download_url)
+            elif graph_file.drive_id:
+                # Tenant policy (Sensitivity Label / DLP) can strip
+                # @microsoft.graph.downloadUrl from $select responses. Fall
+                # back to the explicit /content endpoint which respects the
+                # Bearer token's Files.Read.All scope.
+                log.info(
+                    f"SharePoint import: downloadUrl missing for {display_name}, "
+                    f"using /content fallback (drive={graph_file.drive_id})"
+                )
+                content_bytes = await graph.download_file_by_id(
+                    graph_file.drive_id, graph_file.id
+                )
+            else:
+                log.warning(
+                    f"SharePoint import: no download URL and no drive_id for "
+                    f"{display_name} (size={graph_file.size}, mime={graph_file.content_type})"
+                )
                 errors.append(SharePointImportFileError(
                     filename=display_name,
                     error="No download URL provided by Graph API",
                 ))
                 continue
-
-            content_bytes = await graph.download_file(graph_file.download_url)
 
             upload_file = UploadFile(
                 file=io.BytesIO(content_bytes),

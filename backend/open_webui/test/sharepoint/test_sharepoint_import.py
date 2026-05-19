@@ -182,6 +182,52 @@ class TestSharePointImport:
 
     @pytest.mark.asyncio
     @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
+    @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
+    @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
+    @patch(f"{_KNOWLEDGE_MOD}.upload_file_handler", new_callable=AsyncMock)
+    @patch(f"{_KNOWLEDGE_MOD}.process_file", new_callable=AsyncMock)
+    async def test_missing_download_url_falls_back_to_content_endpoint(
+        self, mock_process, mock_upload, mock_graph_cls, mock_oauth, mock_kb
+    ):
+        """File without download_url but with drive_id → /content fallback used."""
+        from open_webui.routers.knowledge import import_sharepoint_folder, SharePointImportForm
+
+        mock_kb.get_knowledge_by_id = AsyncMock(return_value=_make_knowledge())
+        mock_kb.add_file_to_knowledge_by_id = AsyncMock()
+        mock_kb.update_knowledge_by_id = AsyncMock()
+        mock_kb.get_file_metadatas_by_id = AsyncMock(return_value=[])
+        mock_oauth.get_session_by_provider_and_user_id = AsyncMock(return_value=_make_oauth_session())
+
+        files = [
+            GraphFileItem(
+                id="f1", name="restricted.pdf", size=4096,
+                content_type="application/pdf",
+                download_url=None,
+                drive_id=DRIVE_ID,
+            ),
+        ]
+        graph_instance = AsyncMock()
+        graph_instance.list_folder.return_value = _make_folder_listing(files=files)
+        graph_instance.download_file_by_id.return_value = b"restricted content"
+        mock_graph_cls.return_value = graph_instance
+
+        mock_upload.return_value = {"status": True, "id": "file-id-1"}
+
+        result = await import_sharepoint_folder(
+            request=MagicMock(),
+            id=KNOWLEDGE_ID,
+            form_data=SharePointImportForm(drive_id=DRIVE_ID, item_id=ITEM_ID),
+            user=_make_user(),
+            db=MagicMock(),
+        )
+
+        assert result.imported == 1
+        assert result.failed == 0
+        graph_instance.download_file.assert_not_called()
+        graph_instance.download_file_by_id.assert_called_once_with(DRIVE_ID, "f1")
+
+    @pytest.mark.asyncio
+    @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
     async def test_knowledge_not_found(self, mock_kb):
         """Invalid KB ID → 400."""
         from open_webui.routers.knowledge import import_sharepoint_folder, SharePointImportForm

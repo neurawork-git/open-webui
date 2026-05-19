@@ -22,6 +22,9 @@ class GraphFileItem(BaseModel):
     # Relative path from the import root, "/" separated, e.g. "Invoices/2024/".
     # Empty string when the file sits at the root of the import.
     path: str = ""
+    # Drive that owns the item — needed to fall back to /drives/{id}/items/{id}/content
+    # when the tenant suppresses @microsoft.graph.downloadUrl from $select responses.
+    drive_id: str = ""
 
 
 class GraphFolderListing(BaseModel):
@@ -184,6 +187,7 @@ class GraphClient:
                         content_type=item.get("file", {}).get("mimeType"),
                         download_url=item.get("@microsoft.graph.downloadUrl"),
                         path=path,
+                        drive_id=drive_id,
                     )
                 )
 
@@ -482,3 +486,23 @@ class GraphClient:
         finally:
             if self._http_client is None:
                 await client.aclose()
+
+    async def download_file_by_id(self, drive_id: str, item_id: str) -> bytes:
+        """Fallback download via /drives/{id}/items/{id}/content.
+
+        Used when the tenant suppresses @microsoft.graph.downloadUrl in
+        $select responses (e.g. Sensitivity-Label or DLP policy). The
+        endpoint returns 302 to a short-lived pre-signed URL, which is
+        why follow_redirects must be enabled on the request.
+        """
+        url = f"{GRAPH_BASE}/drives/{drive_id}/items/{item_id}/content"
+        if self._http_client is not None:
+            resp = await self._http_client.get(
+                url, headers=self.headers, follow_redirects=True
+            )
+            resp.raise_for_status()
+            return resp.content
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            resp = await client.get(url, headers=self.headers)
+            resp.raise_for_status()
+            return resp.content
