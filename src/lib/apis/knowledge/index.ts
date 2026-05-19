@@ -544,3 +544,272 @@ export const exportKnowledgeById = async (token: string, id: string) => {
 
 	return res;
 };
+export const importSharePointFolder = async (
+	token: string,
+	id: string,
+	driveId: string,
+	itemId: string
+) => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/knowledge/${id}/sharepoint/import`, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify({
+			drive_id: driveId,
+			item_id: itemId
+		})
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.then((json) => {
+			return json;
+		})
+		.catch((err) => {
+			error = err.detail;
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const importSharePointSite = async (token: string, id: string, siteId: string) => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/knowledge/${id}/sharepoint/import-site`, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify({ site_id: siteId })
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail;
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export type SharePointSiteSearchResult = {
+	id: string;
+	name: string;
+	display_name: string;
+	web_url: string;
+};
+
+export type SharePointSitesPage = {
+	sites: SharePointSiteSearchResult[];
+	next_link: string | null;
+};
+
+export type SharePointDriveSummary = {
+	id: string;
+	name: string;
+	drive_type: string;
+	root_item_id: string;
+	total_size: number;
+};
+
+export type SharePointSiteDrives = {
+	site_name: string;
+	site_url: string;
+	drives: SharePointDriveSummary[];
+};
+
+export type SharePointChildItem = {
+	id: string;
+	name: string;
+	is_folder: boolean;
+	size: number;
+	child_count: number;
+	content_type?: string | null;
+};
+
+export type SharePointChildren = {
+	parent_name: string;
+	parent_size: number;
+	folders: SharePointChildItem[];
+	files: SharePointChildItem[];
+	next_link: string | null;
+};
+
+const throwing = (res: any) => {
+	if (res === null) throw new Error('Request failed');
+	return res;
+};
+
+export const listSharePointSites = async (
+	token: string,
+	query: string = '*',
+	nextLink: string | null = null
+): Promise<SharePointSitesPage> => {
+	const params = new URLSearchParams();
+	if (query) params.set('query', query);
+	if (nextLink) params.set('next_link', nextLink);
+
+	const res = await fetch(
+		`${WEBUI_API_BASE_URL}/knowledge/sharepoint/sites?${params.toString()}`,
+		{
+			method: 'GET',
+			headers: { Accept: 'application/json', authorization: `Bearer ${token}` }
+		}
+	).then(async (r) => {
+		if (!r.ok) throw await r.json();
+		return r.json();
+	});
+	return throwing(res);
+};
+
+export const listSharePointSiteDrives = async (
+	token: string,
+	siteId: string
+): Promise<SharePointSiteDrives> => {
+	const res = await fetch(
+		`${WEBUI_API_BASE_URL}/knowledge/sharepoint/sites/${encodeURIComponent(siteId)}/drives`,
+		{
+			method: 'GET',
+			headers: { Accept: 'application/json', authorization: `Bearer ${token}` }
+		}
+	).then(async (r) => {
+		if (!r.ok) throw await r.json();
+		return r.json();
+	});
+	return throwing(res);
+};
+
+export const listSharePointFolderChildren = async (
+	token: string,
+	driveId: string,
+	itemId: string,
+	nextLink: string | null = null
+): Promise<SharePointChildren> => {
+	const params = new URLSearchParams();
+	if (nextLink) params.set('next_link', nextLink);
+
+	const res = await fetch(
+		`${WEBUI_API_BASE_URL}/knowledge/sharepoint/drives/${encodeURIComponent(driveId)}/items/${encodeURIComponent(itemId)}/children?${params.toString()}`,
+		{
+			method: 'GET',
+			headers: { Accept: 'application/json', authorization: `Bearer ${token}` }
+		}
+	).then(async (r) => {
+		if (!r.ok) throw await r.json();
+		return r.json();
+	});
+	return throwing(res);
+};
+
+export const searchSharePointSites = async (
+	token: string,
+	query: string
+): Promise<SharePointSiteSearchResult[]> => {
+	let error = null;
+
+	const res = await fetch(
+		`${WEBUI_API_BASE_URL}/knowledge/sharepoint/sites/search?query=${encodeURIComponent(query)}`,
+		{
+			method: 'GET',
+			headers: {
+				Accept: 'application/json',
+				authorization: `Bearer ${token}`
+			}
+		}
+	)
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail;
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res ?? [];
+};
+
+export const reimportSharePointFolder = async (token: string, id: string) => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/knowledge/${id}/sharepoint/reimport`, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.then((json) => {
+			return json;
+		})
+		.catch((err) => {
+			error = err.detail;
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const reindexKnowledgeById = async (token: string, id: string) => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/knowledge/${id}/reindex`, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail;
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
