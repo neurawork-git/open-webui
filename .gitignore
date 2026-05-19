@@ -323,6 +323,13 @@ migration_scripts/venv/
 # AI assistant directories
 .claude/
 .serena/
+.repowise/
+
+# Stray PowerShell redirect artifact (Windows)
+/nul
+
+# Local fork-specific PRPs (not part of upstream)
+PRPs/fork-rescue-mission.md
 
 # Config dumps with secrets
 migration_scripts/configs_dump.json
