@@ -976,3 +976,236 @@ class TestReimportDispatch:
                 db=MagicMock(),
             )
         assert exc_info.value.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Per-file streaming endpoints (preferred over bulk import)
+# ---------------------------------------------------------------------------
+
+
+class TestSharePointListFolder:
+    @pytest.mark.asyncio
+    @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
+    @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
+    @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
+    async def test_returns_flat_file_entries_with_display_name(
+        self, mock_graph_cls, mock_oauth, mock_kb
+    ):
+        from open_webui.routers.knowledge import (
+            list_sharepoint_folder,
+            SharePointImportForm,
+        )
+
+        mock_kb.get_knowledge_by_id = AsyncMock(return_value=_make_knowledge())
+        mock_oauth.get_session_by_provider_and_user_id = AsyncMock(
+            return_value=_make_oauth_session()
+        )
+
+        files = [
+            GraphFileItem(
+                id="f1", name="report.pdf", size=1024,
+                content_type="application/pdf",
+                download_url="https://cdn.example.com/report.pdf",
+                drive_id=DRIVE_ID,
+                path="Invoices/2024/",
+            ),
+        ]
+        graph_instance = AsyncMock()
+        graph_instance.list_folder.return_value = _make_folder_listing(files=files)
+        mock_graph_cls.return_value = graph_instance
+
+        result = await list_sharepoint_folder(
+            id=KNOWLEDGE_ID,
+            form_data=SharePointImportForm(drive_id=DRIVE_ID, item_id=ITEM_ID),
+            user=_make_user(),
+            db=MagicMock(),
+        )
+
+        assert result.knowledge_id == KNOWLEDGE_ID
+        assert len(result.files) == 1
+        entry = result.files[0]
+        assert entry.drive_id == DRIVE_ID
+        assert entry.item_id == "f1"
+        assert entry.path == "Invoices/2024/"
+        # Path flattened into display name via SHAREPOINT_PATH_SEPARATOR
+        assert "report.pdf" in entry.display_name
+        assert "Invoices" in entry.display_name
+        # No download happened on the list endpoint.
+        graph_instance.download_file.assert_not_called()
+        # Source payload mirrors what the bulk endpoint would persist.
+        assert result.source["type"] == "folder"
+        assert result.source["drive_id"] == DRIVE_ID
+
+
+class TestSharePointImportFile:
+    @pytest.mark.asyncio
+    @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
+    @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
+    @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
+    @patch(f"{_KNOWLEDGE_MOD}.upload_file_handler", new_callable=AsyncMock)
+    @patch(f"{_KNOWLEDGE_MOD}.process_file", new_callable=AsyncMock)
+    async def test_imports_one_file_via_metadata_then_download(
+        self,
+        mock_process,
+        mock_upload,
+        mock_graph_cls,
+        mock_oauth,
+        mock_kb,
+    ):
+        from open_webui.routers.knowledge import (
+            import_sharepoint_file,
+            SharePointImportFileForm,
+        )
+
+        mock_kb.get_knowledge_by_id = AsyncMock(return_value=_make_knowledge())
+        mock_kb.add_file_to_knowledge_by_id = AsyncMock()
+        mock_oauth.get_session_by_provider_and_user_id = AsyncMock(
+            return_value=_make_oauth_session()
+        )
+
+        graph_instance = AsyncMock()
+        graph_instance.get_file_metadata.return_value = GraphFileItem(
+            id="f1", name="restricted.pdf", size=2048,
+            content_type="application/pdf",
+            download_url=None,           # tenant strips downloadUrl
+            drive_id=DRIVE_ID,
+            path="",
+        )
+        graph_instance.download_file_by_id.return_value = b"file content"
+        mock_graph_cls.return_value = graph_instance
+
+        mock_upload.return_value = {"status": True, "id": "file-id-1"}
+
+        result = await import_sharepoint_file(
+            request=MagicMock(),
+            id=KNOWLEDGE_ID,
+            form_data=SharePointImportFileForm(
+                drive_id=DRIVE_ID, item_id="f1", path=""
+            ),
+            user=_make_user(),
+            db=MagicMock(),
+        )
+
+        assert result.knowledge_id == KNOWLEDGE_ID
+        assert result.file_id == "file-id-1"
+        assert result.filename == "restricted.pdf"
+        graph_instance.get_file_metadata.assert_awaited_once_with(
+            DRIVE_ID, "f1", ""
+        )
+        # downloadUrl was None → fallback path used.
+        graph_instance.download_file.assert_not_called()
+        graph_instance.download_file_by_id.assert_awaited_once_with(DRIVE_ID, "f1")
+        mock_upload.assert_awaited_once()
+        mock_process.assert_awaited_once()
+        mock_kb.add_file_to_knowledge_by_id.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
+    @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
+    @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
+    async def test_metadata_403_surfaces_as_403(
+        self, mock_graph_cls, mock_oauth, mock_kb
+    ):
+        """Graph 403 on metadata fetch is translated, not silently swallowed."""
+        from open_webui.routers.knowledge import (
+            import_sharepoint_file,
+            SharePointImportFileForm,
+        )
+
+        mock_kb.get_knowledge_by_id = AsyncMock(return_value=_make_knowledge())
+        mock_oauth.get_session_by_provider_and_user_id = AsyncMock(
+            return_value=_make_oauth_session()
+        )
+
+        response_403 = MagicMock(status_code=403)
+        response_403.json.return_value = {"error": {"code": "accessDenied"}}
+        graph_instance = AsyncMock()
+        graph_instance.get_file_metadata.side_effect = httpx.HTTPStatusError(
+            "forbidden", request=MagicMock(), response=response_403
+        )
+        mock_graph_cls.return_value = graph_instance
+
+        with pytest.raises(Exception) as exc_info:
+            await import_sharepoint_file(
+                request=MagicMock(),
+                id=KNOWLEDGE_ID,
+                form_data=SharePointImportFileForm(
+                    drive_id=DRIVE_ID, item_id="f1", path=""
+                ),
+                user=_make_user(),
+                db=MagicMock(),
+            )
+        assert exc_info.value.status_code == 403
+
+    @pytest.mark.asyncio
+    @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
+    @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
+    @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
+    @patch(f"{_KNOWLEDGE_MOD}.upload_file_handler", new_callable=AsyncMock)
+    async def test_download_failure_returns_500(
+        self, mock_upload, mock_graph_cls, mock_oauth, mock_kb
+    ):
+        """If the download itself fails, the endpoint returns 500 with the cause."""
+        from open_webui.routers.knowledge import (
+            import_sharepoint_file,
+            SharePointImportFileForm,
+        )
+
+        mock_kb.get_knowledge_by_id = AsyncMock(return_value=_make_knowledge())
+        mock_oauth.get_session_by_provider_and_user_id = AsyncMock(
+            return_value=_make_oauth_session()
+        )
+
+        graph_instance = AsyncMock()
+        graph_instance.get_file_metadata.return_value = GraphFileItem(
+            id="f1", name="boom.pdf", size=10,
+            content_type="application/pdf",
+            download_url="https://cdn.example.com/boom.pdf",
+            drive_id=DRIVE_ID,
+        )
+        graph_instance.download_file.side_effect = RuntimeError("network down")
+        mock_graph_cls.return_value = graph_instance
+
+        with pytest.raises(Exception) as exc_info:
+            await import_sharepoint_file(
+                request=MagicMock(),
+                id=KNOWLEDGE_ID,
+                form_data=SharePointImportFileForm(
+                    drive_id=DRIVE_ID, item_id="f1", path=""
+                ),
+                user=_make_user(),
+                db=MagicMock(),
+            )
+        assert exc_info.value.status_code == 500
+        assert "boom.pdf" in str(exc_info.value.detail)
+
+
+class TestSharePointPersistSource:
+    @pytest.mark.asyncio
+    @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
+    async def test_persists_source_with_timestamp(self, mock_kb):
+        from open_webui.routers.knowledge import (
+            persist_sharepoint_source,
+            SharePointPersistSourceForm,
+        )
+
+        kb = _make_knowledge()
+        kb.meta = {}
+        mock_kb.get_knowledge_by_id = AsyncMock(return_value=kb)
+        mock_kb.update_knowledge_by_id = AsyncMock()
+
+        result = await persist_sharepoint_source(
+            id=KNOWLEDGE_ID,
+            form_data=SharePointPersistSourceForm(
+                source={"type": "folder", "drive_id": DRIVE_ID, "item_id": ITEM_ID}
+            ),
+            user=_make_user(),
+            db=MagicMock(),
+        )
+
+        assert result == {"ok": True}
+        mock_kb.update_knowledge_by_id.assert_awaited_once()
+        form_data = mock_kb.update_knowledge_by_id.call_args.kwargs["form_data"]
+        assert form_data.meta["sharepoint_source"]["type"] == "folder"
+        # Endpoint stamps last_imported_at server-side.
+        assert "last_imported_at" in form_data.meta["sharepoint_source"]

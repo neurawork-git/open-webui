@@ -696,3 +696,84 @@ class TestDownloadFile:
         client = _make_client(handler)
         with pytest.raises(httpx.HTTPStatusError):
             await client.download_file("https://cdn.example.com/missing.pdf")
+
+
+class TestDownloadFileById:
+    """Fallback path used when @microsoft.graph.downloadUrl is suppressed."""
+
+    @pytest.mark.asyncio
+    async def test_follows_redirect_and_returns_bytes(self):
+        content = b"binary content via /content endpoint"
+        seen_urls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen_urls.append(str(request.url))
+            if "/content" in str(request.url):
+                # Graph normally 302s to a pre-signed CDN URL.
+                return httpx.Response(
+                    302, headers={"Location": "https://cdn.example.com/signed"}
+                )
+            return httpx.Response(200, content=content)
+
+        client = _make_client(handler)
+        result = await client.download_file_by_id("drive-1", "item-1")
+        assert result == content
+        assert any("/content" in u for u in seen_urls)
+        assert any("cdn.example.com/signed" in u for u in seen_urls)
+
+
+class TestGetFileMetadata:
+    @pytest.mark.asyncio
+    async def test_returns_graph_file_item(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert "/drives/drive-1/items/item-1" in str(request.url)
+            assert "$select=id,name,size,file" in str(request.url)
+            return httpx.Response(
+                200,
+                json={
+                    "id": "item-1",
+                    "name": "report.pdf",
+                    "size": 4096,
+                    "file": {"mimeType": "application/pdf"},
+                    "@microsoft.graph.downloadUrl": "https://cdn.example.com/report.pdf",
+                },
+            )
+
+        client = _make_client(handler)
+        item = await client.get_file_metadata("drive-1", "item-1", path="Invoices/")
+        assert item.id == "item-1"
+        assert item.name == "report.pdf"
+        assert item.size == 4096
+        assert item.content_type == "application/pdf"
+        assert item.download_url == "https://cdn.example.com/report.pdf"
+        assert item.drive_id == "drive-1"
+        assert item.path == "Invoices/"
+
+    @pytest.mark.asyncio
+    async def test_passes_through_when_download_url_suppressed(self):
+        """Tenant policies strip @microsoft.graph.downloadUrl → field is None."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "id": "item-2",
+                    "name": "restricted.xlsx",
+                    "size": 8192,
+                    "file": {"mimeType": "application/vnd.openxmlformats"},
+                },
+            )
+
+        client = _make_client(handler)
+        item = await client.get_file_metadata("drive-1", "item-2")
+        assert item.download_url is None
+        assert item.drive_id == "drive-1"
+
+    @pytest.mark.asyncio
+    async def test_raises_on_http_error(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(403, json={"error": {"code": "accessDenied"}})
+
+        client = _make_client(handler)
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.get_file_metadata("drive-1", "missing")

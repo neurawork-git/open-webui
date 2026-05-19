@@ -476,6 +476,38 @@ class GraphClient:
             next_link=data.get("@odata.nextLink"),
         )
 
+    async def get_file_metadata(
+        self, drive_id: str, item_id: str, path: str = ""
+    ) -> GraphFileItem:
+        """Fetch current metadata for a single drive item.
+
+        Used by the per-file import endpoint — between list and import the
+        file may have been renamed, so we always re-resolve the name and
+        downloadUrl from Graph instead of trusting frontend-echoed values.
+        """
+        url = (
+            f"{GRAPH_BASE}/drives/{drive_id}/items/{item_id}"
+            f"?$select=id,name,size,file,@microsoft.graph.downloadUrl"
+        )
+        client = self._client()
+        try:
+            resp = await client.get(url, headers=self.headers)
+            resp.raise_for_status()
+            data = resp.json()
+        finally:
+            if self._http_client is None:
+                await client.aclose()
+
+        return GraphFileItem(
+            id=data["id"],
+            name=data.get("name", item_id),
+            size=data.get("size", 0),
+            content_type=data.get("file", {}).get("mimeType"),
+            download_url=data.get("@microsoft.graph.downloadUrl"),
+            path=path,
+            drive_id=drive_id,
+        )
+
     async def download_file(self, download_url: str) -> bytes:
         """Download file content from a Graph @microsoft.graph.downloadUrl."""
         client = self._client()

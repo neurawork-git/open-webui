@@ -1737,29 +1737,14 @@ async def import_sharepoint_file(
     access_token = await _get_microsoft_access_token(user, db)
     graph = GraphClient(access_token)
 
-    # Resolve current metadata (name, size, MIME) from Graph. We don't trust
-    # the frontend to echo back the name — the file may have been renamed
-    # between list and import.
+    # Re-resolve metadata from Graph instead of trusting frontend-echoed
+    # values — the file may have been renamed between list and import.
     try:
-        meta_resp = await graph._client().get(
-            f"{GRAPH_BASE}/drives/{form_data.drive_id}/items/{form_data.item_id}"
-            f"?$select=id,name,size,file,@microsoft.graph.downloadUrl",
-            headers=graph.headers,
+        graph_file = await graph.get_file_metadata(
+            form_data.drive_id, form_data.item_id, form_data.path
         )
-        meta_resp.raise_for_status()
-        meta = meta_resp.json()
     except httpx.HTTPStatusError as e:
         raise _translate_graph_error(e)
-
-    graph_file = GraphFileItem(
-        id=meta["id"],
-        name=meta.get("name", form_data.item_id),
-        size=meta.get("size", 0),
-        content_type=meta.get("file", {}).get("mimeType"),
-        download_url=meta.get("@microsoft.graph.downloadUrl"),
-        path=form_data.path,
-        drive_id=form_data.drive_id,
-    )
 
     display_name = _build_display_filename(graph_file.path, graph_file.name)
     try:
