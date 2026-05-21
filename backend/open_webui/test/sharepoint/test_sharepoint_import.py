@@ -73,12 +73,20 @@ def _make_folder_listing(
 _KNOWLEDGE_MOD = "open_webui.routers.knowledge"
 
 
-def _make_request(sharepoint_import_max_total_size_mb: int = 0) -> MagicMock:
-    """Build a Request mock whose app.state.config carries the SharePoint
-    size-cap setting. 0 = unlimited."""
+def _make_request(
+    sharepoint_import_max_total_size_mb: int = 0,
+    access_token: str = "graph-token-123",
+) -> MagicMock:
+    """Build a Request mock whose app.state carries the SharePoint size cap
+    and an oauth_client_manager that returns a valid Microsoft token. Set
+    access_token=None to simulate a missing/expired session."""
     request = MagicMock()
     request.app.state.config.SHAREPOINT_IMPORT_MAX_TOTAL_SIZE_MB = (
         sharepoint_import_max_total_size_mb
+    )
+    token_payload = {"access_token": access_token} if access_token else None
+    request.app.state.oauth_client_manager.get_oauth_token_by_client_id = AsyncMock(
+        return_value=token_payload
     )
     return request
 
@@ -120,7 +128,7 @@ class TestSharePointImport:
 
         mock_upload.side_effect = None; mock_upload.return_value = {"status": True, "id": "file-id-1"}
 
-        request = MagicMock()
+        request = _make_request()
         user = _make_user()
         db = MagicMock()
 
@@ -173,7 +181,7 @@ class TestSharePointImport:
 
         mock_upload.side_effect = None; mock_upload.return_value = {"status": True, "id": "file-id-1"}
 
-        request = MagicMock()
+        request = _make_request()
         user = _make_user()
         db = MagicMock()
 
@@ -224,7 +232,7 @@ class TestSharePointImport:
         mock_upload.return_value = {"status": True, "id": "file-id-1"}
 
         result = await import_sharepoint_folder(
-            request=MagicMock(),
+            request=_make_request(),
             id=KNOWLEDGE_ID,
             form_data=SharePointImportForm(drive_id=DRIVE_ID, item_id=ITEM_ID),
             user=_make_user(),
@@ -244,7 +252,7 @@ class TestSharePointImport:
 
         mock_kb.get_knowledge_by_id = AsyncMock(return_value=None)
 
-        request = MagicMock()
+        request = _make_request()
         user = _make_user()
         db = MagicMock()
 
@@ -268,7 +276,7 @@ class TestSharePointImport:
         mock_kb.get_knowledge_by_id = AsyncMock(return_value=_make_knowledge(user_id="other-user"))
         mock_access.has_access = AsyncMock(return_value=False)
 
-        request = MagicMock()
+        request = _make_request()
         user = _make_user()
         db = MagicMock()
 
@@ -298,7 +306,7 @@ class TestSharePointImport:
         mock_kb.get_file_metadatas_by_id = AsyncMock(return_value=[])
         mock_oauth.get_session_by_provider_and_user_id = AsyncMock(return_value=None)
 
-        request = MagicMock()
+        request = _make_request()
         user = _make_user()
         db = MagicMock()
 
@@ -337,7 +345,7 @@ class TestSharePointImport:
         )
         mock_graph_cls.return_value = graph_instance
 
-        request = MagicMock()
+        request = _make_request()
         user = _make_user()
         db = MagicMock()
 
@@ -376,7 +384,7 @@ class TestSharePointImport:
         )
         mock_graph_cls.return_value = graph_instance
 
-        request = MagicMock()
+        request = _make_request()
         user = _make_user()
         db = MagicMock()
 
@@ -412,7 +420,7 @@ class TestSharePointImport:
         graph_instance.list_folder.return_value = _make_folder_listing(files=[], folder_name="Empty")
         mock_graph_cls.return_value = graph_instance
 
-        request = MagicMock()
+        request = _make_request()
         user = _make_user()
         db = MagicMock()
 
@@ -451,7 +459,7 @@ class TestSharePointImport:
         )
         mock_graph_cls.return_value = graph_instance
 
-        request = MagicMock()
+        request = _make_request()
         user = _make_user()
         db = MagicMock()
 
@@ -496,7 +504,7 @@ class TestSharePointImport:
         graph_instance.list_folder.return_value = _make_folder_listing(files=[no_url_file])
         mock_graph_cls.return_value = graph_instance
 
-        request = MagicMock()
+        request = _make_request()
         user = _make_user()
         db = MagicMock()
 
@@ -540,7 +548,7 @@ class TestSharePointImport:
         graph_instance.list_folder.return_value = _make_folder_listing(files=[])
         mock_graph_cls.return_value = graph_instance
 
-        request = MagicMock()
+        request = _make_request(access_token="my-specific-token")
         user = _make_user()
         db = MagicMock()
 
@@ -601,7 +609,7 @@ class TestSharePointReimport:
 
         mock_upload.side_effect = None; mock_upload.return_value = {"status": True, "id": "file-reimport-1"}
 
-        request = MagicMock()
+        request = _make_request()
         user = _make_user()
         db = MagicMock()
 
@@ -625,7 +633,7 @@ class TestSharePointReimport:
         kb.meta = {}
         mock_kb.get_knowledge_by_id = AsyncMock(return_value=kb)
 
-        request = MagicMock()
+        request = _make_request()
         user = _make_user()
         db = MagicMock()
 
@@ -647,7 +655,7 @@ class TestSharePointReimport:
 
         mock_kb.get_knowledge_by_id = AsyncMock(return_value=None)
 
-        request = MagicMock()
+        request = _make_request()
         user = _make_user()
         db = MagicMock()
 
@@ -740,7 +748,7 @@ class TestPathPrefixFlow:
         mock_upload.return_value = {"status": True, "id": "file-1"}
 
         await import_sharepoint_folder(
-            request=MagicMock(),
+            request=_make_request(),
             id=KNOWLEDGE_ID,
             form_data=SharePointImportForm(drive_id=DRIVE_ID, item_id=ITEM_ID),
             user=_make_user(),
@@ -785,7 +793,7 @@ class TestPathPrefixFlow:
         mock_graph_cls.return_value = graph_instance
 
         result = await import_sharepoint_folder(
-            request=MagicMock(),
+            request=_make_request(),
             id=KNOWLEDGE_ID,
             form_data=SharePointImportForm(drive_id=DRIVE_ID, item_id=ITEM_ID),
             user=_make_user(),
@@ -858,7 +866,7 @@ class TestSharePointSiteImport:
         mock_upload.return_value = {"status": True, "id": "file-id-1"}
 
         result = await import_sharepoint_site(
-            request=MagicMock(),
+            request=_make_request(),
             id=KNOWLEDGE_ID,
             form_data=SharePointSiteImportForm(site_id=SITE_ID),
             user=_make_user(),
@@ -902,7 +910,7 @@ class TestSharePointSiteImport:
 
         with pytest.raises(Exception) as exc_info:
             await import_sharepoint_site(
-                request=MagicMock(),
+                request=_make_request(),
                 id=KNOWLEDGE_ID,
                 form_data=SharePointSiteImportForm(site_id=SITE_ID),
                 user=_make_user(),
@@ -934,7 +942,7 @@ class TestReimportDispatch:
         mock_site_import.return_value = MagicMock()
 
         await reimport_sharepoint_folder(
-            request=MagicMock(), id=KNOWLEDGE_ID, user=_make_user(), db=MagicMock()
+            request=_make_request(), id=KNOWLEDGE_ID, user=_make_user(), db=MagicMock()
         )
 
         mock_site_import.assert_awaited_once()
@@ -962,7 +970,7 @@ class TestReimportDispatch:
         mock_folder_import.return_value = MagicMock()
 
         await reimport_sharepoint_folder(
-            request=MagicMock(), id=KNOWLEDGE_ID, user=_make_user(), db=MagicMock()
+            request=_make_request(), id=KNOWLEDGE_ID, user=_make_user(), db=MagicMock()
         )
 
         mock_folder_import.assert_awaited_once()
@@ -980,7 +988,7 @@ class TestReimportDispatch:
 
         with pytest.raises(Exception) as exc_info:
             await reimport_sharepoint_folder(
-                request=MagicMock(),
+                request=_make_request(),
                 id=KNOWLEDGE_ID,
                 user=_make_user(),
                 db=MagicMock(),
@@ -1172,7 +1180,7 @@ class TestSharePointImportFile:
         mock_upload.return_value = {"status": True, "id": "file-id-1"}
 
         result = await import_sharepoint_file(
-            request=MagicMock(),
+            request=_make_request(),
             id=KNOWLEDGE_ID,
             form_data=SharePointImportFileForm(
                 drive_id=DRIVE_ID, item_id="f1", path=""
@@ -1222,7 +1230,7 @@ class TestSharePointImportFile:
 
         with pytest.raises(Exception) as exc_info:
             await import_sharepoint_file(
-                request=MagicMock(),
+                request=_make_request(),
                 id=KNOWLEDGE_ID,
                 form_data=SharePointImportFileForm(
                     drive_id=DRIVE_ID, item_id="f1", path=""
@@ -1263,7 +1271,7 @@ class TestSharePointImportFile:
 
         with pytest.raises(Exception) as exc_info:
             await import_sharepoint_file(
-                request=MagicMock(),
+                request=_make_request(),
                 id=KNOWLEDGE_ID,
                 form_data=SharePointImportFileForm(
                     drive_id=DRIVE_ID, item_id="f1", path=""

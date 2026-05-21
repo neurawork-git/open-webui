@@ -1314,23 +1314,38 @@ async def _assert_knowledge_write_access(knowledge, user, db):
         )
 
 
-async def _get_microsoft_access_token(user, db) -> str:
-    """Fetch the user's Microsoft OAuth token or raise an HTTP 401."""
-    oauth_session = await OAuthSessions.get_session_by_provider_and_user_id(
-        provider="microsoft", user_id=user.id, db=db
+async def _get_microsoft_access_token(request: Request, user, db) -> str:
+    """Fetch the user's Microsoft OAuth access token, refreshing if expiring.
+
+    Delegates to the shared OAuthClientManager.get_oauth_token_by_client_id
+    path — same logic the MCP-tool flow uses — so SharePoint, MCP, and any
+    future Graph caller share one refresh + lookup implementation. Provider
+    column "microsoft" lines up with the client_id slot expected by that API.
+    """
+    oauth_client_manager = getattr(
+        request.app.state, "oauth_client_manager", None
     )
-    if not oauth_session:
+    if oauth_client_manager is None:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="No Microsoft OAuth session found. Please log in with Microsoft SSO first.",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="OAuth client manager not initialised.",
         )
-    access_token = oauth_session.token.get("access_token")
-    if not access_token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Microsoft OAuth session has no access token. Please re-login.",
-        )
-    return access_token
+
+    token = await oauth_client_manager.get_oauth_token_by_client_id(
+        user_id=user.id, client_id="microsoft"
+    )
+    access_token = token.get("access_token") if isinstance(token, dict) else None
+    if access_token:
+        return access_token
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=(
+            "Microsoft OAuth token could not be retrieved or refreshed. "
+            "Sign out of Open WebUI and sign back in via Microsoft to "
+            "re-establish the session."
+        ),
+    )
 
 
 def _translate_graph_error(e: httpx.HTTPStatusError) -> HTTPException:
@@ -1488,7 +1503,7 @@ async def import_sharepoint_folder(
     knowledge = await Knowledges.get_knowledge_by_id(id=id, db=db)
     await _assert_knowledge_write_access(knowledge, user, db)
 
-    access_token = await _get_microsoft_access_token(user, db)
+    access_token = await _get_microsoft_access_token(request, user, db)
     graph = GraphClient(access_token)
     try:
         listing = await graph.list_folder(form_data.drive_id, form_data.item_id)
@@ -1547,7 +1562,7 @@ async def import_sharepoint_site(
     knowledge = await Knowledges.get_knowledge_by_id(id=id, db=db)
     await _assert_knowledge_write_access(knowledge, user, db)
 
-    access_token = await _get_microsoft_access_token(user, db)
+    access_token = await _get_microsoft_access_token(request, user, db)
     graph = GraphClient(access_token)
     try:
         listing = await graph.list_site(form_data.site_id)
@@ -1680,7 +1695,7 @@ async def list_sharepoint_folder(
     knowledge = await Knowledges.get_knowledge_by_id(id=id, db=db)
     await _assert_knowledge_write_access(knowledge, user, db)
 
-    access_token = await _get_microsoft_access_token(user, db)
+    access_token = await _get_microsoft_access_token(request, user, db)
     graph = GraphClient(access_token)
     try:
         listing = await graph.list_folder(form_data.drive_id, form_data.item_id)
@@ -1717,7 +1732,7 @@ async def list_sharepoint_site(
     knowledge = await Knowledges.get_knowledge_by_id(id=id, db=db)
     await _assert_knowledge_write_access(knowledge, user, db)
 
-    access_token = await _get_microsoft_access_token(user, db)
+    access_token = await _get_microsoft_access_token(request, user, db)
     graph = GraphClient(access_token)
     try:
         listing = await graph.list_site(form_data.site_id)
@@ -1776,7 +1791,7 @@ async def import_sharepoint_file(
     knowledge = await Knowledges.get_knowledge_by_id(id=id, db=db)
     await _assert_knowledge_write_access(knowledge, user, db)
 
-    access_token = await _get_microsoft_access_token(user, db)
+    access_token = await _get_microsoft_access_token(request, user, db)
     graph = GraphClient(access_token)
 
     # Re-resolve metadata from Graph instead of trusting frontend-echoed
@@ -1847,6 +1862,7 @@ class SharePointSiteSearchResult(BaseModel):
     response_model=list[SharePointSiteSearchResult],
 )
 async def search_sharepoint_sites(
+    request: Request,
     query: str = Query(..., min_length=1, max_length=100),
     user=Depends(get_verified_user),
     db: AsyncSession = Depends(get_async_session),
@@ -1856,7 +1872,7 @@ async def search_sharepoint_sites(
     Thin wrapper over Graph `/sites?search=...`. Used by the custom picker
     to surface matches while the user types.
     """
-    access_token = await _get_microsoft_access_token(user, db)
+    access_token = await _get_microsoft_access_token(request, user, db)
     graph = GraphClient(access_token)
     try:
         results = await graph.search_sites(query)
@@ -1873,6 +1889,7 @@ class SharePointSitesPage(BaseModel):
 
 @router.get("/sharepoint/sites", response_model=SharePointSitesPage)
 async def list_sharepoint_sites(
+    request: Request,
     query: str = Query("*", max_length=100),
     next_link: Optional[str] = Query(None),
     user=Depends(get_verified_user),
@@ -1884,7 +1901,7 @@ async def list_sharepoint_sites(
     pass the opaque `next_link` returned in the previous response. Omit both
     to get the first wildcard page.
     """
-    access_token = await _get_microsoft_access_token(user, db)
+    access_token = await _get_microsoft_access_token(request, user, db)
     graph = GraphClient(access_token)
     try:
         page = await graph.list_sites_paginated(query=query, next_link=next_link)
@@ -1915,12 +1932,13 @@ class SharePointSiteDrivesResponse(BaseModel):
     response_model=SharePointSiteDrivesResponse,
 )
 async def list_sharepoint_site_drives(
+    request: Request,
     site_id: str,
     user=Depends(get_verified_user),
     db: AsyncSession = Depends(get_async_session),
 ):
     """List all document libraries (drives) of a SharePoint site with size."""
-    access_token = await _get_microsoft_access_token(user, db)
+    access_token = await _get_microsoft_access_token(request, user, db)
     graph = GraphClient(access_token)
     try:
         summary = await graph.list_site_drives_summary(site_id)
@@ -1956,6 +1974,7 @@ class SharePointChildrenResponse(BaseModel):
     response_model=SharePointChildrenResponse,
 )
 async def list_sharepoint_folder_children(
+    request: Request,
     drive_id: str,
     item_id: str,
     next_link: Optional[str] = Query(None),
@@ -1970,7 +1989,7 @@ async def list_sharepoint_folder_children(
     response returned. Sizes are pulled from Graph's `driveItem.size` so no
     recursive walk is required.
     """
-    access_token = await _get_microsoft_access_token(user, db)
+    access_token = await _get_microsoft_access_token(request, user, db)
     graph = GraphClient(access_token)
     try:
         listing = await graph.list_folder_children(drive_id, item_id, next_link=next_link)

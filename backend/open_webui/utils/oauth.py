@@ -793,10 +793,13 @@ class OAuthClientManager:
                 if refreshed_token:
                     return refreshed_token
                 else:
+                    # Don't delete the session — transient network/IdP errors
+                    # would otherwise force users to re-link every time. The
+                    # stale session stays around so later calls (or a fresh
+                    # SSO callback) can retry.
                     log.warning(
-                        f'Token refresh failed for user {user_id}, client_id {session.provider}, deleting session {session.id}'
+                        f'Token refresh failed for user {user_id}, client_id {session.provider}, session {session.id}'
                     )
-                    await OAuthSessions.delete_session_by_id(session.id)
                     return None
             return session.token
 
@@ -1048,11 +1051,12 @@ class OAuthManager:
                 if refreshed_token:
                     return refreshed_token
                 else:
+                    # Keep the session row: transient refresh failures should
+                    # not force a re-link. Callers must handle a None return
+                    # by either retrying later or asking the user to re-sign-in.
                     log.warning(
-                        f'Token refresh failed for user {user_id}, provider {session.provider}, deleting session {session.id}'
+                        f'Token refresh failed for user {user_id}, provider {session.provider}, session {session.id}'
                     )
-                    await OAuthSessions.delete_session_by_id(session.id)
-
                     return None
             return session.token
 
