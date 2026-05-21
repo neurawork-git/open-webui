@@ -2902,6 +2902,15 @@ RAG_FILE_MAX_SIZE = PersistentConfig(
     (int(os.environ.get('RAG_FILE_MAX_SIZE')) if os.environ.get('RAG_FILE_MAX_SIZE') else None),
 )
 
+# Hard upper bound (in MB) on the cumulative size of one SharePoint folder/site
+# import. Protects the OCR + embedding pipeline from runaway imports. Empty /
+# zero means unlimited.
+SHAREPOINT_IMPORT_MAX_TOTAL_SIZE_MB = PersistentConfig(
+    'SHAREPOINT_IMPORT_MAX_TOTAL_SIZE_MB',
+    'rag.sharepoint.import_max_total_size_mb',
+    int(os.environ.get('SHAREPOINT_IMPORT_MAX_TOTAL_SIZE_MB', '200')),
+)
+
 FILE_IMAGE_COMPRESSION_WIDTH = PersistentConfig(
     'FILE_IMAGE_COMPRESSION_WIDTH',
     'file.image_compression_width',

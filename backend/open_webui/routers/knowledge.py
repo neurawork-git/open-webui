@@ -1495,6 +1495,8 @@ async def import_sharepoint_folder(
     except httpx.HTTPStatusError as e:
         raise _translate_graph_error(e)
 
+    _enforce_sharepoint_size_limit(request, listing.files)
+
     imported, errors = await _import_graph_files(
         request, id, graph, listing.files, user, db
     )
@@ -1551,6 +1553,8 @@ async def import_sharepoint_site(
         listing = await graph.list_site(form_data.site_id)
     except httpx.HTTPStatusError as e:
         raise _translate_graph_error(e)
+
+    _enforce_sharepoint_size_limit(request, listing.files)
 
     imported, errors = await _import_graph_files(
         request, id, graph, listing.files, user, db
@@ -1612,6 +1616,38 @@ class SharePointListResult(BaseModel):
     source: dict
 
 
+def _enforce_sharepoint_size_limit(request: Request, files: list[GraphFileItem]) -> None:
+    """Reject the import early when the cumulative file size exceeds the
+    admin-configured cap (SHAREPOINT_IMPORT_MAX_TOTAL_SIZE_MB). 0 / None means
+    unlimited.
+    """
+    limit_mb = getattr(
+        request.app.state.config, "SHAREPOINT_IMPORT_MAX_TOTAL_SIZE_MB", None
+    )
+    try:
+        limit_mb = int(limit_mb) if limit_mb is not None else 0
+    except (TypeError, ValueError):
+        limit_mb = 0
+    if limit_mb <= 0:
+        return
+
+    total_bytes = sum((f.size or 0) for f in files)
+    limit_bytes = limit_mb * 1024 * 1024
+    if total_bytes > limit_bytes:
+        total_mb = total_bytes / (1024 * 1024)
+        raise HTTPException(
+            status_code=getattr(
+                status, "HTTP_413_CONTENT_TOO_LARGE", status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
+            ),
+            detail=(
+                f"SharePoint import exceeds the configured size limit: "
+                f"{total_mb:.1f} MB across {len(files)} file(s), limit is "
+                f"{limit_mb} MB. Split the folder or raise "
+                f"SHAREPOINT_IMPORT_MAX_TOTAL_SIZE_MB in Admin → Documents."
+            ),
+        )
+
+
 def _to_file_entries(files: list[GraphFileItem]) -> list[SharePointFileEntry]:
     return [
         SharePointFileEntry(
@@ -1629,6 +1665,7 @@ def _to_file_entries(files: list[GraphFileItem]) -> list[SharePointFileEntry]:
 
 @router.post("/{id}/sharepoint/list-folder", response_model=SharePointListResult)
 async def list_sharepoint_folder(
+    request: Request,
     id: str,
     form_data: SharePointImportForm,
     user=Depends(get_verified_user),
@@ -1650,6 +1687,8 @@ async def list_sharepoint_folder(
     except httpx.HTTPStatusError as e:
         raise _translate_graph_error(e)
 
+    _enforce_sharepoint_size_limit(request, listing.files)
+
     return SharePointListResult(
         knowledge_id=id,
         folder_name=listing.folder_name,
@@ -1668,6 +1707,7 @@ async def list_sharepoint_folder(
 
 @router.post("/{id}/sharepoint/list-site", response_model=SharePointListResult)
 async def list_sharepoint_site(
+    request: Request,
     id: str,
     form_data: SharePointSiteImportForm,
     user=Depends(get_verified_user),
@@ -1683,6 +1723,8 @@ async def list_sharepoint_site(
         listing = await graph.list_site(form_data.site_id)
     except httpx.HTTPStatusError as e:
         raise _translate_graph_error(e)
+
+    _enforce_sharepoint_size_limit(request, listing.files)
 
     return SharePointListResult(
         knowledge_id=id,

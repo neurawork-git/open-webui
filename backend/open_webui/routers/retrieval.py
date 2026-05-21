@@ -506,6 +506,7 @@ async def get_rag_config(request: Request, user=Depends(get_admin_user)):
         # File upload settings
         'FILE_MAX_SIZE': request.app.state.config.FILE_MAX_SIZE,
         'FILE_MAX_COUNT': request.app.state.config.FILE_MAX_COUNT,
+        'SHAREPOINT_IMPORT_MAX_TOTAL_SIZE_MB': request.app.state.config.SHAREPOINT_IMPORT_MAX_TOTAL_SIZE_MB,
         'FILE_IMAGE_COMPRESSION_WIDTH': request.app.state.config.FILE_IMAGE_COMPRESSION_WIDTH,
         'FILE_IMAGE_COMPRESSION_HEIGHT': request.app.state.config.FILE_IMAGE_COMPRESSION_HEIGHT,
         'ALLOWED_FILE_EXTENSIONS': request.app.state.config.ALLOWED_FILE_EXTENSIONS,
@@ -721,6 +722,7 @@ class ConfigForm(BaseModel):
     # File upload settings
     FILE_MAX_SIZE: Optional[Union[int, str]] = None
     FILE_MAX_COUNT: Optional[Union[int, str]] = None
+    SHAREPOINT_IMPORT_MAX_TOTAL_SIZE_MB: Optional[Union[int, str]] = None
     FILE_IMAGE_COMPRESSION_WIDTH: Optional[Union[int, str]] = None
     FILE_IMAGE_COMPRESSION_HEIGHT: Optional[Union[int, str]] = None
     ALLOWED_FILE_EXTENSIONS: Optional[List[str]] = None
@@ -1047,6 +1049,16 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
         request.app.state.config.FILE_MAX_SIZE = None if form_data.FILE_MAX_SIZE == '' else form_data.FILE_MAX_SIZE
     if form_data.FILE_MAX_COUNT is not None:
         request.app.state.config.FILE_MAX_COUNT = None if form_data.FILE_MAX_COUNT == '' else form_data.FILE_MAX_COUNT
+    if form_data.SHAREPOINT_IMPORT_MAX_TOTAL_SIZE_MB is not None:
+        # Coerce numeric strings from the admin UI; empty string → 0 (unlimited).
+        raw = form_data.SHAREPOINT_IMPORT_MAX_TOTAL_SIZE_MB
+        if raw == '' or raw is None:
+            request.app.state.config.SHAREPOINT_IMPORT_MAX_TOTAL_SIZE_MB = 0
+        else:
+            try:
+                request.app.state.config.SHAREPOINT_IMPORT_MAX_TOTAL_SIZE_MB = int(raw)
+            except (TypeError, ValueError):
+                pass  # keep current value on invalid input
     if form_data.FILE_IMAGE_COMPRESSION_WIDTH is not None:
         request.app.state.config.FILE_IMAGE_COMPRESSION_WIDTH = (
             None if form_data.FILE_IMAGE_COMPRESSION_WIDTH == '' else form_data.FILE_IMAGE_COMPRESSION_WIDTH
@@ -1213,6 +1225,7 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
         # File upload settings
         'FILE_MAX_SIZE': request.app.state.config.FILE_MAX_SIZE,
         'FILE_MAX_COUNT': request.app.state.config.FILE_MAX_COUNT,
+        'SHAREPOINT_IMPORT_MAX_TOTAL_SIZE_MB': request.app.state.config.SHAREPOINT_IMPORT_MAX_TOTAL_SIZE_MB,
         'FILE_IMAGE_COMPRESSION_WIDTH': request.app.state.config.FILE_IMAGE_COMPRESSION_WIDTH,
         'FILE_IMAGE_COMPRESSION_HEIGHT': request.app.state.config.FILE_IMAGE_COMPRESSION_HEIGHT,
         'ALLOWED_FILE_EXTENSIONS': request.app.state.config.ALLOWED_FILE_EXTENSIONS,

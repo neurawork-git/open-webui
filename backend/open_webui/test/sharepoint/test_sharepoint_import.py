@@ -73,6 +73,16 @@ def _make_folder_listing(
 _KNOWLEDGE_MOD = "open_webui.routers.knowledge"
 
 
+def _make_request(sharepoint_import_max_total_size_mb: int = 0) -> MagicMock:
+    """Build a Request mock whose app.state.config carries the SharePoint
+    size-cap setting. 0 = unlimited."""
+    request = MagicMock()
+    request.app.state.config.SHAREPOINT_IMPORT_MAX_TOTAL_SIZE_MB = (
+        sharepoint_import_max_total_size_mb
+    )
+    return request
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -1015,6 +1025,7 @@ class TestSharePointListFolder:
         mock_graph_cls.return_value = graph_instance
 
         result = await list_sharepoint_folder(
+            request=_make_request(),
             id=KNOWLEDGE_ID,
             form_data=SharePointImportForm(drive_id=DRIVE_ID, item_id=ITEM_ID),
             user=_make_user(),
@@ -1030,6 +1041,90 @@ class TestSharePointListFolder:
         # Path flattened into display name via SHAREPOINT_PATH_SEPARATOR
         assert "report.pdf" in entry.display_name
         assert "Invoices" in entry.display_name
+
+    @pytest.mark.asyncio
+    @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
+    @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
+    @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
+    async def test_size_limit_blocks_oversized_listing(
+        self, mock_graph_cls, mock_oauth, mock_kb
+    ):
+        """Cumulative file size > SHAREPOINT_IMPORT_MAX_TOTAL_SIZE_MB → HTTP 413."""
+        from open_webui.routers.knowledge import (
+            list_sharepoint_folder,
+            SharePointImportForm,
+        )
+
+        mock_kb.get_knowledge_by_id = AsyncMock(return_value=_make_knowledge())
+        mock_oauth.get_session_by_provider_and_user_id = AsyncMock(
+            return_value=_make_oauth_session()
+        )
+
+        # 3 files × 80 MB = 240 MB; limit is 200 MB.
+        big = 80 * 1024 * 1024
+        files = [
+            GraphFileItem(
+                id=f"f{i}", name=f"big{i}.pdf", size=big,
+                content_type="application/pdf",
+                download_url=f"https://cdn.example.com/big{i}.pdf",
+                drive_id=DRIVE_ID,
+            )
+            for i in range(3)
+        ]
+        graph_instance = AsyncMock()
+        graph_instance.list_folder.return_value = _make_folder_listing(files=files)
+        mock_graph_cls.return_value = graph_instance
+
+        with pytest.raises(Exception) as exc_info:
+            await list_sharepoint_folder(
+                request=_make_request(sharepoint_import_max_total_size_mb=200),
+                id=KNOWLEDGE_ID,
+                form_data=SharePointImportForm(drive_id=DRIVE_ID, item_id=ITEM_ID),
+                user=_make_user(),
+                db=MagicMock(),
+            )
+        assert exc_info.value.status_code == 413
+        assert "200 MB" in str(exc_info.value.detail)
+
+    @pytest.mark.asyncio
+    @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
+    @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
+    @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
+    async def test_size_limit_zero_means_unlimited(
+        self, mock_graph_cls, mock_oauth, mock_kb
+    ):
+        """limit_mb=0 (or None) → never raises, even for huge listings."""
+        from open_webui.routers.knowledge import (
+            list_sharepoint_folder,
+            SharePointImportForm,
+        )
+
+        mock_kb.get_knowledge_by_id = AsyncMock(return_value=_make_knowledge())
+        mock_oauth.get_session_by_provider_and_user_id = AsyncMock(
+            return_value=_make_oauth_session()
+        )
+
+        huge = 1024 * 1024 * 1024  # 1 GB per file
+        files = [
+            GraphFileItem(
+                id="f1", name="huge.pdf", size=huge,
+                content_type="application/pdf",
+                download_url="https://cdn.example.com/huge.pdf",
+                drive_id=DRIVE_ID,
+            ),
+        ]
+        graph_instance = AsyncMock()
+        graph_instance.list_folder.return_value = _make_folder_listing(files=files)
+        mock_graph_cls.return_value = graph_instance
+
+        result = await list_sharepoint_folder(
+            request=_make_request(sharepoint_import_max_total_size_mb=0),
+            id=KNOWLEDGE_ID,
+            form_data=SharePointImportForm(drive_id=DRIVE_ID, item_id=ITEM_ID),
+            user=_make_user(),
+            db=MagicMock(),
+        )
+        assert len(result.files) == 1
         # No download happened on the list endpoint.
         graph_instance.download_file.assert_not_called()
         # Source payload mirrors what the bulk endpoint would persist.

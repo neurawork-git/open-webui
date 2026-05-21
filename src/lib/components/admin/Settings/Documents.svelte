@@ -230,6 +230,8 @@
 			...RAGConfig,
 			FILE_MAX_SIZE: RAGConfig.FILE_MAX_SIZE ?? null,
 			FILE_MAX_COUNT: RAGConfig.FILE_MAX_COUNT ?? null,
+			SHAREPOINT_IMPORT_MAX_TOTAL_SIZE_MB:
+				RAGConfig.SHAREPOINT_IMPORT_MAX_TOTAL_SIZE_MB ?? null,
 			FILE_IMAGE_COMPRESSION_WIDTH: RAGConfig.FILE_IMAGE_COMPRESSION_WIDTH ?? null,
 			FILE_IMAGE_COMPRESSION_HEIGHT: RAGConfig.FILE_IMAGE_COMPRESSION_HEIGHT ?? null,
 			ALLOWED_FILE_EXTENSIONS: RAGConfig.ALLOWED_FILE_EXTENSIONS.split(',')
@@ -1473,6 +1475,29 @@
 									type="number"
 									placeholder={$i18n.t('Leave empty for unlimited')}
 									bind:value={RAGConfig.FILE_MAX_COUNT}
+									autocomplete="off"
+									min="0"
+								/>
+							</Tooltip>
+						</div>
+					</div>
+
+					<div class="  mb-2.5 flex w-full justify-between">
+						<div class=" self-center text-xs font-medium">
+							{$i18n.t('SharePoint Import Max Total Size (MB)')}
+						</div>
+						<div class="flex items-center relative">
+							<Tooltip
+								content={$i18n.t(
+									'Maximum cumulative size (MB) of a single SharePoint folder or site import. Imports above this limit are rejected before any file is downloaded. 0 means unlimited.'
+								)}
+								placement="top-start"
+							>
+								<input
+									class="flex-1 w-full text-sm bg-transparent outline-hidden"
+									type="number"
+									placeholder={$i18n.t('Default 200')}
+									bind:value={RAGConfig.SHAREPOINT_IMPORT_MAX_TOTAL_SIZE_MB}
 									autocomplete="off"
 									min="0"
 								/>
