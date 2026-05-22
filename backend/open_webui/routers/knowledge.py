@@ -1317,21 +1317,34 @@ async def _assert_knowledge_write_access(knowledge, user, db):
 async def _get_microsoft_access_token(request: Request, user, db) -> str:
     """Fetch the user's Microsoft OAuth access token, refreshing if expiring.
 
-    Delegates to the shared OAuthClientManager.get_oauth_token
-    path — same logic the MCP-tool flow uses — so SharePoint, MCP, and any
-    future Graph caller share one refresh + lookup implementation. Provider
-    column "microsoft" lines up with the client_id slot expected by that API.
+    Uses OAuthManager (the manager that actually owns the Microsoft client
+    via OAUTH_PROVIDERS['microsoft']) and its existing session-id-based
+    get_oauth_token path — so refresh + delete-on-fail policy stay in one
+    place. Session id comes from the oauth_session_id cookie set at login;
+    if that cookie is gone we fall back to the newest stored Microsoft
+    session for this user. No new refresh code is added here.
     """
-    oauth_client_manager = getattr(
-        request.app.state, "oauth_client_manager", None
-    )
-    if oauth_client_manager is None:
+    oauth_manager = getattr(request.app.state, "oauth_manager", None)
+    if oauth_manager is None:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="OAuth client manager not initialised.",
+            detail="OAuth manager not initialised.",
         )
 
-    token = await oauth_client_manager.get_oauth_token(user.id, "microsoft")
+    session_id = request.cookies.get("oauth_session_id")
+    if not session_id:
+        fallback = await OAuthSessions.get_session_by_provider_and_user_id(
+            provider="microsoft", user_id=user.id, db=db
+        )
+        session_id = fallback.id if fallback else None
+
+    if not session_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="No Microsoft OAuth session found. Please log in with Microsoft SSO first.",
+        )
+
+    token = await oauth_manager.get_oauth_token(user.id, session_id)
     access_token = token.get("access_token") if isinstance(token, dict) else None
     if access_token:
         return access_token

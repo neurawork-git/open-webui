@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 
 from open_webui.utils.graph_client import GraphFolderListing, GraphFileItem
-from open_webui.utils.oauth import OAuthClientManager
+from open_webui.utils.oauth import OAuthManager
 
 
 # ---------------------------------------------------------------------------
@@ -77,17 +77,20 @@ _KNOWLEDGE_MOD = "open_webui.routers.knowledge"
 def _make_request(
     sharepoint_import_max_total_size_mb: int = 0,
     access_token: str = "graph-token-123",
+    session_cookie: str = "test-session-id",
 ) -> MagicMock:
     """Build a Request mock whose app.state carries the SharePoint size cap
-    and an oauth_client_manager that returns a valid Microsoft token. Set
-    access_token=None to simulate a missing/expired session."""
+    and an oauth_manager.get_oauth_token that returns a valid Microsoft
+    token. Pass access_token=None to simulate refresh failure and
+    session_cookie=None to simulate a missing oauth_session_id cookie."""
     request = MagicMock()
     request.app.state.config.SHAREPOINT_IMPORT_MAX_TOTAL_SIZE_MB = (
         sharepoint_import_max_total_size_mb
     )
+    request.cookies = {"oauth_session_id": session_cookie} if session_cookie else {}
     token_payload = {"access_token": access_token} if access_token else None
-    request.app.state.oauth_client_manager = MagicMock(spec=OAuthClientManager)
-    request.app.state.oauth_client_manager.get_oauth_token = AsyncMock(
+    request.app.state.oauth_manager = MagicMock(spec=OAuthManager)
+    request.app.state.oauth_manager.get_oauth_token = AsyncMock(
         return_value=token_payload
     )
     return request
@@ -1346,11 +1349,7 @@ class TestMicrosoftAccessTokenHelper:
         from open_webui.routers.knowledge import _get_microsoft_access_token
         from fastapi import HTTPException
 
-        request = MagicMock()
-        request.app.state.oauth_client_manager = MagicMock(spec=OAuthClientManager)
-        request.app.state.oauth_client_manager.get_oauth_token = AsyncMock(
-            return_value=None
-        )
+        request = _make_request(access_token=None)
 
         with pytest.raises(HTTPException) as exc_info:
             await _get_microsoft_access_token(request, _make_user(), MagicMock())
@@ -1363,9 +1362,8 @@ class TestMicrosoftAccessTokenHelper:
         from open_webui.routers.knowledge import _get_microsoft_access_token
         from fastapi import HTTPException
 
-        request = MagicMock()
-        request.app.state.oauth_client_manager = MagicMock(spec=OAuthClientManager)
-        request.app.state.oauth_client_manager.get_oauth_token = AsyncMock(
+        request = _make_request()
+        request.app.state.oauth_manager.get_oauth_token = AsyncMock(
             return_value={"token_type": "Bearer"}
         )
 
@@ -1381,11 +1379,7 @@ class TestMicrosoftAccessTokenHelper:
         from open_webui.routers.knowledge import _get_microsoft_access_token
         from fastapi import HTTPException
 
-        request = MagicMock()
-        request.app.state.oauth_client_manager = MagicMock(spec=OAuthClientManager)
-        request.app.state.oauth_client_manager.get_oauth_token = AsyncMock(
-            return_value=None
-        )
+        request = _make_request(access_token=None)
 
         mock_oauth_sessions = MagicMock()
         mock_oauth_sessions.delete_session_by_id = AsyncMock()
@@ -1397,3 +1391,51 @@ class TestMicrosoftAccessTokenHelper:
                 await _get_microsoft_access_token(request, _make_user(), MagicMock())
 
         mock_oauth_sessions.delete_session_by_id.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_missing_cookie_falls_back_to_newest_provider_session(self):
+        """No oauth_session_id cookie → use newest stored Microsoft session."""
+        from open_webui.routers.knowledge import _get_microsoft_access_token
+
+        request = _make_request(session_cookie=None)
+        fallback_session = MagicMock(id="fallback-session-id")
+
+        mock_oauth_sessions = MagicMock()
+        mock_oauth_sessions.get_session_by_provider_and_user_id = AsyncMock(
+            return_value=fallback_session
+        )
+
+        with patch(
+            "open_webui.routers.knowledge.OAuthSessions", mock_oauth_sessions
+        ):
+            token = await _get_microsoft_access_token(
+                request, _make_user(), MagicMock()
+            )
+
+        assert token == "graph-token-123"
+        request.app.state.oauth_manager.get_oauth_token.assert_awaited_once_with(
+            USER_ID, "fallback-session-id"
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_cookie_and_no_stored_session_raises_401(self):
+        """Cookie missing AND no stored MS session → HTTP 401 with re-login hint."""
+        from open_webui.routers.knowledge import _get_microsoft_access_token
+        from fastapi import HTTPException
+
+        request = _make_request(session_cookie=None)
+        mock_oauth_sessions = MagicMock()
+        mock_oauth_sessions.get_session_by_provider_and_user_id = AsyncMock(
+            return_value=None
+        )
+
+        with patch(
+            "open_webui.routers.knowledge.OAuthSessions", mock_oauth_sessions
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                await _get_microsoft_access_token(
+                    request, _make_user(), MagicMock()
+                )
+
+        assert exc_info.value.status_code == 401
+        assert "log in with Microsoft SSO" in exc_info.value.detail
