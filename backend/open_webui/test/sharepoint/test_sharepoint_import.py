@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 
 from open_webui.utils.graph_client import GraphFolderListing, GraphFileItem
+from open_webui.utils.oauth import OAuthClientManager
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +86,8 @@ def _make_request(
         sharepoint_import_max_total_size_mb
     )
     token_payload = {"access_token": access_token} if access_token else None
-    request.app.state.oauth_client_manager.get_oauth_token_by_client_id = AsyncMock(
+    request.app.state.oauth_client_manager = MagicMock(spec=OAuthClientManager)
+    request.app.state.oauth_client_manager.get_oauth_token = AsyncMock(
         return_value=token_payload
     )
     return request
@@ -1312,3 +1314,86 @@ class TestSharePointPersistSource:
         assert form_data.meta["sharepoint_source"]["type"] == "folder"
         # Endpoint stamps last_imported_at server-side.
         assert "last_imported_at" in form_data.meta["sharepoint_source"]
+
+
+# ---------------------------------------------------------------------------
+# _get_microsoft_access_token edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestMicrosoftAccessTokenHelper:
+    """Edge cases for _get_microsoft_access_token in knowledge.py."""
+
+    @pytest.mark.asyncio
+    async def test_no_oauth_manager_raises_500(self):
+        """app.state has no oauth_client_manager -> HTTP 500."""
+        from open_webui.routers.knowledge import _get_microsoft_access_token
+        from fastapi import HTTPException
+
+        request = MagicMock()
+        state = MagicMock(spec=[])  # no attributes on spec -> getattr returns default
+        request.app.state = state
+
+        with pytest.raises(HTTPException) as exc_info:
+            await _get_microsoft_access_token(request, _make_user(), MagicMock())
+
+        assert exc_info.value.status_code == 500
+        assert "not initialised" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_get_oauth_token_returns_none_raises_401(self):
+        """get_oauth_token returns None (refresh failed) -> HTTP 401."""
+        from open_webui.routers.knowledge import _get_microsoft_access_token
+        from fastapi import HTTPException
+
+        request = MagicMock()
+        request.app.state.oauth_client_manager = MagicMock(spec=OAuthClientManager)
+        request.app.state.oauth_client_manager.get_oauth_token = AsyncMock(
+            return_value=None
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await _get_microsoft_access_token(request, _make_user(), MagicMock())
+
+        assert exc_info.value.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_get_oauth_token_returns_dict_without_access_token_raises_401(self):
+        """get_oauth_token returns dict missing access_token key -> HTTP 401."""
+        from open_webui.routers.knowledge import _get_microsoft_access_token
+        from fastapi import HTTPException
+
+        request = MagicMock()
+        request.app.state.oauth_client_manager = MagicMock(spec=OAuthClientManager)
+        request.app.state.oauth_client_manager.get_oauth_token = AsyncMock(
+            return_value={"token_type": "Bearer"}
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await _get_microsoft_access_token(request, _make_user(), MagicMock())
+
+        assert exc_info.value.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_refresh_failure_does_not_delete_session(self):
+        """When get_oauth_token returns None, OAuthSessions.delete_session_by_id
+        must NOT be called — transient failures must not force re-linking."""
+        from open_webui.routers.knowledge import _get_microsoft_access_token
+        from fastapi import HTTPException
+
+        request = MagicMock()
+        request.app.state.oauth_client_manager = MagicMock(spec=OAuthClientManager)
+        request.app.state.oauth_client_manager.get_oauth_token = AsyncMock(
+            return_value=None
+        )
+
+        mock_oauth_sessions = MagicMock()
+        mock_oauth_sessions.delete_session_by_id = AsyncMock()
+
+        with patch(
+            "open_webui.routers.knowledge.OAuthSessions", mock_oauth_sessions
+        ):
+            with pytest.raises(HTTPException):
+                await _get_microsoft_access_token(request, _make_user(), MagicMock())
+
+        mock_oauth_sessions.delete_session_by_id.assert_not_called()

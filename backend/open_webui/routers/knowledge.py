@@ -1317,7 +1317,7 @@ async def _assert_knowledge_write_access(knowledge, user, db):
 async def _get_microsoft_access_token(request: Request, user, db) -> str:
     """Fetch the user's Microsoft OAuth access token, refreshing if expiring.
 
-    Delegates to the shared OAuthClientManager.get_oauth_token_by_client_id
+    Delegates to the shared OAuthClientManager.get_oauth_token
     path — same logic the MCP-tool flow uses — so SharePoint, MCP, and any
     future Graph caller share one refresh + lookup implementation. Provider
     column "microsoft" lines up with the client_id slot expected by that API.
@@ -1331,9 +1331,7 @@ async def _get_microsoft_access_token(request: Request, user, db) -> str:
             detail="OAuth client manager not initialised.",
         )
 
-    token = await oauth_client_manager.get_oauth_token_by_client_id(
-        user_id=user.id, client_id="microsoft"
-    )
+    token = await oauth_client_manager.get_oauth_token(user.id, "microsoft")
     access_token = token.get("access_token") if isinstance(token, dict) else None
     if access_token:
         return access_token
