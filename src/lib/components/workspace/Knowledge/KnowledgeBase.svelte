@@ -173,8 +173,9 @@
 	const getItemsPage = async () => {
 		if (knowledgeId === null) return;
 
-		fileItems = null;
-		fileItemsTotal = null;
+		if (fileItems === null) {
+			fileItemsTotal = null;
+		}
 
 		if (sortKey === null) {
 			direction = null;
@@ -435,9 +436,11 @@
 				);
 			}
 			updateProgress();
-			// Refresh the visible file list so each new file pops in.
-			await getItemsPage();
 		}
+
+		// Single refresh after all files are processed — avoids per-file
+		// null-flash that caused the list to flicker on every import.
+		await getItemsPage();
 
 		toast.dismiss(progressToastId);
 
@@ -1422,6 +1425,17 @@
 										</div>
 										<div class=" flex-1 text-lg line-clamp-1">
 											{selectedFile?.meta?.name}
+										</div>
+
+										<div>
+											<button
+												class="flex self-center w-fit text-sm py-1 px-2.5 dark:text-gray-300 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 rounded-lg"
+												on:click={() => {
+													showFilePreview = true;
+												}}
+											>
+												{$i18n.t('Preview')}
+											</button>
 										</div>
 
 										{#if knowledge?.write_access}
