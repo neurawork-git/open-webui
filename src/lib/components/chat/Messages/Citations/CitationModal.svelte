@@ -39,6 +39,55 @@
 		return 'bg-red-200 dark:bg-red-800 text-red-800 dark:text-red-200';
 	}
 
+	/**
+	 * Highlights BM25 matched keywords in the text by wrapping them in <mark> tags.
+	 * Keywords are matched case-insensitively but original case is preserved.
+	 */
+	function highlightKeywords(text: string, keywords: string[]): string {
+		if (!keywords || keywords.length === 0) return escapeHtml(text);
+
+		// Escape HTML first to prevent XSS
+		let escaped = escapeHtml(text);
+
+		// Sort keywords by length (longest first) to avoid partial replacements
+		const sortedKeywords = [...keywords].sort((a, b) => b.length - a.length);
+
+		for (const keyword of sortedKeywords) {
+			// Create regex that matches word boundaries, case-insensitive
+			const escapedKeyword = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+			const regex = new RegExp(`(\\b)(${escapedKeyword})(\\b)`, 'gi');
+			escaped = escaped.replace(
+				regex,
+				'$1<mark class="bg-yellow-200 dark:bg-yellow-700 text-yellow-900 dark:text-yellow-100 px-0.5 rounded">$2</mark>$3'
+			);
+		}
+
+		return escaped;
+	}
+
+	function escapeHtml(text: string): string {
+		const div = document.createElement('div');
+		div.textContent = text;
+		return div.innerHTML;
+	}
+
+	/**
+	 * Gets all unique BM25 keywords from all documents in the citation.
+	 */
+	function getAllKeywords(documents: any[]): string[] {
+		const keywordSet = new Set<string>();
+		for (const doc of documents) {
+			const keywords = doc.metadata?.bm25_matched_keywords;
+			if (Array.isArray(keywords)) {
+				keywords.forEach((k) => keywordSet.add(k.toLowerCase()));
+			}
+		}
+		return Array.from(keywordSet);
+	}
+
+	// Reactive variable for all keywords across documents
+	$: allKeywords = mergedDocuments ? getAllKeywords(mergedDocuments) : [];
+
 	$: if (citation) {
 		expandedDocs = new Set();
 		mergedDocuments = citation.document?.map((c, i) => {
@@ -144,6 +193,24 @@
 			<div
 				class="flex flex-col w-full dark:text-gray-200 overflow-y-scroll max-h-[22rem] scrollbar-thin gap-1"
 			>
+				<!-- BM25 Keyword Legend -->
+				{#if allKeywords.length > 0}
+					<div
+						class="flex flex-wrap items-center gap-2 mb-3 pb-2 border-b border-gray-200 dark:border-gray-700"
+					>
+						<span class="text-xs text-gray-500 dark:text-gray-400"
+							>{$i18n.t('Matched keywords')}:</span
+						>
+						{#each allKeywords as keyword}
+							<span
+								class="text-xs px-1.5 py-0.5 bg-yellow-200 dark:bg-yellow-700 text-yellow-900 dark:text-yellow-100 rounded"
+							>
+								{keyword}
+							</span>
+						{/each}
+					</div>
+				{/if}
+
 				{#each mergedDocuments as document, documentIdx}
 					<div class="flex flex-col w-full gap-2">
 						{#if document.metadata?.parameters}
@@ -224,6 +291,7 @@
 								></iframe>
 							{:else}
 								{@const rawContent = document.document.trim().replace(/\n\n+/g, '\n\n')}
+								{@const keywords = document.metadata?.bm25_matched_keywords}
 								{@const isTruncated =
 									($settings?.renderMarkdownInPreviews ?? true) &&
 									rawContent.length > CONTENT_PREVIEW_LIMIT &&
@@ -252,6 +320,11 @@
 											})}
 										</button>
 									{/if}
+								{:else if keywords && keywords.length > 0}
+									<!-- Highlighted content with BM25 keywords -->
+									<div class="text-sm dark:text-gray-400 whitespace-pre-line">
+										{@html highlightKeywords(rawContent, keywords)}
+									</div>
 								{:else}
 									<pre class="text-sm dark:text-gray-400 whitespace-pre-line">{rawContent}</pre>
 								{/if}

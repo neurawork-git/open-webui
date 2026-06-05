@@ -14,7 +14,7 @@
 	import { onMount, tick, getContext, createEventDispatcher } from 'svelte';
 
 	import { createPicker, getAuthToken } from '$lib/utils/google-drive-picker';
-	import { pickAndDownloadFile } from '$lib/utils/onedrive-file-picker';
+	import { pickAndDownloadFiles } from '$lib/utils/onedrive-file-picker';
 	import { KokoroWorker } from '$lib/workers/KokoroWorker';
 
 	const dispatch = createEventDispatcher();
@@ -619,6 +619,9 @@
 			size: file.size,
 			error: '',
 			itemId: tempItemId,
+			// Default chat file uploads to full-context injection instead of RAG retrieval.
+			// Images skip this — they bypass the doc pipeline entirely and go multimodal.
+			...(file.type?.startsWith('image/') ? {} : { context: 'full' }),
 			...itemData
 		};
 
@@ -1651,14 +1654,16 @@
 										}}
 										uploadOneDriveHandler={async (authorityType) => {
 											try {
-												const fileData = await pickAndDownloadFile(authorityType);
-												if (fileData) {
-													const file = new File([fileData.blob], fileData.name, {
-														type: fileData.blob.type || 'application/octet-stream'
-													});
-													await uploadFileHandler(file);
+												const files = await pickAndDownloadFiles(authorityType);
+												if (files.length > 0) {
+													for (const fileData of files) {
+														const file = new File([fileData.blob], fileData.name, {
+															type: fileData.blob.type || 'application/octet-stream'
+														});
+														await uploadFileHandler(file);
+													}
 												} else {
-													console.log('No file was selected from OneDrive');
+													console.log('No files were selected from OneDrive');
 												}
 											} catch (error) {
 												console.error('OneDrive Error:', error);

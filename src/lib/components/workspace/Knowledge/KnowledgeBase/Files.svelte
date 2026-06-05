@@ -29,6 +29,7 @@
 	export let directories = [];
 
 	export let onClick = (fileId) => {};
+	export let onEdit = (fileId) => {};
 	export let onDelete = (fileId) => {};
 	export let onRename = (fileId: string, name: string) => {};
 	export let onNavigateDirectory = (directoryId: string) => {};
@@ -182,6 +183,16 @@
 							<div
 								class="min-w-[140px] rounded-2xl p-1 z-[9999999] bg-white dark:bg-gray-850 dark:text-white shadow-lg border border-gray-100 dark:border-gray-800"
 							>
+								<button
+									type="button"
+									class="select-none flex rounded-xl py-1.5 px-3 w-full hover:bg-gray-50 dark:hover:bg-gray-800 transition items-center gap-2 text-sm"
+									on:click={() => {
+										onEdit(file?.id ?? file?.tempId);
+									}}
+								>
+									<Pencil className="size-3.5" />
+									{$i18n.t('Edit content')}
+								</button>
 								<button
 									type="button"
 									class="select-none flex rounded-xl py-1.5 px-3 w-full hover:bg-gray-50 dark:hover:bg-gray-800 transition items-center gap-2 text-sm"
