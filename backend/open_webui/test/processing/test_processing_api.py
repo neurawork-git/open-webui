@@ -277,6 +277,9 @@ class TestRetryProcessingTask:
         _current_db = mock_db
 
         mock_file = MagicMock(id="doc-456", user_id="user-789", filename="test.pdf")
+        # meta must be a real dict: reprocess_file() does file.meta.get("collection_name")
+        # and feeds it into ProcessFileForm, which Pydantic rejects if it is a MagicMock.
+        mock_file.meta = {"collection_name": "test-collection"}
         with patch('open_webui.models.files.Files.get_file_by_id', new=AsyncMock(return_value=mock_file)), \
              patch('open_webui.routers.processing.Users.get_user_by_id', return_value=MagicMock(id="user-789")), \
              patch.object(ProcessingTasks, 'retry_task', new=AsyncMock()) as mock_retry:
