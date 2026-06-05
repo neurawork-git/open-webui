@@ -143,6 +143,12 @@ else:
 
 VERSION = PACKAGE_DATA['version']
 
+# Fork version suffix - allows forks to append a custom suffix without modifying package.json
+# Example: FORK_VERSION_SUFFIX="neurawork.1" results in version "0.6.40-neurawork.1"
+FORK_VERSION_SUFFIX = os.environ.get("FORK_VERSION_SUFFIX", "")
+if FORK_VERSION_SUFFIX:
+    VERSION = f"{VERSION}-{FORK_VERSION_SUFFIX}"
+
 
 DEPLOYMENT_ID = os.getenv('DEPLOYMENT_ID', '')
 INSTANCE_ID = os.getenv('INSTANCE_ID', str(uuid4()))
@@ -594,6 +600,16 @@ else:
         RAG_EMBEDDING_TIMEOUT = int(RAG_EMBEDDING_TIMEOUT)
     except Exception:
         RAG_EMBEDDING_TIMEOUT = None
+
+
+####################################
+# EMBEDDING RETRY SETTINGS
+####################################
+
+EMBEDDING_MAX_RETRIES = int(os.environ.get("EMBEDDING_MAX_RETRIES", "3"))
+EMBEDDING_RETRY_INITIAL_DELAY = float(os.environ.get("EMBEDDING_RETRY_INITIAL_DELAY", "1.0"))
+EMBEDDING_RETRY_MAX_DELAY = float(os.environ.get("EMBEDDING_RETRY_MAX_DELAY", "30.0"))
+EMBEDDING_RETRY_BACKOFF_FACTOR = float(os.environ.get("EMBEDDING_RETRY_BACKOFF_FACTOR", "2.0"))
 
 
 ####################################

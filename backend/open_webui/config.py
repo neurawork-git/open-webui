@@ -988,13 +988,20 @@ ENABLE_ONEDRIVE_INTEGRATION = ConfigVar(
 
 ONEDRIVE_CLIENT_ID = os.getenv('ONEDRIVE_CLIENT_ID', '')
 ONEDRIVE_CLIENT_ID_PERSONAL = os.getenv('ONEDRIVE_CLIENT_ID_PERSONAL', ONEDRIVE_CLIENT_ID)
-ONEDRIVE_CLIENT_ID_BUSINESS = os.getenv('ONEDRIVE_CLIENT_ID_BUSINESS', ONEDRIVE_CLIENT_ID)
+ONEDRIVE_CLIENT_ID_BUSINESS = ConfigVar(
+    'ONEDRIVE_CLIENT_ID_BUSINESS',
+    'onedrive.client_id_business',
+    os.environ.get(
+        'ONEDRIVE_CLIENT_ID_BUSINESS',
+        ONEDRIVE_CLIENT_ID or os.getenv('MICROSOFT_CLIENT_ID', ''),
+    ),
+)
 
 ENABLE_ONEDRIVE_PERSONAL = os.getenv('ENABLE_ONEDRIVE_PERSONAL', 'True').lower() == 'true' and bool(
     ONEDRIVE_CLIENT_ID_PERSONAL
 )
 ENABLE_ONEDRIVE_BUSINESS = os.getenv('ENABLE_ONEDRIVE_BUSINESS', 'True').lower() == 'true' and bool(
-    ONEDRIVE_CLIENT_ID_BUSINESS
+    ONEDRIVE_CLIENT_ID_BUSINESS.value
 )
 
 ONEDRIVE_SHAREPOINT_URL = ConfigVar(
@@ -1214,6 +1221,12 @@ BYPASS_EMBEDDING_AND_RETRIEVAL = ConfigVar(
     os.getenv('BYPASS_EMBEDDING_AND_RETRIEVAL', 'False').lower() == 'true',
 )
 
+RAG_NATIVE_FC_FORCE_RETRIEVAL = ConfigVar(
+    'RAG_NATIVE_FC_FORCE_RETRIEVAL',
+    'rag.native_fc_force_retrieval',
+    os.getenv('RAG_NATIVE_FC_FORCE_RETRIEVAL', 'True').lower() == 'true',
+)
+
 
 RAG_TOP_K = ConfigVar('RAG_TOP_K', 'rag.top_k', int(os.getenv('RAG_TOP_K', '3')))
 RAG_TOP_K_RERANKER = ConfigVar(
@@ -1260,6 +1273,15 @@ RAG_FILE_MAX_SIZE = ConfigVar(
     'RAG_FILE_MAX_SIZE',
     'rag.file.max_size',
     (int(os.getenv('RAG_FILE_MAX_SIZE')) if os.getenv('RAG_FILE_MAX_SIZE') else None),
+)
+
+# Hard upper bound (in MB) on the cumulative size of one SharePoint folder/site
+# import. Protects the OCR + embedding pipeline from runaway imports. Empty /
+# zero means unlimited.
+SHAREPOINT_IMPORT_MAX_TOTAL_SIZE_MB = ConfigVar(
+    'SHAREPOINT_IMPORT_MAX_TOTAL_SIZE_MB',
+    'rag.sharepoint.import_max_total_size_mb',
+    int(os.environ.get('SHAREPOINT_IMPORT_MAX_TOTAL_SIZE_MB', '200')),
 )
 
 FILE_IMAGE_COMPRESSION_WIDTH = ConfigVar(
@@ -1381,6 +1403,13 @@ RAG_EXTERNAL_RERANKER_TIMEOUT = ConfigVar(
     os.getenv('RAG_EXTERNAL_RERANKER_TIMEOUT', ''),
 )
 
+# Enable/disable reranking - when disabled, raw hybrid scores are preserved
+ENABLE_RAG_RERANKING = ConfigVar(
+    "ENABLE_RAG_RERANKING",
+    "rag.enable_reranking",
+    os.environ.get("ENABLE_RAG_RERANKING", "True").lower() == "true",
+)
+
 
 RAG_TEXT_SPLITTER = ConfigVar(
     'RAG_TEXT_SPLITTER',
@@ -1417,30 +1446,39 @@ CHUNK_OVERLAP = ConfigVar(
     int(os.getenv('CHUNK_OVERLAP', '100')),
 )
 
-DEFAULT_RAG_TEMPLATE = """### Task:
+DEFAULT_RAG_TEMPLATE = """### Task
 Respond to the user query using the provided context, incorporating inline citations in the format [id] **only when the <source> tag includes an explicit id attribute** (e.g., <source id="1">).
 
-### Guidelines:
+### Knowledge Sources
+The following knowledge bases were searched for this query:
+{{KNOWLEDGE_BASES}}
+
+### Retrieved Context
+<context>
+{{CONTEXT}}
+</context>
+
+### Guidelines
+- **Citations**: Only include inline citations using [id] format (e.g., [1], [2], [3]) when the <source> tag includes an id attribute. Use ONLY the number in brackets - never write "Quelle", "Source", or any other text.
+- Do not cite if the <source> tag does not contain an id attribute.
+- Ensure citations are concise and directly related to the information provided.
+- Only cite sources that are relevant to the query.
 - If you don't know the answer, clearly state that.
 - If uncertain, ask the user for clarification.
 - Respond in the same language as the user's query.
 - If the context is unreadable or of poor quality, inform the user and provide the best possible answer.
 - If the answer isn't present in the context but you possess the knowledge, explain this to the user and provide the answer using your own understanding.
-- **Only include inline citations using [id] (e.g., [1], [2]) when the <source> tag includes an id attribute.**
-- Do not cite if the <source> tag does not contain an id attribute.
 - Do not use XML tags in your response.
-- Ensure citations are concise and directly related to the information provided.
+- **Knowledge awareness**: The knowledge bases listed above contain information, even if the retrieved context appears sparse. If context doesn't fully answer the question, suggest the user rephrase or ask about specific topics within these knowledge bases.
 
-### Example of Citation:
-If the user asks about a specific topic and the information is found in a source with a provided id attribute, the response should include the citation like in the following example:
-* "According to the study, the proposed method increases efficiency by 20% [1]."
+### Example of Citation
+If information comes from a source with id="1", write:
+* "The proposed method increases efficiency by 20% [1]."
 
-### Output:
-Provide a clear and direct response to the user's query, including inline citations in the format [id] only when the <source> tag with id attribute is present in the context.
+NOT: "[Quelle: 1]" or "[Source 1]" - always use just [1], [2], etc.
 
-<context>
-{{CONTEXT}}
-</context>
+### User Question
+{{QUERY}}
 """
 
 RAG_TEMPLATE = ConfigVar(
