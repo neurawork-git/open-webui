@@ -7,6 +7,7 @@ node_modules
 /package
 .env
 .env.*
+venv311
 !.env.example
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
@@ -16,6 +17,8 @@ __pycache__/
 *$py.class
 .nvmrc
 CLAUDE.md
+.repowise/
+.claude/playwright-profile/
 # C extensions
 *.so
 
@@ -310,3 +313,23 @@ dist
 cypress/videos
 cypress/screenshots
 .vscode/settings.json
+
+# Migration scripts data
+migration_scripts/uploads/
+migration_scripts/webui.db
+migration_scripts/venv/
+*.zip
+
+# AI assistant directories
+.claude/
+.serena/
+.repowise/
+
+# Stray PowerShell redirect artifact (Windows)
+/nul
+
+# Local fork-specific PRPs (not part of upstream)
+PRPs/fork-rescue-mission.md
+
+# Config dumps with secrets
+migration_scripts/configs_dump.json
