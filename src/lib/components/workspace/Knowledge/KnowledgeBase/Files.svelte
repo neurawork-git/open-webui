@@ -23,6 +23,7 @@
 	export let files = [];
 
 	export let onClick = (fileId) => {};
+	export let onEdit = (fileId) => {};
 	export let onDelete = (fileId) => {};
 </script>
 
@@ -35,13 +36,12 @@
 		>
 			<div class="flex items-center">
 				{#if file?.status !== 'uploading'}
-					<Tooltip content={$i18n.t('Open file')}>
+					<Tooltip content={$i18n.t('Edit content')}>
 						<button
 							class="p-1 rounded-full hover:bg-gray-100 dark:hover:bg-gray-850 transition"
 							type="button"
-							on:click={() => {
-								let fileId = file?.id ?? file?.tempId;
-								window.open(`${WEBUI_BASE_URL}/api/v1/files/${fileId}/content`, '_blank');
+							on:click|stopPropagation={() => {
+								onEdit(file?.id ?? file?.tempId);
 							}}
 						>
 							<DocumentPage className="size-3.5" />

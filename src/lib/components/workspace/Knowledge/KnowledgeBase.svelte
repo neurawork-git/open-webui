@@ -55,6 +55,7 @@
 
 	import SyncConfirmDialog from '../../common/ConfirmDialog.svelte';
 	import Drawer from '$lib/components/common/Drawer.svelte';
+	import FileItemModal from '$lib/components/common/FileItemModal.svelte';
 	import ChevronLeft from '$lib/components/icons/ChevronLeft.svelte';
 	import LockClosed from '$lib/components/icons/LockClosed.svelte';
 	import AccessControlModal from '../common/AccessControlModal.svelte';
@@ -114,6 +115,7 @@
 	let selectedFileId = null;
 	let selectedFile = null;
 	let selectedFileContent = '';
+	let showFilePreview = false;
 
 	let showReindexConfirmModal = false;
 	let isReindexing = false;
@@ -1365,10 +1367,19 @@
 											{knowledge}
 											{selectedFileId}
 											onClick={(fileId) => {
+												if (fileItems) {
+													const file = fileItems.find((f) => f.id === fileId);
+													if (file) {
+														selectedFile = file;
+														showFilePreview = true;
+													}
+												}
+											}}
+											onEdit={(fileId) => {
 												selectedFileId = fileId;
 
 												if (fileItems) {
-													const file = fileItems.find((file) => file.id === selectedFileId);
+													const file = fileItems.find((f) => f.id === selectedFileId);
 													if (file) {
 														fileSelectHandler(file);
 													} else {
@@ -1399,6 +1410,14 @@
 						</div>
 					</div>
 
+					{#if selectedFile !== null}
+						<FileItemModal
+							bind:show={showFilePreview}
+							item={selectedFile}
+							edit={false}
+						/>
+					{/if}
+
 					{#if selectedFileId !== null}
 						<Drawer
 							className="h-full"
@@ -1425,17 +1444,6 @@
 										</div>
 										<div class=" flex-1 text-lg line-clamp-1">
 											{selectedFile?.meta?.name}
-										</div>
-
-										<div>
-											<button
-												class="flex self-center w-fit text-sm py-1 px-2.5 dark:text-gray-300 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 rounded-lg"
-												on:click={() => {
-													showFilePreview = true;
-												}}
-											>
-												{$i18n.t('Preview')}
-											</button>
 										</div>
 
 										{#if knowledge?.write_access}
