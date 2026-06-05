@@ -11,13 +11,16 @@ Access control semantics:
 - {read: {...}, write: {...}}: Custom permissions -> insert specific grants
 """
 
+from typing import Sequence, Union
+import json
+import logging
 import time
 import uuid
-from typing import Sequence, Union
 
-import sqlalchemy as sa
 from alembic import op
-from open_webui.migrations.util import get_existing_tables
+import sqlalchemy as sa
+
+log = logging.getLogger(__name__)
 
 revision: str = 'f1e2d3c4b5a6'
 down_revision: Union[str, None] = '8452d01d26d7'
@@ -25,11 +28,82 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
-def upgrade() -> None:
-    existing_tables = set(get_existing_tables())
+# INSERT with ON CONFLICT DO NOTHING — idempotent, no silent failures
+_UPSERT_SQL = sa.text("""
+    INSERT INTO access_grant (id, resource_type, resource_id, principal_type, principal_id, permission, created_at)
+    VALUES (:id, :resource_type, :resource_id, :principal_type, :principal_id, :permission, :created_at)
+    ON CONFLICT ON CONSTRAINT uq_access_grant_grant DO NOTHING
+""")
 
-    # Create access_grant table
-    if 'access_grant' not in existing_tables:
+# SQLite equivalent (no ON CONFLICT on named constraints)
+_UPSERT_SQL_SQLITE = sa.text("""
+    INSERT OR IGNORE INTO access_grant (id, resource_type, resource_id, principal_type, principal_id, permission, created_at)
+    VALUES (:id, :resource_type, :resource_id, :principal_type, :principal_id, :permission, :created_at)
+""")
+
+
+def _table_exists(conn, table_name: str) -> bool:
+    """Check table existence via raw SQL — reliable across dialects."""
+    dialect = conn.dialect.name
+    if dialect == 'postgresql':
+        result = conn.execute(
+            sa.text(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema = 'public' AND table_name = :t)"
+            ),
+            {'t': table_name},
+        )
+    else:
+        result = conn.execute(
+            sa.text(
+                "SELECT EXISTS (SELECT 1 FROM sqlite_master "
+                "WHERE type='table' AND name = :t)"
+            ),
+            {'t': table_name},
+        )
+    return result.scalar()
+
+
+def _column_exists(conn, table_name: str, column_name: str) -> bool:
+    """Check column existence via raw SQL."""
+    dialect = conn.dialect.name
+    if dialect == 'postgresql':
+        result = conn.execute(
+            sa.text(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
+                "WHERE table_schema = 'public' AND table_name = :t AND column_name = :c)"
+            ),
+            {'t': table_name, 'c': column_name},
+        )
+    else:
+        # SQLite: parse table_info
+        cols = conn.execute(sa.text(f'PRAGMA table_info("{table_name}")')).fetchall()
+        return any(c[1] == column_name for c in cols)
+    return result.scalar()
+
+
+def _insert_grant(conn, upsert_sql, resource_type, resource_id, principal_type, principal_id, permission, now):
+    """Insert a single grant, returns True if inserted."""
+    conn.execute(
+        upsert_sql,
+        {
+            'id': str(uuid.uuid4()),
+            'resource_type': resource_type,
+            'resource_id': resource_id,
+            'principal_type': principal_type,
+            'principal_id': principal_id,
+            'permission': permission,
+            'created_at': now,
+        },
+    )
+
+
+def upgrade() -> None:
+    conn = op.get_bind()
+    is_pg = conn.dialect.name == 'postgresql'
+
+    # 1. Create access_grant table if it doesn't exist
+    if not _table_exists(conn, 'access_grant'):
         op.create_table(
             'access_grant',
             sa.Column('id', sa.Text(), nullable=False, primary_key=True),
@@ -59,10 +133,9 @@ def upgrade() -> None:
             ['principal_type', 'principal_id'],
         )
 
-    # Backfill existing access_control JSON data
-    conn = op.get_bind()
+    # 2. Backfill from access_control JSON columns (idempotent — always runs)
+    upsert_sql = _UPSERT_SQL if is_pg else _UPSERT_SQL_SQLITE
 
-    # Tables with access_control JSON columns: (table_name, resource_type)
     resource_tables = [
         ('knowledge', 'knowledge'),
         ('prompt', 'prompt'),
@@ -74,153 +147,91 @@ def upgrade() -> None:
     ]
 
     now = int(time.time())
-    inserted = set()
+    total_inserted = 0
 
     for table_name, resource_type in resource_tables:
-        if table_name not in existing_tables:
+        if not _table_exists(conn, table_name):
             continue
-
-        # Check if access_control and id columns exist (may already be dropped on re-run,
-        # or table may have been rebuilt without id during intermediate migration states)
+        # Fold-in from upstream v0.9.6: clear inspector metadata cache before the
+        # per-table column checks so columns added/dropped by prior table-rebuilding
+        # migrations are seen freshly (the raw-SQL helpers below are dialect-reliable,
+        # but any cached SQLAlchemy reflection must not go stale mid-upgrade).
         insp = sa.inspect(conn)
-        insp.clear_cache()  # Ensure fresh metadata after prior migrations that rebuild tables
-        table_cols = {c['name'] for c in insp.get_columns(table_name)}
-        if 'access_control' not in table_cols or 'id' not in table_cols:
+        insp.clear_cache()
+        if not _column_exists(conn, table_name, 'access_control'):
+            log.info(f'  {table_name}: access_control column already dropped, skipping backfill')
             continue
 
-        # Query all rows
-        result = conn.execute(sa.text(f'SELECT id, access_control FROM "{table_name}"'))
-        rows = result.fetchall()
+        try:
+            result = conn.execute(sa.text(f'SELECT id, access_control FROM "{table_name}"'))
+            rows = result.fetchall()
+        except Exception as e:
+            log.warning(f'  {table_name}: failed to read access_control: {e}')
+            continue
 
+        table_inserted = 0
         for row in rows:
             resource_id = row[0]
-            access_control_json = row[1]
+            ac_raw = row[1]
 
-            # Handle NULL or JSON "null" = public access (user:* for read)
-            # Could be Python None (SQL NULL) or string "null" (JSON null)
-            # EXCEPTION: files with NULL are PRIVATE (owner-only), not public
+            # Parse access_control value
             is_null = (
-                access_control_json is None
-                or access_control_json == 'null'
-                or (isinstance(access_control_json, str) and access_control_json.strip().lower() == 'null')
+                ac_raw is None
+                or ac_raw == 'null'
+                or (isinstance(ac_raw, str) and ac_raw.strip().lower() == 'null')
             )
-            if is_null:
-                # Files: NULL = private (no entry needed, owner has implicit access)
-                # Other resources: NULL = public (insert user:* for read)
-                if resource_type == 'file':
-                    continue  # Private - no entry needed
 
-                key = (resource_type, resource_id, 'user', '*', 'read')
-                if key not in inserted:
-                    try:
-                        conn.execute(
-                            sa.text("""
-                                INSERT INTO access_grant (id, resource_type, resource_id, principal_type, principal_id, permission, created_at)
-                                VALUES (:id, :resource_type, :resource_id, :principal_type, :principal_id, :permission, :created_at)
-                            """),
-                            {
-                                'id': str(uuid.uuid4()),
-                                'resource_type': resource_type,
-                                'resource_id': resource_id,
-                                'principal_type': 'user',
-                                'principal_id': '*',
-                                'permission': 'read',
-                                'created_at': now,
-                            },
-                        )
-                        inserted.add(key)
-                    except Exception:
-                        pass
+            if is_null:
+                # Files: NULL = private (owner-only), no grant needed
+                # Other resources: NULL = public (user:* read)
+                if resource_type != 'file':
+                    _insert_grant(conn, upsert_sql, resource_type, resource_id, 'user', '*', 'read', now)
+                    table_inserted += 1
                 continue
 
-            # Handle JSON parsing
-            if isinstance(access_control_json, str):
-                import json
-
+            # Parse JSON
+            ac = ac_raw
+            if isinstance(ac, str):
                 try:
-                    access_control_json = json.loads(access_control_json)
-                except Exception:
+                    ac = json.loads(ac)
+                except (json.JSONDecodeError, ValueError) as e:
+                    log.warning(f'  {table_name}/{resource_id}: invalid JSON: {e}')
                     continue
 
-            # Handle {} = private/owner-only - NO entries needed
-            # Owner access is implicit, no grants to store
-            if not access_control_json or not isinstance(access_control_json, dict):
+            if not ac or not isinstance(ac, dict):
                 continue
 
-            # Check if it's effectively empty (no read/write keys with content)
-            read_data = access_control_json.get('read', {})
-            write_data = access_control_json.get('write', {})
-
-            has_read_grants = read_data.get('group_ids', []) or read_data.get('user_ids', [])
-            has_write_grants = write_data.get('group_ids', []) or write_data.get('user_ids', [])
-
-            if not has_read_grants and not has_write_grants:
-                # Empty permissions = private, no grants needed
-                continue
-
-            # Extract permissions and insert into access_grant table
+            # Extract and insert grants for each permission level
             for permission in ['read', 'write']:
-                perm_data = access_control_json.get(permission, {})
-                if not perm_data:
+                perm_data = ac.get(permission, {})
+                if not perm_data or not isinstance(perm_data, dict):
                     continue
 
                 for group_id in perm_data.get('group_ids', []):
-                    key = (resource_type, resource_id, 'group', group_id, permission)
-                    if key in inserted:
-                        continue
-                    try:
-                        conn.execute(
-                            sa.text("""
-                                INSERT INTO access_grant (id, resource_type, resource_id, principal_type, principal_id, permission, created_at)
-                                VALUES (:id, :resource_type, :resource_id, :principal_type, :principal_id, :permission, :created_at)
-                            """),
-                            {
-                                'id': str(uuid.uuid4()),
-                                'resource_type': resource_type,
-                                'resource_id': resource_id,
-                                'principal_type': 'group',
-                                'principal_id': group_id,
-                                'permission': permission,
-                                'created_at': now,
-                            },
-                        )
-                        inserted.add(key)
-                    except Exception:
-                        pass
+                    _insert_grant(conn, upsert_sql, resource_type, resource_id, 'group', group_id, permission, now)
+                    table_inserted += 1
 
                 for user_id in perm_data.get('user_ids', []):
-                    key = (resource_type, resource_id, 'user', user_id, permission)
-                    if key in inserted:
-                        continue
-                    try:
-                        conn.execute(
-                            sa.text("""
-                                INSERT INTO access_grant (id, resource_type, resource_id, principal_type, principal_id, permission, created_at)
-                                VALUES (:id, :resource_type, :resource_id, :principal_type, :principal_id, :permission, :created_at)
-                            """),
-                            {
-                                'id': str(uuid.uuid4()),
-                                'resource_type': resource_type,
-                                'resource_id': resource_id,
-                                'principal_type': 'user',
-                                'principal_id': user_id,
-                                'permission': permission,
-                                'created_at': now,
-                            },
-                        )
-                        inserted.add(key)
-                    except Exception:
-                        pass
+                    _insert_grant(conn, upsert_sql, resource_type, resource_id, 'user', user_id, permission, now)
+                    table_inserted += 1
 
-    # Drop access_control columns from resource tables (only if column still exists)
-    inspector = sa.inspect(conn)
+        total_inserted += table_inserted
+        log.info(f'  {table_name}: processed {len(rows)} rows, {table_inserted} grants upserted')
+
+    log.info(f'access_grant backfill complete: {total_inserted} total grants upserted')
+
+    # 3. Drop access_control columns (only if backfill succeeded)
     for table_name, _ in resource_tables:
-        if table_name not in existing_tables:
+        if not _table_exists(conn, table_name):
             continue
-        cols = {c['name'] for c in inspector.get_columns(table_name)}
-        if 'access_control' in cols:
+        if not _column_exists(conn, table_name, 'access_control'):
+            continue
+        try:
             with op.batch_alter_table(table_name) as batch:
                 batch.drop_column('access_control')
+            log.info(f'  {table_name}: dropped access_control column')
+        except Exception as e:
+            log.warning(f'  {table_name}: could not drop access_control column: {e}')
 
 
 def downgrade() -> None:
