@@ -2471,21 +2471,35 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             if 'files' in folder.data:
                 # Defensive: filter to entries the caller can still read.
                 allowed_files = await get_accessible_folder_files(folder.data['files'], user)
-                if metadata.get('params', {}).get('function_calling') != 'native':
+                # FORK: KB-deterministic-inject — when force_retrieval enabled,
+                # inject folder knowledge into RAG even on native function-calling.
+                # NOTE: Intentional dual-path when force_retrieval=True on native FC —
+                # RAG injection (below) AND the folder_knowledge sidecar both populate,
+                # so deterministic retrieval and builtin tools can each see the KB.
+                force_retrieval = getattr(request.app.state.config, 'RAG_NATIVE_FC_FORCE_RETRIEVAL', True)
+                if metadata.get('params', {}).get('function_calling') != 'native' or force_retrieval:
                     form_data['files'] = [
                         *allowed_files,
                         *form_data.get('files', []),
                     ]
-                else:
-                    # Native FC: skip RAG injection, builtin tools
-                    # will read folder knowledge from metadata.
+                # Always populate folder_knowledge sidecar so builtin tools can reference it
+                if metadata.get('params', {}).get('function_calling') == 'native':
+                    # Native FC: builtin tools will read folder knowledge from metadata.
                     metadata['folder_knowledge'] = allowed_files
 
     # Model "Knowledge" handling
     user_message = get_last_user_message(form_data['messages'])
     model_knowledge = model.get('info', {}).get('meta', {}).get('knowledge', False)
 
-    if model_knowledge and metadata.get('params', {}).get('function_calling') != 'native':
+    # FORK: KB-deterministic-inject — see folder_knowledge above for rationale.
+    # NOTE: Intentional dual-path when force_retrieval=True on native FC —
+    # RAG injection runs deterministically while builtin tools can still read
+    # model_knowledge directly (tools.py reads it from model.info.meta.knowledge,
+    # so model_knowledge needs no sidecar — only folder_knowledge does).
+    force_retrieval = getattr(request.app.state.config, 'RAG_NATIVE_FC_FORCE_RETRIEVAL', True)
+    if model_knowledge and (
+        metadata.get('params', {}).get('function_calling') != 'native' or force_retrieval
+    ):
         await event_emitter(
             {
                 'type': 'status',

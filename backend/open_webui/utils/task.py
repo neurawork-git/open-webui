@@ -256,7 +256,21 @@ def replace_messages_variable(template: str, messages: Optional[list[dict]] = No
 
 # Let the context given here not distort the question,
 # but illuminate it, so that the answer serves the one who asked.
-async def rag_template(template: str, context: str, query: str):
+async def rag_template(template: str, context: str, query: str, knowledge_bases: str = ''):
+    """
+    Process RAG template with context, query, and knowledge base metadata.
+
+    Variables:
+        {{CONTEXT}} / [context] - Retrieved document chunks
+        {{QUERY}} / [query] - User's question
+        {{KNOWLEDGE_BASES}} - Knowledge base metadata (id, name, description)
+
+    Args:
+        template: The RAG template string
+        context: Formatted source chunks as XML
+        query: The user's question
+        knowledge_bases: XML string of knowledge base metadata
+    """
     if template.strip() == '':
         template = DEFAULT_RAG_TEMPLATE
 
@@ -288,6 +302,9 @@ async def rag_template(template: str, context: str, query: str):
 
     template = template.replace('[query]', query)
     template = template.replace('{{QUERY}}', query)
+
+    # Replace knowledge bases variable
+    template = template.replace('{{KNOWLEDGE_BASES}}', knowledge_bases)
 
     for query_placeholder, original_placeholder in query_placeholders:
         template = template.replace(query_placeholder, original_placeholder)
