@@ -2497,7 +2497,7 @@ async def get_app_config(request: Request):
                 },
                 'onedrive': {
                     'client_id_personal': ONEDRIVE_CLIENT_ID_PERSONAL,
-                    'client_id_business': ONEDRIVE_CLIENT_ID_BUSINESS,
+                    'client_id_business': ONEDRIVE_CLIENT_ID_BUSINESS.value,
                     'sharepoint_url': ONEDRIVE_SHAREPOINT_URL.value,
                     'sharepoint_tenant_id': ONEDRIVE_SHAREPOINT_TENANT_ID.value,
                 },
