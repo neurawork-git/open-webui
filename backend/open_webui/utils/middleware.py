@@ -22,7 +22,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from open_webui.config import (
     CACHE_DIR,
     CODE_INTERPRETER_BLOCKED_MODULES,
-    CODE_INTERPRETER_PYODIDE_PROMPT,
+    DEFAULT_CODE_INTERPRETER_PYODIDE_PROMPT,
     DEFAULT_CODE_INTERPRETER_PROMPT,
     DEFAULT_TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE,
     DEFAULT_VOICE_MODE_PROMPT_TEMPLATE,
@@ -2593,6 +2593,12 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         if 'code_interpreter' in features and features['code_interpreter']:
             engine = getattr(request.app.state.config, 'CODE_INTERPRETER_ENGINE', 'pyodide')
 
+            # Admin-tunable pyodide guardrail; empty -> baked-in default.
+            pyodide_prompt = (
+                request.app.state.config.CODE_INTERPRETER_PYODIDE_PROMPT_TEMPLATE
+                or DEFAULT_CODE_INTERPRETER_PYODIDE_PROMPT
+            )
+
             # Skip XML-tag prompt injection when native FC is enabled —
             # execute_code will be injected as a builtin tool instead
             if metadata.get('params', {}).get('function_calling') != 'native':
@@ -2604,7 +2610,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
                 # Append filesystem awareness only for pyodide engine
                 if engine != 'jupyter':
-                    prompt += CODE_INTERPRETER_PYODIDE_PROMPT
+                    prompt += pyodide_prompt
 
                 form_data['messages'] = add_or_update_user_message(
                     prompt,
@@ -2619,7 +2625,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 # conversation on every turn.
                 if engine != 'jupyter':
                     form_data['messages'] = add_or_update_system_message(
-                        CODE_INTERPRETER_PYODIDE_PROMPT,
+                        pyodide_prompt,
                         form_data['messages'],
                         append=True,
                     )

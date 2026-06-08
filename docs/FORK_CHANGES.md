@@ -122,6 +122,22 @@ Large tree of planning / research documents. Zero conflict risk. Files:
   > **Note:** v0.9.6 migrated this layer from `PersistentConfig` to `ConfigVar` (`from open_webui.internal.config import AppConfig, ConfigVar`). The fork's three fields must be re-applied as `ConfigVar(...)`, not `PersistentConfig(...)`, or they `NameError`. See triage §4.10.
   Detector: `git diff upstream/main..HEAD -- backend/open_webui/config.py` at next merge.
 
+### Feature: `code-tool-pyodide-prompt-exposed`
+
+Exposes the Pyodide guardrail prompt (previously the hardcoded constant
+`CODE_INTERPRETER_PYODIDE_PROMPT`) as an admin-tunable `ConfigVar`, so the
+code-interpreter's network/file-discipline can be tuned via the admin API **without a
+rebuild** — and, unlike `CODE_INTERPRETER_PROMPT_TEMPLATE`, this one is injected in
+**native function-calling** mode too (as a system message). Re-apply across:
+
+- `backend/open_webui/config.py` — add `ConfigVar` `CODE_INTERPRETER_PYODIDE_PROMPT_TEMPLATE` (path `code_interpreter.pyodide_prompt_template`, default `''`); rename the constant `CODE_INTERPRETER_PYODIDE_PROMPT` → `DEFAULT_CODE_INTERPRETER_PYODIDE_PROMPT`.
+- `backend/open_webui/main.py` — import the ConfigVar + bind `app.state.config.CODE_INTERPRETER_PYODIDE_PROMPT_TEMPLATE`.
+- `backend/open_webui/utils/middleware.py` — compute `pyodide_prompt = config.CODE_INTERPRETER_PYODIDE_PROMPT_TEMPLATE or DEFAULT_CODE_INTERPRETER_PYODIDE_PROMPT`; use at both append sites (XML-tag user-msg + native-FC system-msg). Update the import (DEFAULT_ name).
+- `backend/open_webui/routers/configs.py` — `CodeInterpreterConfigForm` field + GET/POST `/code_execution`.
+- `src/lib/components/admin/Settings/CodeExecution.svelte` — `Textarea` bound to the field, shown only when `CODE_INTERPRETER_ENGINE === 'pyodide'`.
+
+  Detector: `grep -rn "CODE_INTERPRETER_PYODIDE_PROMPT_TEMPLATE" backend/ src/`
+
 ### `backend/open_webui/env.py`
 
 - New env-var reads: `FORK_VERSION_SUFFIX` (after `VERSION`) + 4 `EMBEDDING_RETRY_*` vars (after `RAG_EMBEDDING_TIMEOUT`), plus Graph client / SharePoint / dev toggles. Name-disjoint from upstream env additions; paste as-is (triage §4.10-A).

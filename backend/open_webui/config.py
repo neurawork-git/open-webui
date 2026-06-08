@@ -539,6 +539,17 @@ CODE_INTERPRETER_PROMPT_TEMPLATE = ConfigVar(
     os.getenv('CODE_INTERPRETER_PROMPT_TEMPLATE', ''),
 )
 
+# Override for the pyodide-specific addendum (engine=pyodide). Empty -> use
+# DEFAULT_CODE_INTERPRETER_PYODIDE_PROMPT. Exposed via the admin Code settings so
+# the network/file-discipline guardrail can be tuned without a rebuild — and,
+# unlike CODE_INTERPRETER_PROMPT_TEMPLATE, this one is also injected in native
+# function-calling mode (as a system message).
+CODE_INTERPRETER_PYODIDE_PROMPT_TEMPLATE = ConfigVar(
+    'CODE_INTERPRETER_PYODIDE_PROMPT_TEMPLATE',
+    'code_interpreter.pyodide_prompt_template',
+    os.getenv('CODE_INTERPRETER_PYODIDE_PROMPT_TEMPLATE', ''),
+)
+
 CODE_INTERPRETER_JUPYTER_URL = ConfigVar(
     'CODE_INTERPRETER_JUPYTER_URL',
     'code_interpreter.jupyter.url',
@@ -605,8 +616,10 @@ You have access to a Python code interpreter via: `<code_interpreter type="code"
 
 Ensure the code interpreter is effectively utilized to achieve the highest-quality analysis for the user."""
 
-# Appended to the code interpreter prompt only when engine is pyodide (not jupyter)
-CODE_INTERPRETER_PYODIDE_PROMPT = """
+# Appended to the code interpreter prompt only when engine is pyodide (not jupyter).
+# This is the DEFAULT; admins can override the live text via the
+# CODE_INTERPRETER_PYODIDE_PROMPT_TEMPLATE ConfigVar (admin Code settings / API).
+DEFAULT_CODE_INTERPRETER_PYODIDE_PROMPT = """
 
 ##### Pyodide Environment
 

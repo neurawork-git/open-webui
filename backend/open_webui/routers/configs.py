@@ -509,6 +509,7 @@ class CodeInterpreterConfigForm(BaseModel):
     ENABLE_CODE_INTERPRETER: bool
     CODE_INTERPRETER_ENGINE: str
     CODE_INTERPRETER_PROMPT_TEMPLATE: str | None
+    CODE_INTERPRETER_PYODIDE_PROMPT_TEMPLATE: str | None = None
     CODE_INTERPRETER_JUPYTER_URL: str | None
     CODE_INTERPRETER_JUPYTER_AUTH: str | None
     CODE_INTERPRETER_JUPYTER_AUTH_TOKEN: str | None
@@ -529,6 +530,7 @@ async def get_code_execution_config(request: Request, user=Depends(get_admin_use
         'ENABLE_CODE_INTERPRETER': request.app.state.config.ENABLE_CODE_INTERPRETER,
         'CODE_INTERPRETER_ENGINE': request.app.state.config.CODE_INTERPRETER_ENGINE,
         'CODE_INTERPRETER_PROMPT_TEMPLATE': request.app.state.config.CODE_INTERPRETER_PROMPT_TEMPLATE,
+        'CODE_INTERPRETER_PYODIDE_PROMPT_TEMPLATE': request.app.state.config.CODE_INTERPRETER_PYODIDE_PROMPT_TEMPLATE,
         'CODE_INTERPRETER_JUPYTER_URL': request.app.state.config.CODE_INTERPRETER_JUPYTER_URL,
         'CODE_INTERPRETER_JUPYTER_AUTH': request.app.state.config.CODE_INTERPRETER_JUPYTER_AUTH,
         'CODE_INTERPRETER_JUPYTER_AUTH_TOKEN': request.app.state.config.CODE_INTERPRETER_JUPYTER_AUTH_TOKEN,
@@ -553,6 +555,9 @@ async def set_code_execution_config(
     request.app.state.config.ENABLE_CODE_INTERPRETER = form_data.ENABLE_CODE_INTERPRETER
     request.app.state.config.CODE_INTERPRETER_ENGINE = form_data.CODE_INTERPRETER_ENGINE
     request.app.state.config.CODE_INTERPRETER_PROMPT_TEMPLATE = form_data.CODE_INTERPRETER_PROMPT_TEMPLATE
+    request.app.state.config.CODE_INTERPRETER_PYODIDE_PROMPT_TEMPLATE = (
+        form_data.CODE_INTERPRETER_PYODIDE_PROMPT_TEMPLATE
+    )
 
     request.app.state.config.CODE_INTERPRETER_JUPYTER_URL = form_data.CODE_INTERPRETER_JUPYTER_URL
 
@@ -573,6 +578,7 @@ async def set_code_execution_config(
         'ENABLE_CODE_INTERPRETER': request.app.state.config.ENABLE_CODE_INTERPRETER,
         'CODE_INTERPRETER_ENGINE': request.app.state.config.CODE_INTERPRETER_ENGINE,
         'CODE_INTERPRETER_PROMPT_TEMPLATE': request.app.state.config.CODE_INTERPRETER_PROMPT_TEMPLATE,
+        'CODE_INTERPRETER_PYODIDE_PROMPT_TEMPLATE': request.app.state.config.CODE_INTERPRETER_PYODIDE_PROMPT_TEMPLATE,
         'CODE_INTERPRETER_JUPYTER_URL': request.app.state.config.CODE_INTERPRETER_JUPYTER_URL,
         'CODE_INTERPRETER_JUPYTER_AUTH': request.app.state.config.CODE_INTERPRETER_JUPYTER_AUTH,
         'CODE_INTERPRETER_JUPYTER_AUTH_TOKEN': request.app.state.config.CODE_INTERPRETER_JUPYTER_AUTH_TOKEN,

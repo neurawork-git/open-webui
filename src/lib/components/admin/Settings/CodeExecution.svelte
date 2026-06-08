@@ -314,6 +314,30 @@
 								</Tooltip>
 							</div>
 						</div>
+
+						{#if config.CODE_INTERPRETER_ENGINE === 'pyodide'}
+							<div>
+								<div class="py-0.5 w-full">
+									<div class=" mb-2.5 text-xs font-medium">
+										{$i18n.t('Pyodide Guardrail Prompt')}
+									</div>
+
+									<Tooltip
+										content={$i18n.t(
+											'Appended for the Pyodide engine, including in native tool-calling. Leave empty to use the default.'
+										)}
+										placement="top-start"
+									>
+										<Textarea
+											bind:value={config.CODE_INTERPRETER_PYODIDE_PROMPT_TEMPLATE}
+											placeholder={$i18n.t(
+												'Leave empty to use the default prompt, or enter a custom prompt'
+											)}
+										/>
+									</Tooltip>
+								</div>
+							</div>
+						{/if}
 					{/if}
 				</div>
 			</div>
