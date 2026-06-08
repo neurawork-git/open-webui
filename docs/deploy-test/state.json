@@ -1,0 +1,134 @@
+{
+  "instances": {
+    "neurawork-prod": {
+      "checks": {
+        "T0-version": {
+          "result": "pass",
+          "tag": "git-75d4416",
+          "commit": "75d44161a",
+          "note": "0.9.6",
+          "at": "2026-06-08T17:02:17Z"
+        },
+        "D1-auth": {
+          "result": "pass",
+          "tag": "git-75d4416",
+          "commit": "75d44161a",
+          "note": "",
+          "at": "2026-06-08T17:02:17Z"
+        },
+        "D8-rag-settings": {
+          "result": "pass",
+          "tag": "git-75d4416",
+          "commit": "75d44161a",
+          "note": "BM25/Hybrid/Reranker/FullContext Modal",
+          "at": "2026-06-08T17:02:17Z"
+        },
+        "T0-rollout": {
+          "result": "pass",
+          "tag": "git-75d4416",
+          "commit": "75d44161a",
+          "note": "",
+          "at": "2026-06-08T17:02:17Z"
+        },
+        "T0-image": {
+          "result": "pass",
+          "tag": "git-75d4416",
+          "commit": "75d44161a",
+          "note": "",
+          "at": "2026-06-08T17:02:17Z"
+        },
+        "D3-models-ui": {
+          "result": "pass",
+          "tag": "git-75d4416",
+          "commit": "75d44161a",
+          "note": "",
+          "at": "2026-06-08T17:02:17Z"
+        },
+        "T0-health": {
+          "result": "pass",
+          "tag": "git-75d4416",
+          "commit": "75d44161a",
+          "note": "",
+          "at": "2026-06-08T17:02:17Z"
+        },
+        "D5-kb-open": {
+          "result": "pass",
+          "tag": "git-75d4416",
+          "commit": "75d44161a",
+          "note": "",
+          "at": "2026-06-08T17:02:17Z"
+        },
+        "D4-knowledge": {
+          "result": "pass",
+          "tag": "git-75d4416",
+          "commit": "75d44161a",
+          "note": "",
+          "at": "2026-06-08T17:02:17Z"
+        },
+        "T0-config": {
+          "result": "pass",
+          "tag": "git-75d4416",
+          "commit": "75d44161a",
+          "note": "",
+          "at": "2026-06-08T17:02:18Z"
+        },
+        "D9-processing": {
+          "result": "pass",
+          "tag": "git-75d4416",
+          "commit": "75d44161a",
+          "note": "Dashboard live, Chunk-Progress, 2 Failed historisch",
+          "at": "2026-06-08T17:02:18Z"
+        },
+        "D7-rag": {
+          "result": "pass",
+          "tag": "git-75d4416",
+          "commit": "75d44161a",
+          "note": "3 Quellen, Inline-Zitat 01-what-is-openwebui.md",
+          "at": "2026-06-08T17:02:18Z"
+        },
+        "T0-migration": {
+          "result": "pass",
+          "tag": "git-75d4416",
+          "commit": "75d44161a",
+          "note": "head 7e66bdd43a43 merge upstream v0.9.6+fork recovery",
+          "at": "2026-06-08T17:02:18Z"
+        },
+        "D6-sharepoint": {
+          "result": "na",
+          "tag": "git-75d4416",
+          "commit": "75d44161a",
+          "note": "feature-gated: enable_onedrive_*",
+          "at": "2026-06-08T17:02:18Z"
+        },
+        "D2-chat": {
+          "result": "pass",
+          "tag": "git-75d4416",
+          "commit": "75d44161a",
+          "note": "DEPLOY-OK 0.9.6, auto-title",
+          "at": "2026-06-08T17:02:18Z"
+        },
+        "D10-admin-docs": {
+          "result": "pass",
+          "tag": "git-75d4416",
+          "commit": "75d44161a",
+          "note": "Azure embed text-embedding-3-large, markitdown extern, Force-KB-on-toolcall AN, Top-K5/Hybrid",
+          "at": "2026-06-08T17:11:14Z"
+        },
+        "D11-upload": {
+          "result": "skip",
+          "tag": "git-75d4416",
+          "commit": "75d44161a",
+          "note": "playwright-live Extension blockt DOM.setFileInputFiles (CDP-Security); via Tier-1-API od. Tandem verifizierbar",
+          "at": "2026-06-08T17:12:52Z"
+        },
+        "D12-channels": {
+          "result": "pass",
+          "tag": "git-75d4416",
+          "commit": "75d44161a",
+          "note": "#test Channel laedt + Nachricht gepostet (WebSocket)",
+          "at": "2026-06-08T17:13:32Z"
+        }
+      }
+    }
+  }
+}

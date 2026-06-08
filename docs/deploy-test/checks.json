@@ -1,0 +1,27 @@
+{
+  "_comment": "Check-Katalog. tier: 0=gratis/automatisch (kubectl+curl), 1=cheap-API (Token), 2=teuer (Live-Browser/playwright-live). surface: Code-Bereiche die diesen Check beeinflussen -> für smartes Skippen. Wenn ein Deploy KEINE Datei unter surface[] ändert UND der Check beim letzten Tag grün war, darf Tier-2 ihn skippen. gate_features: Check ist nur anwendbar wenn alle Feature-Flags true sind (sonst N/A, nicht Fehler).",
+  "checks": [
+    { "id": "T0-image",      "tier": 0, "name": "Image-Tag == erwarteter Build", "surface": ["*"] },
+    { "id": "T0-rollout",    "tier": 0, "name": "Rollout fertig, Pod ready, 0 restarts", "surface": ["*"] },
+    { "id": "T0-migration",  "tier": 0, "name": "Alembic-Kette ohne Error auf Single-Head", "surface": ["backend/open_webui/migrations/"] },
+    { "id": "T0-health",     "tier": 0, "name": "/health == 200", "surface": ["*"] },
+    { "id": "T0-version",    "tier": 0, "name": "/api/version == erwartete Version", "surface": ["*"] },
+    { "id": "T0-config",     "tier": 0, "name": "/api/config liefert features + erwartete Flags", "surface": ["backend/open_webui/main.py", "backend/open_webui/config.py"] },
+
+    { "id": "T1-models-api", "tier": 1, "name": "GET /api/models liefert nicht-leere Liste", "surface": ["backend/open_webui/routers/models.py", "backend/open_webui/routers/openai.py", "backend/open_webui/routers/ollama.py"] },
+    { "id": "T1-kb-api",     "tier": 1, "name": "GET /api/v1/knowledge liefert Sammlungen", "surface": ["backend/open_webui/routers/knowledge.py", "backend/open_webui/models/knowledge.py"] },
+
+    { "id": "D1-auth",       "tier": 2, "name": "Login/Session, kein /auth-Redirect, Username korrekt", "surface": ["src/routes/auth", "src/lib/apis/auths"] },
+    { "id": "D2-chat",       "tier": 2, "name": "Chat-Inferenz E2E (Prompt -> Antwort, persistiert, Auto-Titel)", "surface": ["src/lib/components/chat", "backend/open_webui/utils/middleware.py"] },
+    { "id": "D3-models-ui",  "tier": 2, "name": "Modell-Selector lädt Liste + Fork-Gruppen", "surface": ["src/lib/components/chat/ModelSelector"] },
+    { "id": "D4-knowledge",  "tier": 2, "name": "Workspace/Knowledge-Liste rendert", "surface": ["src/lib/components/workspace/Knowledge", "src/routes/(app)/workspace/knowledge"] },
+    { "id": "D5-kb-open",    "tier": 2, "name": "KB öffnen, Dateien + Fork-Buttons (RAG/Zugriff/Neu-indizieren)", "surface": ["src/lib/components/workspace/Knowledge/KnowledgeBase.svelte"] },
+    { "id": "D6-sharepoint", "tier": 2, "name": "SharePoint/Graph-Import-Picker", "surface": ["src/lib/components/workspace/Knowledge/SharePointPicker.svelte", "src/lib/components/workspace/Knowledge/KnowledgeBase/AddContentMenu.svelte"], "gate_features": ["enable_onedrive_integration", "enable_onedrive_business"] },
+    { "id": "D7-rag",        "tier": 2, "name": "RAG-Retrieval im Chat: # KB-Ref -> Quellen abgerufen + Inline-Zitate", "surface": ["backend/open_webui/retrieval/", "src/lib/components/chat/Messages/Citations"] },
+    { "id": "D8-rag-settings","tier": 2, "name": "Per-KB RAG-Settings-Override (BM25/Hybrid/Reranker/Full-Context)", "surface": ["src/lib/components/common/RagSettingsModal.svelte", "backend/open_webui/routers/retrieval.py"] },
+    { "id": "D9-processing", "tier": 2, "name": "Admin Document-Processing-Dashboard (Stats + Tabelle + Chunk-Progress)", "surface": ["src/lib/components/admin/Processing.svelte", "src/routes/(app)/admin/processing"] },
+    { "id": "D10-admin-docs","tier": 2, "name": "Admin Settings/Documents: RAG-Engine/Embedding-Config lädt", "surface": ["src/lib/components/admin/Settings/Documents.svelte"] },
+    { "id": "D11-upload",    "tier": 2, "name": "File-Upload im Chat -> Verarbeitung -> nutzbar", "surface": ["src/lib/components/chat/MessageInput", "backend/open_webui/routers/files.py", "backend/open_webui/routers/retrieval.py"] },
+    { "id": "D12-channels",  "tier": 2, "name": "Channel öffnen, Historie + Senden", "surface": ["src/lib/components/channel", "backend/open_webui/routers/channels.py"] }
+  ]
+}

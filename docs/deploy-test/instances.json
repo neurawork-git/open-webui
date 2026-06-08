@@ -1,0 +1,34 @@
+{
+  "_comment": "Instanz-Registry für den Deploy-&-Test-Workflow. Eine Instanz = ein OWUI-Deployment auf einem Cluster. deploy-test.sh liest hier Cluster-Koordinaten + Erwartungen. Neue Instanz: Block kopieren, Werte anpassen.",
+  "instances": {
+    "neurawork-prod": {
+      "label": "Internes Prod-OWUI (n8n-Stack)",
+      "url": "https://openwebui.neurawork.app",
+      "kube_context": "thecluster",
+      "namespace": "n8n",
+      "deployment": "n8n-stack-openwebui",
+      "container": "openwebui",
+      "image_repo": "neuraworkacr.azurecr.io/open-webui",
+      "db": "postgres",
+      "db_migrations_on_boot": true,
+      "expected_features": {
+        "enable_onedrive_integration": false,
+        "enable_onedrive_business": false
+      },
+      "notes": "Live-Daten. Kein DB-Backup-Automatismus. Migration läuft on-boot (ENABLE_DB_MIGRATIONS=true). 1 Replica -> kurze Downtime beim Rollout."
+    },
+    "neurawork-test": {
+      "label": "Staging-OWUI (open-webui-test)",
+      "url": "https://openwebui-test.neurawork.app",
+      "kube_context": "thecluster",
+      "namespace": "open-webui-test",
+      "deployment": "open-webui-open-webui-stack-webui",
+      "container": "open-webui",
+      "image_repo": "neuraworkacr.azurecr.io/open-webui",
+      "db": "postgres",
+      "db_migrations_on_boot": true,
+      "expected_features": {},
+      "notes": "Dedizierte Test-Umgebung. Erst hier deployen+testen, dann prod. Hat eigenen Postgres (...-postgres-0) + grafana/prometheus/markitdown/alt-text Sidecars."
+    }
+  }
+}
