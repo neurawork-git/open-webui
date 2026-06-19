@@ -145,10 +145,10 @@ rebuild** — and, unlike `CODE_INTERPRETER_PROMPT_TEMPLATE`, this one is inject
 
 ### `backend/open_webui/internal/db.py`
 
-- **Attribution corrected (triage §4.9):** `get_async_db_context`, the async engine, SSL normalization and the Windows `SelectorEventLoop` are **upstream-legacy** (pristine in v0.9.2, retained in v0.9.6) — NOT fork-new. The earlier "~105 lines async DB" claim was wrong. The real fork db.py delta is only:
-  - the appended startup validation block — `validate_all_schemas` / `validate_model_schema` / `SchemaValidationError` (Stolley-style; no upstream equivalent; append after `get_async_db_context`; keep the `ProcessingTask` import inside `validate_all_schemas`, so this MUST merge with the processing feature),
+- **Attribution corrected (triage §4.9):** `get_async_db_context`, the async engine, SSL normalization and the Windows `SelectorEventLoop` are **upstream-legacy** (pristine in v0.9.2, retained in v0.9.6) — NOT fork-new. The earlier "~105 lines async DB" claim was wrong. The real fork db.py delta is now only:
   - the `JSONField` dict/list guard — v0.9.6 rewrote `JSONField` `impl Text -> UnicodeText` with one-line bodies; re-apply ONLY the `process_result_value` native-JSON passthrough (`if isinstance(value,(dict,list)): return value`) onto the new one-liner; DROP the old peewee `python_value`/`db_value` guards (that layer is gone).
-  Detector: `grep -nE "validate_all_schemas|SchemaValidationError" backend/open_webui/internal/db.py`
+- **REMOVED (2026-06):** the startup validation block (`validate_all_schemas` / `validate_model_schema` / `SchemaValidationError`) was **deleted** — dead code (never wired into `main.py` lifespan during the replay), duplicated Alembic's guarantee, covered a single model (`ProcessingTask`), and hard-coupled db.py to the processing feature. Do **NOT** re-apply on upstream merges. Schema-drift safety belongs in the deploy pipeline (`alembic upgrade head` must fail the deploy).
+  Detector: `grep -nE "validate_all_schemas|SchemaValidationError" backend/open_webui/internal/db.py` (must stay empty).
 
 ### `backend/open_webui/routers/retrieval.py`
 

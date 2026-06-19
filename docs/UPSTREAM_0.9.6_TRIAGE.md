@@ -191,7 +191,10 @@ Nothing the fork built was made redundant by 0.9.6. The only true DISCARD is `ps
 - `mcp/client.py`: re-inject the guard between `inputSchema = tool.inputSchema` and the `# TODO: handle outputSchema` comment (separate from the `MCP_INITIALIZE_TIMEOUT` hunk).
 
 ### 4.9 schema-validation-startup — **SPLIT** (conf. 93, overlay)
-**Rationale.** Two independent changes. **(A) Startup schema-validation layer = APPLY:** `SchemaValidationError`/`validate_model_schema`/`validate_all_schemas` in `db.py` + the lifespan call in `main.py` have no upstream equivalent (v0.9.6 db.py grep empty; v0.9.6 lifespan main.py:635-642 runs `start_logger()` then `RESET_CONFIG_ON_START` with no validation). Additive — appended after `get_async_db_context` (retained upstream). **(B) JSONField dict/list guards = REWORK:** upstream 0.9.6 DELETED the peewee layer (so the fork's `python_value` guard targets a now-gone method — drop it) and rewrote JSONField `impl Text -> UnicodeText` with one-line bodies — so the `process_result_value` guard must be re-applied onto the new one-liner.
+
+> **Update (2026-06): part (A) DROPPED.** The startup validation layer was found to be dead code — the `main.py` lifespan call was never wired in during the replay, so `validate_all_schemas` was never invoked. It duplicated Alembic's guarantee, covered a single model, and hard-coupled db.py to the processing feature. **Deleted** from db.py; do NOT re-apply. Only part (B), the JSONField guard, remains. See FORK_CHANGES.md › `internal/db.py`.
+
+**Rationale.** Two independent changes. **(A) Startup schema-validation layer = ~~APPLY~~ DROPPED:** `SchemaValidationError`/`validate_model_schema`/`validate_all_schemas` in `db.py` had no upstream equivalent and no live caller — removed rather than re-applied. **(B) JSONField dict/list guards = REWORK:** upstream 0.9.6 DELETED the peewee layer (so the fork's `python_value` guard targets a now-gone method — drop it) and rewrote JSONField `impl Text -> UnicodeText` with one-line bodies — so the `process_result_value` guard must be re-applied onto the new one-liner.
 
 **Note (correction).** `get_async_db_context`, async engine, SSL normalization, Windows SelectorEventLoop are **upstream-legacy** (pristine in v0.9.2, retained in v0.9.6) — NOT fork-new. FORK_CHANGES.md's "~105 lines async DB" attribution is wrong; the real fork db.py delta is only the JSONField guards + the appended validation block.
 
@@ -200,9 +203,8 @@ Nothing the fork built was made redundant by 0.9.6. The only true DISCARD is `ps
 **Merge actions.**
 - Take upstream JSONField verbatim (UnicodeText one-liners); drop the fork's `python_value`/`db_value` guards.
 - Re-apply ONLY the `process_result_value` dict/list passthrough onto upstream's body (`if isinstance(value,(dict,list)): return value` then `json.loads`).
-- Append the validation block to the END of `db.py` after `get_async_db_context`; keep the `ProcessingTask` import inside `validate_all_schemas`.
-- main.py: insert the `validate_all_schemas(fail_fast=True)` try/except after `start_logger()` (anchor v0.9.6:642), before `RESET_CONFIG_ON_START`; extend the import line (confirm `get_async_session` still exported — it is, db.py:357).
-- **Merge together with the processing feature.** Smoke: log "Validating database schema..." -> "passed"; JSONField round-trip on a Postgres native-JSON column returns dict/list.
+- ~~Append the validation block / wire `main.py`~~ — **DROPPED** (part A removed, see update note above). Do not re-add the validation block or any `validate_all_schemas` call.
+- Smoke: JSONField round-trip on a Postgres native-JSON column returns dict/list.
 
 ### 4.10 config-env-injections — **SPLIT** (conf. 93, injection)
 **Rationale.** All 8 fork-new names absent in v0.9.6 and still consumed at HEAD (no DISCARD). Splits by file. **(A) env.py = APPLY:** `FORK_VERSION_SUFFIX` + the 4 `EMBEDDING_RETRY_*` plain vars are name-disjoint from upstream's env additions; paste as-is. **(B) config.py = REWORK:** v0.9.6 migrated the whole layer `PersistentConfig -> ConfigVar` (0 PersistentConfig hits; import `from open_webui.internal.config import (AppConfig, ConfigVar)`), so the fork's three `PersistentConfig(...)` fields would `NameError` verbatim — rewrite as `ConfigVar(...)`.

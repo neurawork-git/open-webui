@@ -29,7 +29,7 @@ from open_webui.env import (
 from sqlalchemy import Dialect, MetaData, create_engine, event, types
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import Session, scoped_session, sessionmaker
+from sqlalchemy.orm import scoped_session, sessionmaker
 from sqlalchemy.pool import NullPool, QueuePool
 from sqlalchemy.sql.type_api import _T
 from typing_extensions import Self
@@ -386,102 +386,3 @@ async def get_async_db_context(db: AsyncSession | None = None):
     else:
         async with get_async_db() as session:
             yield session
-
-
-class SchemaValidationError(Exception):
-    """Raised when database schema doesn't match SQLAlchemy models."""
-    pass
-
-
-def validate_model_schema(model_class, db: Session | None = None) -> list[str]:
-    """
-    Validate that a SQLAlchemy model's columns exist in the actual database.
-
-    Args:
-        model_class: SQLAlchemy model class to validate
-        db: Optional database session
-
-    Returns:
-        List of error messages (empty if validation passes)
-
-    This catches issues like:
-    - Column renamed in model but not in DB
-    - Column added to model but migration not run
-    - Migration file differs from what was actually applied
-    """
-    from sqlalchemy import inspect
-
-    errors = []
-    table_name = model_class.__tablename__
-
-    with get_db() as session:
-        inspector = inspect(session.bind)
-        tables = inspector.get_table_names()
-
-        # Check table exists
-        if table_name not in tables:
-            errors.append(f"Table '{table_name}' does not exist in database")
-            return errors
-
-        # Get actual DB columns
-        db_columns = {col['name'] for col in inspector.get_columns(table_name)}
-
-        # Get model columns
-        model_columns = {col.name for col in model_class.__table__.columns}
-
-        # Check for missing columns (critical - will cause runtime errors)
-        missing_in_db = model_columns - db_columns
-        for col in missing_in_db:
-            errors.append(
-                f"CRITICAL: Column '{col}' exists in model '{model_class.__name__}' "
-                f"but not in database table '{table_name}'. "
-                f"Run migrations or manually add the column."
-            )
-
-    return errors
-
-
-def validate_all_schemas(fail_fast: bool = True) -> dict[str, list[str]]:
-    """
-    Validate all registered SQLAlchemy models against the database schema.
-
-    Args:
-        fail_fast: If True, raise SchemaValidationError on first error.
-                   If False, collect all errors and return them.
-
-    Returns:
-        Dict mapping model names to lists of error messages
-
-    Raises:
-        SchemaValidationError: If fail_fast=True and any validation fails
-    """
-    # Import models that need validation
-    # Add new models here as they are created
-    from open_webui.models.processing import ProcessingTask
-
-    models_to_validate = [
-        ProcessingTask,
-        # Add other critical models here
-    ]
-
-    all_errors = {}
-
-    for model in models_to_validate:
-        errors = validate_model_schema(model)
-        if errors:
-            all_errors[model.__name__] = errors
-            if fail_fast:
-                error_msg = "\n".join(errors)
-                raise SchemaValidationError(
-                    f"Database schema validation failed for {model.__name__}:\n{error_msg}\n\n"
-                    f"This usually means a migration was not run or column was renamed.\n"
-                    f"Fix: Run 'alembic upgrade head' or check your migration files."
-                )
-
-    if all_errors:
-        log.error(f"Schema validation found {len(all_errors)} models with issues")
-        for model_name, errors in all_errors.items():
-            for error in errors:
-                log.error(f"  {model_name}: {error}")
-
-    return all_errors
