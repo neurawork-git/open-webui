@@ -157,6 +157,7 @@ from open_webui.routers import (
     ollama,
     openai,
     pipelines,
+    processing,
     prompts,
     retrieval,
     scim,
@@ -752,6 +753,7 @@ app.include_router(notes.router, prefix='/api/v1/notes', tags=['notes'])
 
 app.include_router(models.router, prefix='/api/v1/models', tags=['models'])
 app.include_router(knowledge.router, prefix='/api/v1/knowledge', tags=['knowledge'])
+app.include_router(processing.router, prefix='/api/v1/admin/processing', tags=['processing'])
 app.include_router(prompts.router, prefix='/api/v1/prompts', tags=['prompts'])
 app.include_router(tools.router, prefix='/api/v1/tools', tags=['tools'])
 app.include_router(skills.router, prefix='/api/v1/skills', tags=['skills'])
@@ -1878,6 +1880,7 @@ async def get_app_config(request: Request):
         'users.enable_status',
         'google_drive.enable',
         'onedrive.enable',
+        'onedrive.client_id_business',
         'memories.enable',
         'ui.default_models',
         'ui.default_pinned_models',
@@ -1998,7 +2001,7 @@ async def get_app_config(request: Request):
                 },
                 'onedrive': {
                     'client_id_personal': ONEDRIVE_CLIENT_ID_PERSONAL,
-                    'client_id_business': ONEDRIVE_CLIENT_ID_BUSINESS,
+                    'client_id_business': config.get('onedrive.client_id_business') or ONEDRIVE_CLIENT_ID_BUSINESS,
                     'sharepoint_url': ONEDRIVE_SHAREPOINT_URL,
                     'sharepoint_tenant_id': ONEDRIVE_SHAREPOINT_TENANT_ID,
                 },

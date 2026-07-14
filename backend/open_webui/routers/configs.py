@@ -54,6 +54,7 @@ CODE_EXECUTION_CONFIG_KEYS = {
     'ENABLE_CODE_INTERPRETER': 'code_interpreter.enable',
     'CODE_INTERPRETER_ENGINE': 'code_interpreter.engine',
     'CODE_INTERPRETER_PROMPT_TEMPLATE': 'code_interpreter.prompt_template',
+    'CODE_INTERPRETER_PYODIDE_PROMPT_TEMPLATE': 'code_interpreter.pyodide_prompt_template',
     'CODE_INTERPRETER_JUPYTER_URL': 'code_interpreter.jupyter.url',
     'CODE_INTERPRETER_JUPYTER_AUTH': 'code_interpreter.jupyter.auth',
     'CODE_INTERPRETER_JUPYTER_AUTH_TOKEN': 'code_interpreter.jupyter.auth_token',
@@ -678,6 +679,7 @@ class CodeInterpreterConfigForm(BaseModel):
     ENABLE_CODE_INTERPRETER: bool
     CODE_INTERPRETER_ENGINE: str
     CODE_INTERPRETER_PROMPT_TEMPLATE: str | None
+    CODE_INTERPRETER_PYODIDE_PROMPT_TEMPLATE: str | None = None
     CODE_INTERPRETER_JUPYTER_URL: str | None
     CODE_INTERPRETER_JUPYTER_AUTH: str | None
     CODE_INTERPRETER_JUPYTER_AUTH_TOKEN: str | None

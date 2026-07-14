@@ -424,6 +424,13 @@ CODE_INTERPRETER_ENGINE = os.getenv('CODE_INTERPRETER_ENGINE', 'pyodide')
 
 CODE_INTERPRETER_PROMPT_TEMPLATE = os.getenv('CODE_INTERPRETER_PROMPT_TEMPLATE', '')
 
+# FORK: Override for the pyodide-specific addendum (engine=pyodide). Empty -> use
+# CODE_INTERPRETER_PYODIDE_PROMPT. Exposed via the admin Code settings so the
+# network/file-discipline guardrail can be tuned without a rebuild — and, unlike
+# CODE_INTERPRETER_PROMPT_TEMPLATE, this one is also injected in native
+# function-calling mode (as a system message).
+CODE_INTERPRETER_PYODIDE_PROMPT_TEMPLATE = os.getenv('CODE_INTERPRETER_PYODIDE_PROMPT_TEMPLATE', '')
+
 CODE_INTERPRETER_JUPYTER_URL = os.getenv('CODE_INTERPRETER_JUPYTER_URL', os.getenv('CODE_EXECUTION_JUPYTER_URL', ''))
 
 CODE_INTERPRETER_JUPYTER_AUTH = os.getenv(
@@ -941,6 +948,10 @@ PADDLEOCR_VL_TOKEN = os.getenv('PADDLEOCR_VL_TOKEN', '')
 
 BYPASS_EMBEDDING_AND_RETRIEVAL = os.getenv('BYPASS_EMBEDDING_AND_RETRIEVAL', 'False').lower() == 'true'
 
+# FORK: KB-deterministic-inject — restores deterministic knowledge injection even
+# when function_calling is native/default (upstream only injects on 'legacy').
+RAG_NATIVE_FC_FORCE_RETRIEVAL = os.getenv('RAG_NATIVE_FC_FORCE_RETRIEVAL', 'True').lower() == 'true'
+
 
 RAG_TOP_K = int(os.getenv('RAG_TOP_K', '3'))
 RAG_TOP_K_RERANKER = int(os.getenv('RAG_TOP_K_RERANKER', '3'))
@@ -958,6 +969,11 @@ RAG_FULL_CONTEXT = os.getenv('RAG_FULL_CONTEXT', 'False').lower() == 'true'
 RAG_FILE_MAX_COUNT = int(os.getenv('RAG_FILE_MAX_COUNT')) if os.getenv('RAG_FILE_MAX_COUNT') else None
 
 RAG_FILE_MAX_SIZE = int(os.getenv('RAG_FILE_MAX_SIZE')) if os.getenv('RAG_FILE_MAX_SIZE') else None
+
+# FORK: Hard upper bound (in MB) on the cumulative size of one SharePoint
+# folder/site import. Protects the OCR + embedding pipeline from runaway
+# imports. Zero means unlimited.
+SHAREPOINT_IMPORT_MAX_TOTAL_SIZE_MB = int(os.environ.get('SHAREPOINT_IMPORT_MAX_TOTAL_SIZE_MB', '200'))
 
 RAG_FILE_CONTENT_SEARCH_MAX_CHARS = int(os.getenv('RAG_FILE_CONTENT_SEARCH_MAX_CHARS', str(64 * 1024 * 1024)))
 
@@ -1026,6 +1042,9 @@ RAG_EXTERNAL_RERANKER_API_KEY = os.getenv('RAG_EXTERNAL_RERANKER_API_KEY', '')
 
 RAG_EXTERNAL_RERANKER_TIMEOUT = os.getenv('RAG_EXTERNAL_RERANKER_TIMEOUT', '')
 
+# FORK: Enable/disable reranking - when disabled, raw hybrid scores are preserved
+ENABLE_RAG_RERANKING = os.environ.get('ENABLE_RAG_RERANKING', 'True').lower() == 'true'
+
 
 RAG_TEXT_SPLITTER = os.getenv('RAG_TEXT_SPLITTER', '')
 
@@ -1042,30 +1061,39 @@ CHUNK_MIN_SIZE_TARGET = int(os.getenv('CHUNK_MIN_SIZE_TARGET', '0'))
 
 CHUNK_OVERLAP = int(os.getenv('CHUNK_OVERLAP', '100'))
 
-DEFAULT_RAG_TEMPLATE = """### Task:
+DEFAULT_RAG_TEMPLATE = """### Task
 Respond to the user query using the provided context, incorporating inline citations in the format [id] **only when the <source> tag includes an explicit id attribute** (e.g., <source id="1">).
 
-### Guidelines:
+### Knowledge Sources
+The following knowledge bases were searched for this query:
+{{KNOWLEDGE_BASES}}
+
+### Retrieved Context
+<context>
+{{CONTEXT}}
+</context>
+
+### Guidelines
+- **Citations**: Only include inline citations using [id] format (e.g., [1], [2], [3]) when the <source> tag includes an id attribute. Use ONLY the number in brackets - never write "Quelle", "Source", or any other text.
+- Do not cite if the <source> tag does not contain an id attribute.
+- Ensure citations are concise and directly related to the information provided.
+- Only cite sources that are relevant to the query.
 - If you don't know the answer, clearly state that.
 - If uncertain, ask the user for clarification.
 - Respond in the same language as the user's query.
 - If the context is unreadable or of poor quality, inform the user and provide the best possible answer.
 - If the answer isn't present in the context but you possess the knowledge, explain this to the user and provide the answer using your own understanding.
-- **Only include inline citations using [id] (e.g., [1], [2]) when the <source> tag includes an id attribute.**
-- Do not cite if the <source> tag does not contain an id attribute.
 - Do not use XML tags in your response.
-- Ensure citations are concise and directly related to the information provided.
+- **Knowledge awareness**: The knowledge bases listed above contain information, even if the retrieved context appears sparse. If context doesn't fully answer the question, suggest the user rephrase or ask about specific topics within these knowledge bases.
 
-### Example of Citation:
-If the user asks about a specific topic and the information is found in a source with a provided id attribute, the response should include the citation like in the following example:
-* "According to the study, the proposed method increases efficiency by 20% [1]."
+### Example of Citation
+If information comes from a source with id="1", write:
+* "The proposed method increases efficiency by 20% [1]."
 
-### Output:
-Provide a clear and direct response to the user's query, including inline citations in the format [id] only when the <source> tag with id attribute is present in the context.
+NOT: "[Quelle: 1]" or "[Source 1]" - always use just [1], [2], etc.
 
-<context>
-{{CONTEXT}}
-</context>
+### User Question
+{{QUERY}}
 """
 
 RAG_TEMPLATE = os.getenv('RAG_TEMPLATE', DEFAULT_RAG_TEMPLATE)
@@ -2771,6 +2799,7 @@ DEFAULT_CONFIG = {
     'memories.context_char_limit': MEMORIES_CONTEXT_CHAR_LIMIT,
     'code_interpreter.engine': CODE_INTERPRETER_ENGINE,
     'code_interpreter.prompt_template': CODE_INTERPRETER_PROMPT_TEMPLATE,
+    'code_interpreter.pyodide_prompt_template': CODE_INTERPRETER_PYODIDE_PROMPT_TEMPLATE,
     'code_interpreter.jupyter.url': CODE_INTERPRETER_JUPYTER_URL,
     'code_interpreter.jupyter.auth': CODE_INTERPRETER_JUPYTER_AUTH,
     'code_interpreter.jupyter.auth_token': CODE_INTERPRETER_JUPYTER_AUTH_TOKEN,
@@ -2780,6 +2809,7 @@ DEFAULT_CONFIG = {
     'google_drive.client_id': GOOGLE_DRIVE_CLIENT_ID,
     'google_drive.api_key': GOOGLE_DRIVE_API_KEY,
     'onedrive.enable': ENABLE_ONEDRIVE_INTEGRATION,
+    'onedrive.client_id_business': ONEDRIVE_CLIENT_ID_BUSINESS,
     'onedrive.sharepoint_url': ONEDRIVE_SHAREPOINT_URL,
     'onedrive.sharepoint_tenant_id': ONEDRIVE_SHAREPOINT_TENANT_ID,
     'rag.content_extraction_engine': CONTENT_EXTRACTION_ENGINE,
@@ -2816,6 +2846,9 @@ DEFAULT_CONFIG = {
     'rag.paddleocr_vl_base_url': PADDLEOCR_VL_BASE_URL,
     'rag.paddleocr_vl_token': PADDLEOCR_VL_TOKEN,
     'rag.bypass_embedding_and_retrieval': BYPASS_EMBEDDING_AND_RETRIEVAL,
+    'rag.native_fc_force_retrieval': RAG_NATIVE_FC_FORCE_RETRIEVAL,
+    'rag.enable_reranking': ENABLE_RAG_RERANKING,
+    'rag.sharepoint.import_max_total_size_mb': SHAREPOINT_IMPORT_MAX_TOTAL_SIZE_MB,
     'rag.top_k': RAG_TOP_K,
     'rag.top_k_reranker': RAG_TOP_K_RERANKER,
     'rag.relevance_threshold': RAG_RELEVANCE_THRESHOLD,
