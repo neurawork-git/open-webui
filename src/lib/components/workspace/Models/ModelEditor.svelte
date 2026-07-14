@@ -9,8 +9,11 @@
 	import { getSkills } from '$lib/apis/skills';
 	import { getFunctions } from '$lib/apis/functions';
 	import { getModelsDefaults } from '$lib/apis/configs';
+	import { getBaseModelTags, getModelTags } from '$lib/apis/models';
+	import { getVoices } from '$lib/apis/audio';
 
 	import AdvancedParams from '$lib/components/chat/Settings/Advanced/AdvancedParams.svelte';
+	import ModelSelector from '$lib/components/chat/ModelSelector/Selector.svelte';
 	import Tags from '$lib/components/common/Tags.svelte';
 	import Knowledge from '$lib/components/workspace/Models/Knowledge.svelte';
 	import ToolsSelector from '$lib/components/workspace/Models/ToolsSelector.svelte';
@@ -27,10 +30,9 @@
 	import BuiltinTools from './BuiltinTools.svelte';
 	import PromptSuggestions from './PromptSuggestions.svelte';
 	import TerminalSelector from './TerminalSelector.svelte';
+	import TTSVoiceInput from './TTSVoiceInput.svelte';
 	import AccessControlModal from '../common/AccessControlModal.svelte';
 	import LockClosed from '$lib/components/icons/LockClosed.svelte';
-	import { updateModelAccessGrants } from '$lib/apis/models';
-	import RagSettingsModal from '$lib/components/common/RagSettingsModal.svelte';
 
 	const i18n = getContext('i18n');
 
@@ -108,18 +110,43 @@
 	let accessGrants = [];
 	let terminalId = '';
 	let tts = { voice: '' };
+	export let suggestionTags: { name: string }[] = [];
+	let voices: { id: string; name?: string }[] = [];
 
-	// RAG Settings
-	let showRagSettingsModal = false;
-	let ragSettings: {
-		top_k?: number | null;
-		top_k_reranker?: number | null;
-		relevance_threshold?: number | null;
-		enable_hybrid_search?: boolean | null;
-		enable_reranking?: boolean | null;
-		hybrid_bm25_weight?: number | null;
-		full_context?: boolean | null;
-	} = {};
+	const getBaseModelItems = (models: any[] = []) => {
+		const currentModelId = (model as any)?.id;
+
+		return models
+			.filter(
+				(baseModel) =>
+					(!currentModelId ||
+						baseModel.id !== currentModelId ||
+						(edit && baseModel.id === info.base_model_id)) &&
+					(!baseModel?.preset || (edit && baseModel.id === info.base_model_id)) &&
+					baseModel?.owned_by !== 'arena' &&
+					!(baseModel?.direct ?? false) &&
+					($user?.role === 'admin' ||
+						!(baseModel?.info?.meta?.hidden ?? false) ||
+						baseModel.id === info.base_model_id)
+			)
+			.map((baseModel) => ({
+				value: baseModel.id,
+				label: baseModel.name,
+				model: baseModel
+			}));
+	};
+
+	const loadSuggestionTags = async () => {
+		const res: string[] = await (preset ? getModelTags : getBaseModelTags)(
+			localStorage.token
+		).catch(() => []);
+		suggestionTags = res.map((tag) => ({ name: tag }));
+	};
+
+	const loadVoices = async () => {
+		const res = await getVoices(localStorage.token).catch(() => null);
+		voices = res?.voices ?? [];
+	};
 
 	const submitHandler = async () => {
 		loading = true;
@@ -136,6 +163,13 @@
 
 		if (name === '') {
 			toast.error($i18n.t('Model Name is required.'));
+			loading = false;
+
+			return;
+		}
+
+		if (preset && !info.base_model_id) {
+			toast.error($i18n.t('Base Model is required.'));
 			loading = false;
 
 			return;
@@ -243,15 +277,6 @@
 			}
 		}
 
-		// Save RAG settings
-		if (Object.keys(ragSettings).length > 0) {
-			info.meta.rag_settings = ragSettings;
-		} else {
-			if (info.meta.rag_settings) {
-				delete info.meta.rag_settings;
-			}
-		}
-
 		info.params.system = system.trim() === '' ? null : system;
 		info.params.stop = params.stop
 			? (typeof params.stop === 'string' ? params.stop.split(',') : params.stop).filter((s) =>
@@ -271,9 +296,19 @@
 	};
 
 	onMount(async () => {
-		await tools.set(await getTools(localStorage.token));
+		if (!$tools) {
+			await tools.set(await getTools(localStorage.token));
+		}
 		skillsList = (await getSkills(localStorage.token).catch(() => null)) ?? [];
-		await functions.set(await getFunctions(localStorage.token));
+		if (!$functions) {
+			await functions.set(await getFunctions(localStorage.token));
+		}
+		if (suggestionTags.length === 0) {
+			await loadSuggestionTags();
+		}
+		if (voices.length === 0) {
+			await loadVoices();
+		}
 
 		// Fetch admin-configured default model metadata so the editor
 		// reflects the actual defaults rather than hardcoded values
@@ -301,14 +336,16 @@
 
 			if (model.base_model_id) {
 				const base_model = $models
-					.filter((m) => !m?.preset && !(m?.arena ?? false))
+					.filter(
+						(m) => (!m?.preset && !(m?.arena ?? false)) || (edit && m.id === model.base_model_id)
+					)
 					.find((m) => [model.base_model_id, `${model.base_model_id}:latest`].includes(m.id));
 
 				console.log('base_model', base_model);
 
 				if (base_model) {
 					model.base_model_id = base_model.id;
-				} else {
+				} else if (!edit) {
 					model.base_model_id = null;
 				}
 			}
@@ -353,7 +390,6 @@
 			builtinTools = model?.meta?.builtinTools ?? builtinTools;
 			terminalId = model?.meta?.terminalId ?? '';
 			tts = { voice: model?.meta?.tts?.voice ?? '' };
-			ragSettings = model?.meta?.rag_settings ?? {};
 
 			accessGrants = model?.access_grants ?? [];
 
@@ -386,21 +422,6 @@
 		share={$user?.permissions?.sharing?.models || $user?.role === 'admin'}
 		sharePublic={$user?.permissions?.sharing?.public_models || $user?.role === 'admin'}
 		shareUsers={($user?.permissions?.access_grants?.allow_users ?? true) || $user?.role === 'admin'}
-		onChange={async () => {
-			if (edit && model?.id) {
-				try {
-					await updateModelAccessGrants(
-						localStorage.token,
-						model.id,
-						model.name ?? name,
-						accessGrants
-					);
-					toast.success($i18n.t('Saved'));
-				} catch (error) {
-					toast.error(error?.detail ?? `${error}`);
-				}
-			}
-		}}
 	/>
 
 	{#if onBack}
@@ -631,19 +652,17 @@
 									</div>
 
 									<div>
-										<select
-											class="text-sm w-full bg-transparent outline-hidden"
+										<ModelSelector
+											id="workspace-base-model"
 											placeholder={$i18n.t('Select a base model (e.g. llama3, gpt-4o)')}
+											searchPlaceholder={$i18n.t('Search a model')}
+											items={getBaseModelItems($models)}
+											className="w-[32rem]"
+											triggerClassName="text-sm"
+											selectionOnly
+											includeHidden={$user?.role === 'admin'}
 											bind:value={info.base_model_id}
-											required
-										>
-											<option value={null} class=" text-gray-900"
-												>{$i18n.t('Select a base model')}</option
-											>
-											{#each $models.filter((m) => (model ? m.id !== model.id : true) && !m?.preset && m?.owned_by !== 'arena' && !(m?.direct ?? false)) as model}
-												<option value={model.id} class=" text-gray-900">{model.name}</option>
-											{/each}
-										</select>
+										/>
 									</div>
 								</div>
 							{/if}
@@ -686,6 +705,7 @@
 								<div class="">
 									<Tags
 										tags={info?.meta?.tags ?? []}
+										{suggestionTags}
 										on:delete={(e) => {
 											const tagName = e.detail;
 											info.meta.tags = info.meta.tags.filter((tag) => tag.name !== tagName);
@@ -792,31 +812,6 @@
 						<Knowledge bind:selectedItems={knowledge} />
 					</div>
 
-					<div class="my-2">
-						<div class="flex w-full justify-between items-center">
-							<div class="flex items-center gap-2">
-								<div class="text-sm font-medium">{$i18n.t('RAG Settings')}</div>
-								{#if Object.keys(ragSettings).length > 0}
-									<span class="text-xs text-green-500 dark:text-green-400">
-										({$i18n.t('Custom')})
-									</span>
-								{/if}
-							</div>
-							<button
-								class="p-1 px-3 text-xs flex rounded-sm transition"
-								type="button"
-								on:click={() => {
-									showRagSettingsModal = true;
-								}}
-							>
-								<span class="ml-2 self-center">{$i18n.t('Configure')}</span>
-							</button>
-						</div>
-						<div class="text-xs text-gray-500 mt-1">
-							{$i18n.t('Override global RAG settings for this model')}
-						</div>
-					</div>
-
 					<div class="my-4">
 						<ToolsSelector bind:selectedToolIds={toolIds} tools={$tools ?? []} />
 					</div>
@@ -902,10 +897,9 @@
 								{$i18n.t('TTS Voice')}
 							</div>
 						</div>
-						<input
-							class="w-full text-sm bg-transparent outline-hidden"
-							type="text"
+						<TTSVoiceInput
 							bind:value={tts.voice}
+							{voices}
 							placeholder={$i18n.t('e.g. alloy, echo, shimmer')}
 						/>
 					</div>
@@ -972,11 +966,3 @@
 		{/if}
 	</div>
 {/if}
-
-<RagSettingsModal
-	bind:show={showRagSettingsModal}
-	{ragSettings}
-	on:save={(e) => {
-		ragSettings = e.detail;
-	}}
-/>

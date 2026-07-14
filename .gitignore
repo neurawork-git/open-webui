@@ -333,3 +333,4 @@ PRPs/fork-rescue-mission.md
 
 # Config dumps with secrets
 migration_scripts/configs_dump.json
+.cptr
