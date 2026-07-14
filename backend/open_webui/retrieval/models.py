@@ -43,25 +43,37 @@ class RAGQuerySettings(BaseModel):
         extra = "ignore"  # Ignore unknown fields for forward compatibility
 
     @classmethod
-    def from_config(cls, config) -> "RAGQuerySettings":
+    async def from_config(cls) -> "RAGQuerySettings":
         """
-        Create RAGQuerySettings from app.state.config object.
+        Create RAGQuerySettings from the global per-key DB config (open_webui.models.config.Config).
 
-        Args:
-            config: The app.state.config object containing global RAG settings
+        Reads the same 'rag.*' keys that routers/retrieval.py's RETRIEVAL_CONFIG_KEYS
+        maps the admin-facing UPPER_CASE settings to.
 
         Returns:
             RAGQuerySettings with values from global config
         """
+        from open_webui.models.config import Config
+
+        values = await Config.get_many(
+            'rag.top_k',
+            'rag.top_k_reranker',
+            'rag.relevance_threshold',
+            'rag.enable_hybrid_search',
+            'rag.hybrid_bm25_weight',
+            'rag.enable_hybrid_search_enriched_texts',
+            'rag.enable_reranking',
+            'rag.full_context',
+        )
         return cls(
-            top_k=getattr(config, 'TOP_K', 3),
-            top_k_reranker=getattr(config, 'TOP_K_RERANKER', 3),
-            relevance_threshold=getattr(config, 'RELEVANCE_THRESHOLD', 0.0),
-            enable_hybrid_search=getattr(config, 'ENABLE_RAG_HYBRID_SEARCH', False),
-            hybrid_bm25_weight=getattr(config, 'HYBRID_BM25_WEIGHT', 0.5),
-            enable_enriched_texts=getattr(config, 'ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS', False),
-            enable_reranking=getattr(config, 'ENABLE_RAG_RERANKING', True),
-            full_context=getattr(config, 'RAG_FULL_CONTEXT', False),
+            top_k=values.get('rag.top_k', 3),
+            top_k_reranker=values.get('rag.top_k_reranker', 3),
+            relevance_threshold=values.get('rag.relevance_threshold', 0.0),
+            enable_hybrid_search=values.get('rag.enable_hybrid_search', False),
+            hybrid_bm25_weight=values.get('rag.hybrid_bm25_weight', 0.5),
+            enable_enriched_texts=values.get('rag.enable_hybrid_search_enriched_texts', False),
+            enable_reranking=values.get('rag.enable_reranking', True),
+            full_context=values.get('rag.full_context', False),
         )
 
     def merge_with(self, overrides: Optional[dict]) -> "RAGQuerySettings":

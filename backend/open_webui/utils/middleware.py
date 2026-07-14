@@ -46,7 +46,8 @@ from open_webui.models.functions import Functions
 from open_webui.models.models import Models
 from open_webui.models.oauth_sessions import OAuthSessions
 from open_webui.models.users import UserModel, Users
-from open_webui.retrieval.utils import get_sources_from_items
+from open_webui.models.knowledge import Knowledges
+from open_webui.retrieval.utils import get_sources_from_items, merge_rag_settings
 from open_webui.routers.images import (
     CreateImageForm,
     EditImageForm,
@@ -1813,6 +1814,60 @@ async def chat_completion_files_handler(
         if len(queries) == 0:
             queries = [get_last_user_message(body['messages']) or '']
 
+        # FORK: per-level RAG settings — collect per-KB overrides and enrich
+        # collection items for the {{KNOWLEDGE_BASES}} template variable.
+        # Per-KB settings are applied independently inside get_sources_from_items()
+        # so each KB's settings only affect that KB's queries.
+        per_knowledge_rag_settings = {}
+        for item in files:
+            if item.get('type') == 'collection' and item.get('id'):
+                kb = await Knowledges.get_knowledge_by_id(item['id'])
+                if kb:
+                    item['name'] = kb.name
+                    item['description'] = kb.description
+                    if kb.meta and isinstance(kb.meta, dict):
+                        kb_rag = kb.meta.get('rag_settings')
+                        if kb_rag:
+                            per_knowledge_rag_settings[item['id']] = kb_rag
+
+        rag_config = await Config.get_many(
+            'rag.top_k',
+            'rag.top_k_reranker',
+            'rag.relevance_threshold',
+            'rag.enable_hybrid_search',
+            'rag.hybrid_bm25_weight',
+            'rag.full_context',
+            'rag.enable_reranking',
+        )
+        global_settings = {
+            'top_k': rag_config.get('rag.top_k'),
+            'top_k_reranker': rag_config.get('rag.top_k_reranker'),
+            'relevance_threshold': rag_config.get('rag.relevance_threshold'),
+            'enable_hybrid_search': rag_config.get('rag.enable_hybrid_search'),
+            'hybrid_bm25_weight': rag_config.get('rag.hybrid_bm25_weight'),
+            'full_context': rag_config.get('rag.full_context'),
+            'enable_reranking': rag_config.get('rag.enable_reranking'),
+        }
+
+        user_rag_settings = None
+        if user and getattr(user, 'settings', None):
+            user_settings = user.settings if isinstance(user.settings, dict) else user.settings.model_dump()
+            user_rag_settings = user_settings.get('rag_settings')
+
+        model_rag_settings = None
+        model_id = body.get('model')
+        if model_id:
+            model_record = await Models.get_model_by_id(model_id)
+            if model_record and model_record.meta:
+                model_meta = (
+                    model_record.meta if isinstance(model_record.meta, dict) else model_record.meta.model_dump()
+                )
+                model_rag_settings = model_meta.get('rag_settings')
+
+        # FORK: base cascade global < user < model (per-KB overrides applied
+        # independently downstream).
+        base_settings = merge_rag_settings(global_settings, user_rag_settings, model_rag_settings)
+
         try:
             # Directly await async get_sources_from_items (no thread needed - fully async now)
             sources = await get_sources_from_items(
@@ -1822,18 +1877,21 @@ async def chat_completion_files_handler(
                 embedding_function=lambda query, prefix: request.app.state.EMBEDDING_FUNCTION(
                     query, prefix=prefix, user=user
                 ),
-                k=await Config.get('rag.top_k'),
+                k=base_settings.get('top_k', rag_config.get('rag.top_k')),
                 reranking_function=(
                     (lambda query, documents: request.app.state.RERANKING_FUNCTION(query, documents, user=user))
                     if request.app.state.RERANKING_FUNCTION
                     else None
                 ),
-                k_reranker=await Config.get('rag.top_k_reranker'),
-                r=await Config.get('rag.relevance_threshold'),
-                hybrid_bm25_weight=await Config.get('rag.hybrid_bm25_weight'),
-                hybrid_search=await Config.get('rag.enable_hybrid_search'),
-                full_context=all_full_context or await Config.get('rag.full_context'),
+                k_reranker=base_settings.get('top_k_reranker', rag_config.get('rag.top_k_reranker')),
+                r=base_settings.get('relevance_threshold', rag_config.get('rag.relevance_threshold')),
+                hybrid_bm25_weight=base_settings.get('hybrid_bm25_weight', rag_config.get('rag.hybrid_bm25_weight')),
+                hybrid_search=base_settings.get('enable_hybrid_search', rag_config.get('rag.enable_hybrid_search')),
+                full_context=all_full_context or base_settings.get('full_context', rag_config.get('rag.full_context')),
+                enable_reranking=base_settings.get('enable_reranking', rag_config.get('rag.enable_reranking')),
                 user=user,
+                per_knowledge_settings=per_knowledge_rag_settings,
+                base_settings=base_settings,
             )
         except Exception as e:
             log.exception(e)

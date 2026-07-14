@@ -287,6 +287,7 @@ RETRIEVAL_CONFIG_KEYS = {
     'ENABLE_ONEDRIVE_INTEGRATION': 'onedrive.enable',
     'ENABLE_RAG_HYBRID_SEARCH': 'rag.enable_hybrid_search',
     'ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS': 'rag.enable_hybrid_search_enriched_texts',
+    'ENABLE_RAG_RERANKING': 'rag.enable_reranking',
     'ENABLE_WEB_LOADER_SSL_VERIFICATION': 'web.loader.ssl_verification',
     'ENABLE_WEB_SEARCH': 'web.search.enable',
     'ENABLE_WEB_SEARCH_CONFIRMATION': 'web.search.confirmation.enable',
@@ -345,6 +346,7 @@ RETRIEVAL_CONFIG_KEYS = {
     'RAG_EMBEDDING_CONCURRENT_REQUESTS': 'rag.embedding_concurrent_requests',
     'RAG_EMBEDDING_ENGINE': 'rag.embedding_engine',
     'RAG_EMBEDDING_MODEL': 'rag.embedding_model',
+    'RAG_NATIVE_FC_FORCE_RETRIEVAL': 'rag.native_fc_force_retrieval',
     'RAG_TOKENIZER_MODEL': 'rag.tokenizer_model',
     'RAG_EXTERNAL_RERANKER_API_KEY': 'rag.external_reranker_api_key',
     'RAG_EXTERNAL_RERANKER_TIMEOUT': 'rag.external_reranker_timeout',
@@ -617,10 +619,12 @@ async def get_rag_config(request: Request, user=Depends(get_admin_user)):
         'RAG_TEMPLATE': config.RAG_TEMPLATE,
         'TOP_K': config.TOP_K,
         'BYPASS_EMBEDDING_AND_RETRIEVAL': config.BYPASS_EMBEDDING_AND_RETRIEVAL,
+        'RAG_NATIVE_FC_FORCE_RETRIEVAL': config.RAG_NATIVE_FC_FORCE_RETRIEVAL,
         'RAG_FULL_CONTEXT': config.RAG_FULL_CONTEXT,
         # Hybrid search settings
         'ENABLE_RAG_HYBRID_SEARCH': config.ENABLE_RAG_HYBRID_SEARCH,
         'ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS': config.ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS,
+        'ENABLE_RAG_RERANKING': config.ENABLE_RAG_RERANKING,
         'TOP_K_RERANKER': config.TOP_K_RERANKER,
         'RELEVANCE_THRESHOLD': config.RELEVANCE_THRESHOLD,
         'HYBRID_BM25_WEIGHT': config.HYBRID_BM25_WEIGHT,
@@ -844,11 +848,13 @@ class ConfigForm(BaseModel):
     RAG_TEMPLATE: str | None = None
     TOP_K: int | None = None
     BYPASS_EMBEDDING_AND_RETRIEVAL: bool | None = None
+    RAG_NATIVE_FC_FORCE_RETRIEVAL: bool | None = None
     RAG_FULL_CONTEXT: bool | None = None
 
     # Hybrid search settings
     ENABLE_RAG_HYBRID_SEARCH: bool | None = None
     ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS: bool | None = None
+    ENABLE_RAG_RERANKING: bool | None = None
     TOP_K_RERANKER: int | None = None
     RELEVANCE_THRESHOLD: float | None = None
     HYBRID_BM25_WEIGHT: float | None = None
@@ -937,6 +943,11 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
         if form_data.BYPASS_EMBEDDING_AND_RETRIEVAL is not None
         else config.BYPASS_EMBEDDING_AND_RETRIEVAL
     )
+    config.RAG_NATIVE_FC_FORCE_RETRIEVAL = (
+        form_data.RAG_NATIVE_FC_FORCE_RETRIEVAL
+        if form_data.RAG_NATIVE_FC_FORCE_RETRIEVAL is not None
+        else config.RAG_NATIVE_FC_FORCE_RETRIEVAL
+    )
     config.RAG_FULL_CONTEXT = (
         form_data.RAG_FULL_CONTEXT if form_data.RAG_FULL_CONTEXT is not None else config.RAG_FULL_CONTEXT
     )
@@ -951,6 +962,11 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
         form_data.ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS
         if form_data.ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS is not None
         else config.ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS
+    )
+    config.ENABLE_RAG_RERANKING = (
+        form_data.ENABLE_RAG_RERANKING
+        if form_data.ENABLE_RAG_RERANKING is not None
+        else config.ENABLE_RAG_RERANKING
     )
 
     config.TOP_K_RERANKER = form_data.TOP_K_RERANKER if form_data.TOP_K_RERANKER is not None else config.TOP_K_RERANKER
@@ -1318,9 +1334,11 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
         'RAG_TEMPLATE': config.RAG_TEMPLATE,
         'TOP_K': config.TOP_K,
         'BYPASS_EMBEDDING_AND_RETRIEVAL': config.BYPASS_EMBEDDING_AND_RETRIEVAL,
+        'RAG_NATIVE_FC_FORCE_RETRIEVAL': config.RAG_NATIVE_FC_FORCE_RETRIEVAL,
         'RAG_FULL_CONTEXT': config.RAG_FULL_CONTEXT,
         # Hybrid search settings
         'ENABLE_RAG_HYBRID_SEARCH': config.ENABLE_RAG_HYBRID_SEARCH,
+        'ENABLE_RAG_RERANKING': config.ENABLE_RAG_RERANKING,
         'TOP_K_RERANKER': config.TOP_K_RERANKER,
         'RELEVANCE_THRESHOLD': config.RELEVANCE_THRESHOLD,
         'HYBRID_BM25_WEIGHT': config.HYBRID_BM25_WEIGHT,

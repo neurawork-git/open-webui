@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import hashlib
 import logging
 import os
@@ -17,8 +18,11 @@ from langchain_classic.retrievers import (
     ContextualCompressionRetriever,
     EnsembleRetriever,
 )
-from langchain_community.retrievers import BM25Retriever
+# Note: We use the custom ScoringBM25Retriever below instead of langchain's
+# BM25Retriever so BM25 scores are exposed in document metadata (needed for
+# relevance thresholds, display, and citation keyword highlighting).
 from langchain_core.documents import Document
+from rank_bm25 import BM25Okapi
 from open_webui.config import (
     RAG_EMBEDDING_CONTENT_PREFIX,
     RAG_EMBEDDING_PREFIX_FIELD_NAME,
@@ -30,6 +34,10 @@ from open_webui.env import (
     AIOHTTP_CLIENT_SESSION_SSL,
     AIOHTTP_CLIENT_TIMEOUT,
     BYPASS_RETRIEVAL_ACCESS_CONTROL,
+    EMBEDDING_MAX_RETRIES,
+    EMBEDDING_RETRY_BACKOFF_FACTOR,
+    EMBEDDING_RETRY_INITIAL_DELAY,
+    EMBEDDING_RETRY_MAX_DELAY,
     ENABLE_FORWARD_USER_INFO_HEADERS,
     ENABLE_RETRIEVAL_UNSCOPED_COLLECTIONS,
     OFFLINE_MODE,
@@ -42,6 +50,8 @@ from open_webui.models.notes import Notes
 from open_webui.models.config import Config
 from open_webui.models.users import UserModel
 from open_webui.retrieval.loaders.youtube import YoutubeLoader
+# FORK: unified RAG settings model (per-KB / per-query settings overlay)
+from open_webui.retrieval.models import RAGQuerySettings
 from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
 from open_webui.retrieval.external import retrieve_external_knowledge
 from open_webui.retrieval.vector.factory import VECTOR_DB_CLIENT
@@ -58,6 +68,236 @@ from typing import Any
 
 from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from langchain_core.retrievers import BaseRetriever
+
+
+####################
+# FORK: RAG settings merge + BM25 helpers
+####################
+
+
+def merge_rag_settings(*settings_dicts: Optional[dict]) -> dict:
+    """
+    Merge RAG settings from multiple sources with priority cascade.
+    Later arguments override earlier ones. None values are skipped.
+
+    Priority order (pass in this order): global, user, model, chat, knowledge
+    The last non-None value for each key wins.
+
+    Args:
+        *settings_dicts: Variable number of settings dictionaries
+
+    Returns:
+        Merged settings dict with all populated fields
+    """
+    merged = {}
+    rag_keys = [
+        'top_k',
+        'top_k_reranker',
+        'relevance_threshold',
+        'enable_hybrid_search',
+        'hybrid_bm25_weight',
+        'full_context',
+    ]
+
+    for settings in settings_dicts:
+        if settings is None:
+            continue
+        for key in rag_keys:
+            if key in settings and settings[key] is not None:
+                merged[key] = settings[key]
+
+    return merged
+
+
+####################
+# BM25 tokenization
+####################
+
+
+def tokenize_for_bm25(text: str) -> list[str]:
+    """
+    Tokenize text for BM25 scoring with proper punctuation handling.
+
+    - Converts to lowercase
+    - Removes punctuation from word boundaries
+    - Preserves German umlauts and internal hyphens/periods
+    - Filters empty tokens
+
+    Args:
+        text: The text to tokenize
+
+    Returns:
+        List of cleaned lowercase tokens
+    """
+    text = text.lower()
+    tokens = text.split()
+
+    # Strip punctuation from token boundaries; keep internal characters
+    # (e.g. hyphenated words, decimal numbers). \w matches [a-zA-Z0-9_] plus
+    # Unicode letters (umlauts etc.).
+    cleaned = []
+    for token in tokens:
+        cleaned_token = re.sub(r'^[^\w]+|[^\w]+$', '', token, flags=re.UNICODE)
+        if cleaned_token:
+            cleaned.append(cleaned_token)
+
+    return cleaned
+
+
+def extract_matched_keywords(query: str, document_text: str) -> list[str]:
+    """
+    Extract which BM25 query tokens matched in the document.
+
+    Used for keyword highlighting in the citation UI.
+
+    Args:
+        query: User query string
+        document_text: Document content to check against
+
+    Returns:
+        List of matched keyword tokens (lowercased), in original query order
+    """
+    query_tokens = tokenize_for_bm25(query)
+    document_tokens = set(tokenize_for_bm25(document_text))
+
+    matched = []
+    seen = set()
+    for token in query_tokens:
+        if token in document_tokens and token not in seen:
+            matched.append(token)
+            seen.add(token)
+
+    return matched
+
+
+class EmbeddingError(Exception):
+    """Custom exception for embedding generation errors."""
+
+    pass
+
+
+class PartialEmbeddingError(EmbeddingError):
+    """Exception raised when API returns fewer embeddings than requested."""
+
+    def __init__(self, expected: int, received: int, embeddings: list = None):
+        self.expected = expected
+        self.received = received
+        self.embeddings = embeddings or []
+        super().__init__(f'Expected {expected} embeddings, received {received}')
+
+
+class RateLimitError(EmbeddingError):
+    """Exception raised when API rate limit (429) is hit."""
+
+    def __init__(self, retry_after: float = 1.0, message: str = 'Rate limited'):
+        self.retry_after = retry_after
+        super().__init__(message)
+
+
+def cleanup_memory():
+    """
+    Clean up memory after heavy operations like embedding generation or RAG searches.
+    Triggers garbage collection and clears CUDA cache if available.
+    """
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass  # torch not installed, skip CUDA cleanup
+
+
+async def embedding_with_retry(
+    embedding_func,
+    texts: list[str],
+    max_retries: int = None,
+    initial_delay: float = None,
+    max_delay: float = None,
+    backoff_factor: float = None,
+    tracker=None,
+    **kwargs,
+) -> list[list[float]]:
+    """
+    Wrapper that adds retry logic and validation to embedding functions.
+
+    Args:
+        embedding_func: The async embedding function to call
+        texts: List of texts to generate embeddings for
+        max_retries: Maximum number of retry attempts (default from env)
+        initial_delay: Initial delay between retries in seconds (default from env)
+        max_delay: Maximum delay between retries in seconds (default from env)
+        backoff_factor: Multiplier for exponential backoff (default from env)
+        tracker: Optional ProcessingTaskTracker for cancellation checking
+        **kwargs: Additional arguments to pass to embedding_func
+
+    Returns:
+        List of embeddings matching the input texts
+
+    Raises:
+        EmbeddingError: If all retries fail or validation fails
+        ProcessingCancelledException: If task is cancelled during retry
+    """
+    from open_webui.models.processing import ProcessingCancelledException
+
+    max_retries = max_retries if max_retries is not None else EMBEDDING_MAX_RETRIES
+    initial_delay = initial_delay if initial_delay is not None else EMBEDDING_RETRY_INITIAL_DELAY
+    max_delay = max_delay if max_delay is not None else EMBEDDING_RETRY_MAX_DELAY
+    backoff_factor = backoff_factor if backoff_factor is not None else EMBEDDING_RETRY_BACKOFF_FACTOR
+
+    expected_count = len(texts)
+    last_error = None
+    delay = initial_delay
+
+    for attempt in range(max_retries + 1):
+        if tracker and tracker.is_cancelled():
+            log.info(f'[Embedding] Cancelled at retry attempt {attempt}')
+            raise ProcessingCancelledException('Processing cancelled during embedding retry')
+
+        try:
+            if attempt > 0:
+                log.warning(f'[Embedding] Retry {attempt}/{max_retries} after {delay:.1f}s')
+                await asyncio.sleep(delay)
+                delay = min(delay * backoff_factor, max_delay)
+
+            result = await embedding_func(texts=texts, **kwargs)
+
+            if result is None:
+                last_error = EmbeddingError('API returned None (likely rate limit or connection issue)')
+                continue
+
+            if len(result) != expected_count:
+                raise PartialEmbeddingError(expected=expected_count, received=len(result), embeddings=result)
+
+            return result
+
+        except PartialEmbeddingError as e:
+            last_error = e
+            log.warning(f'[Embedding] Partial result: {e.received}/{e.expected}')
+
+        except RateLimitError as e:
+            last_error = e
+            delay = min(e.retry_after, max_delay)
+            log.warning(f'[Embedding] Rate limited, waiting {e.retry_after:.1f}s')
+
+        except EmbeddingError:
+            raise
+
+        except aiohttp.ClientError as e:
+            last_error = EmbeddingError(f'Connection error: {e}')
+            log.warning(f'[Embedding] Connection error: {type(e).__name__}')
+
+        except asyncio.TimeoutError:
+            last_error = EmbeddingError('Timeout')
+            log.warning('[Embedding] Request timeout')
+
+        except Exception as e:
+            log.exception(f'[Embedding] Unexpected error: {e}')
+            raise EmbeddingError(f'Unexpected error: {e}') from e
+
+    log.error(f'[Embedding] Failed after {max_retries + 1} attempts: {last_error}')
+    raise last_error
 
 
 def is_youtube_url(url: str) -> bool:
@@ -292,6 +532,86 @@ class VectorSearchRetriever(BaseRetriever):
         return _search_result_to_documents(result)
 
 
+class ScoringBM25Retriever(BaseRetriever):
+    """
+    A BM25 retriever that stores normalized BM25 scores in document metadata.
+
+    Unlike langchain's BM25Retriever, which doesn't expose scores, this retriever
+    normalizes BM25 scores to the 0-1 range and stores them in metadata['score']
+    for compatibility with relevance thresholds and display.
+    """
+
+    texts: list[str]
+    metadatas: list[dict]
+    bm25_scores: list[float]  # Pre-computed BM25 scores for all documents
+    k: int = 4
+
+    class Config:
+        arbitrary_types_allowed = True
+
+    def _get_relevant_documents(self, query: str, *, run_manager: CallbackManagerForRetrieverRun) -> list[Document]:
+        """Sync version — returns empty as we use async."""
+        return []
+
+    async def _aget_relevant_documents(
+        self,
+        query: str,
+        *,
+        run_manager: CallbackManagerForRetrieverRun,
+    ) -> list[Document]:
+        """
+        Return top-k documents with normalized BM25 scores in metadata.
+
+        BM25 scores are normalized to the 0-1 range using min-max normalization
+        so they are comparable with vector similarity scores for threshold filtering.
+        """
+        scored_docs = list(zip(self.bm25_scores, self.texts, self.metadatas))
+        scored_docs_sorted = sorted(scored_docs, key=lambda x: x[0], reverse=True)
+        top_k_docs = scored_docs_sorted[: self.k]
+
+        if not top_k_docs:
+            return []
+
+        # Normalize scores to 0-1 range based on the top-k results.
+        # No match = 0%, best match = 100%.
+        scores_in_topk = [doc[0] for doc in top_k_docs]
+        max_score = max(scores_in_topk) if scores_in_topk else 1.0
+
+        results = []
+        for bm25_score, text, metadata in top_k_docs:
+            meta_copy = metadata.copy() if metadata else {}
+
+            if bm25_score <= 0:
+                normalized_score = 0.0
+            elif max_score > 0:
+                normalized_score = bm25_score / max_score
+            else:
+                normalized_score = 0.0
+
+            meta_copy['score'] = normalized_score
+            meta_copy['bm25_raw_score'] = bm25_score  # Keep raw score for debugging
+
+            results.append(Document(page_content=text, metadata=meta_copy))
+
+        return results
+
+    @classmethod
+    def from_texts_and_scores(
+        cls,
+        texts: list[str],
+        metadatas: list[dict],
+        bm25_scores: list[float],
+        k: int = 4,
+    ) -> 'ScoringBM25Retriever':
+        """Create a ScoringBM25Retriever from texts, metadata, and pre-computed BM25 scores."""
+        return cls(
+            texts=texts,
+            metadatas=metadatas,
+            bm25_scores=bm25_scores,
+            k=k,
+        )
+
+
 def query_doc(collection_name: str, query_embedding: list[float], k: int, user: UserModel = None):
     try:
         log.debug(f'query_doc:doc {collection_name}')
@@ -391,6 +711,7 @@ async def query_doc_with_native_hybrid_search(
     k_reranker: int,
     r: float,
     hybrid_bm25_weight: float,
+    enable_reranking: bool = True,
 ) -> Optional[dict]:
     try:
         if not _supports_native_hybrid_search():
@@ -419,6 +740,7 @@ async def query_doc_with_native_hybrid_search(
             top_n=k_reranker,
             reranking_function=reranking_function,
             r_score=r,
+            enable_reranking=enable_reranking,
         )
         compressed = await compressor.acompress_documents(documents, query)
 
@@ -457,6 +779,7 @@ async def query_doc_with_hybrid_search(
     hybrid_bm25_weight: float,
     enable_enriched_texts: bool = False,
     native_hybrid_search: bool = True,
+    enable_reranking: bool = True,
 ) -> dict:
     try:
         if native_hybrid_search and not enable_enriched_texts:
@@ -469,6 +792,7 @@ async def query_doc_with_hybrid_search(
                 k_reranker=k_reranker,
                 r=r,
                 hybrid_bm25_weight=hybrid_bm25_weight,
+                enable_reranking=enable_reranking,
             )
             if native_result is not None:
                 return native_result
@@ -504,11 +828,31 @@ async def query_doc_with_hybrid_search(
 
         bm25_texts = get_enriched_texts(collection_result) if enable_enriched_texts else original_texts
 
-        bm25_retriever = BM25Retriever.from_texts(
-            texts=bm25_texts,
-            metadatas=bm25_metadatas,
+        # Filter out empty/whitespace-only texts to prevent BM25Okapi/embedding errors,
+        # keeping bm25_texts/bm25_metadatas aligned by index.
+        valid_bm25_texts = []
+        valid_bm25_metadatas = []
+        for text, meta in zip(bm25_texts, bm25_metadatas):
+            if text and text.strip():
+                valid_bm25_texts.append(text)
+                valid_bm25_metadatas.append(meta)
+
+        if not valid_bm25_texts:
+            log.warning(f'query_doc_with_hybrid_search:no_valid_docs {collection_name}')
+            return {'documents': [], 'metadatas': [], 'distances': []}
+
+        # Compute BM25 scores via rank_bm25 using the same tokenizer as
+        # extract_matched_keywords, so scoring and citation highlighting agree.
+        tokenized_docs = [tokenize_for_bm25(doc) for doc in valid_bm25_texts]
+        bm25_index = BM25Okapi(tokenized_docs)
+        bm25_scores = bm25_index.get_scores(tokenize_for_bm25(query))
+
+        bm25_retriever = ScoringBM25Retriever.from_texts_and_scores(
+            texts=valid_bm25_texts,
+            metadatas=valid_bm25_metadatas,
+            bm25_scores=list(bm25_scores),
+            k=k,
         )
-        bm25_retriever.k = k
 
         vector_search_retriever = VectorSearchRetriever(
             collection_name=collection_name,
@@ -541,6 +885,7 @@ async def query_doc_with_hybrid_search(
             top_n=k_reranker,
             reranking_function=reranking_function,
             r_score=r,
+            enable_reranking=enable_reranking,
         )
 
         compression_retriever = ContextualCompressionRetriever(
@@ -548,6 +893,12 @@ async def query_doc_with_hybrid_search(
         )
 
         result = await compression_retriever.ainvoke(query)
+
+        # Record which BM25 query tokens matched each document, for citation highlighting.
+        for doc in result:
+            matched_keywords = extract_matched_keywords(query, doc.page_content)
+            if matched_keywords:
+                doc.metadata['bm25_matched_keywords'] = matched_keywords
 
         distances = [d.metadata.get('score') for d in result]
         documents = [d.page_content for d in result]
@@ -574,6 +925,45 @@ async def query_doc_with_hybrid_search(
     except Exception as e:
         log.exception(f'Error querying doc {collection_name} with hybrid search: {e}')
         raise e
+
+
+async def query_doc_with_hybrid_search_settings(
+    collection_name: str,
+    collection_result: Optional[GetResult],
+    query: str,
+    embedding_function,
+    reranking_function,
+    settings: RAGQuerySettings,
+) -> dict:
+    """
+    Query a document collection using hybrid search with unified RAGQuerySettings.
+
+    This is the settings-object interface; it delegates to query_doc_with_hybrid_search.
+
+    Args:
+        collection_name: Name of the vector collection
+        collection_result: Pre-fetched collection data (may be None to fetch lazily)
+        query: Search query string
+        embedding_function: Function to generate embeddings
+        reranking_function: Function to rerank results (can be None)
+        settings: Unified RAG query settings
+
+    Returns:
+        Dict with 'documents', 'metadatas', 'distances' keys
+    """
+    return await query_doc_with_hybrid_search(
+        collection_name=collection_name,
+        collection_result=collection_result,
+        query=query,
+        embedding_function=embedding_function,
+        k=settings.top_k,
+        reranking_function=reranking_function,
+        k_reranker=settings.top_k_reranker,
+        r=settings.relevance_threshold,
+        hybrid_bm25_weight=settings.hybrid_bm25_weight,
+        enable_enriched_texts=settings.enable_enriched_texts,
+        enable_reranking=settings.enable_reranking,
+    )
 
 
 def merge_get_results(get_results: list[dict]) -> dict:
@@ -618,16 +1008,38 @@ def merge_and_sort_query_results(query_results: list[dict], k: int) -> dict:
                 doc_hash = hashlib.sha256(document.encode()).hexdigest()  # Compute a hash for uniqueness
 
                 if doc_hash not in combined.keys():
-                    combined[doc_hash] = (distance, document, metadata)
+                    # Copy metadata to avoid mutating the caller's original dict.
+                    combined[doc_hash] = (distance, document, dict(metadata) if metadata else {})
                     continue  # if doc is new, no further comparison is needed
 
-                # if doc is alredy in, but new distance is better, update
-                if distance > combined[doc_hash][0]:
-                    combined[doc_hash] = (distance, document, metadata)
+                existing_distance, existing_document, existing_metadata = combined[doc_hash]
+
+                # bm25_matched_keywords comes from the hybrid-search path; preserve it
+                # across dedup even if the winning (higher-score) result is from a
+                # keyword-less vector-only result for the same document.
+                keywords_to_preserve = None
+                if metadata and metadata.get('bm25_matched_keywords'):
+                    keywords_to_preserve = metadata['bm25_matched_keywords']
+                elif existing_metadata and existing_metadata.get('bm25_matched_keywords'):
+                    keywords_to_preserve = existing_metadata['bm25_matched_keywords']
+
+                # Treat None distances (e.g. pure-BM25-only legacy paths) as 0 for
+                # comparison so they never crash the '>' comparison below.
+                dist_val = distance if distance is not None else 0
+                existing_dist_val = existing_distance if existing_distance is not None else 0
+
+                if dist_val > existing_dist_val:
+                    merged_metadata = dict(metadata) if metadata else {}
+                    if keywords_to_preserve and not merged_metadata.get('bm25_matched_keywords'):
+                        merged_metadata['bm25_matched_keywords'] = keywords_to_preserve
+                    combined[doc_hash] = (distance, document, merged_metadata)
+                elif keywords_to_preserve and not existing_metadata.get('bm25_matched_keywords'):
+                    # Keep the existing (higher-score) entry but backfill keywords.
+                    existing_metadata['bm25_matched_keywords'] = keywords_to_preserve
 
     combined = list(combined.values())
-    # Sort the list based on distances
-    combined.sort(key=lambda x: x[0], reverse=True)
+    # Sort the list based on distances (None-safe: treat as 0)
+    combined.sort(key=lambda x: x[0] if x[0] is not None else 0, reverse=True)
 
     # Slice to keep only the top k elements
     sorted_distances, sorted_documents, sorted_metadatas = zip(*combined[:k]) if combined else ([], [], [])
@@ -637,6 +1049,51 @@ def merge_and_sort_query_results(query_results: list[dict], k: int) -> dict:
         'distances': [list(sorted_distances)],
         'documents': [list(sorted_documents)],
         'metadatas': [list(sorted_metadatas)],
+    }
+
+
+def filter_results_by_relevance(query_result: dict, relevance_threshold: float) -> dict:
+    """
+    Filter query results by relevance threshold.
+    Only keeps documents with distance/score >= relevance_threshold.
+
+    Used for non-hybrid (pure vector) search paths, where
+    query_doc_with_hybrid_search's RerankCompressor.r_score filtering doesn't apply.
+
+    Args:
+        query_result: Dict with 'distances', 'documents', 'metadatas' keys
+        relevance_threshold: Minimum score to keep (0.0-1.0)
+
+    Returns:
+        Filtered query result dict
+    """
+    if not query_result or not relevance_threshold or relevance_threshold <= 0:
+        return query_result
+
+    distances = query_result.get('distances', [[]])[0]
+    documents = query_result.get('documents', [[]])[0]
+    metadatas = query_result.get('metadatas', [[]])[0]
+
+    if not distances:
+        return query_result
+
+    filtered = [
+        (d, doc, meta) for d, doc, meta in zip(distances, documents, metadatas) if d >= relevance_threshold
+    ]
+
+    if not filtered:
+        return {
+            'distances': [[]],
+            'documents': [[]],
+            'metadatas': [[]],
+        }
+
+    filtered_distances, filtered_documents, filtered_metadatas = zip(*filtered)
+
+    return {
+        'distances': [list(filtered_distances)],
+        'documents': [list(filtered_documents)],
+        'metadatas': [list(filtered_metadatas)],
     }
 
 
@@ -670,6 +1127,7 @@ async def query_collection(
         'rag.relevance_threshold',
         'rag.hybrid_bm25_weight',
         'rag.enable_hybrid_search_enriched_texts',
+        'rag.enable_reranking',
     )
     # When request is provided, try hybrid search + reranking if enabled
     if request and config.get('rag.enable_hybrid_search'):
@@ -689,6 +1147,7 @@ async def query_collection(
                 r=config.get('rag.relevance_threshold'),
                 hybrid_bm25_weight=config.get('rag.hybrid_bm25_weight'),
                 enable_enriched_texts=config.get('rag.enable_hybrid_search_enriched_texts'),
+                enable_reranking=config.get('rag.enable_reranking', True),
             )
         except Exception as e:
             log.debug(f'Hybrid search failed, falling back to vector search: {e}')
@@ -718,28 +1177,32 @@ async def query_collection(
         log.warning('query_collection: all queries were None or empty, returning empty results')
         return {'distances': [[]], 'documents': [[]], 'metadatas': [[]]}
 
-    # Generate all query embeddings (in one call)
-    query_embeddings = await embedding_function(queries, prefix=RAG_EMBEDDING_QUERY_PREFIX)
-    log.debug(f'query_collection: processing {len(queries)} queries across {len(collection_names)} collections')
+    try:
+        # Generate all query embeddings (in one call)
+        query_embeddings = await embedding_function(queries, prefix=RAG_EMBEDDING_QUERY_PREFIX)
+        log.debug(f'query_collection: processing {len(queries)} queries across {len(collection_names)} collections')
 
-    with ThreadPoolExecutor() as executor:
-        future_results = []
-        for query_embedding in query_embeddings:
-            for collection_name in collection_names:
-                result = executor.submit(process_query_collection, collection_name, query_embedding)
-                future_results.append(result)
-        task_results = [future.result() for future in future_results]
+        with ThreadPoolExecutor() as executor:
+            future_results = []
+            for query_embedding in query_embeddings:
+                for collection_name in collection_names:
+                    result = executor.submit(process_query_collection, collection_name, query_embedding)
+                    future_results.append(result)
+            task_results = [future.result() for future in future_results]
 
-    for result, err in task_results:
-        if err is not None:
-            error = True
-        elif result is not None:
-            results.append(result)
+        for result, err in task_results:
+            if err is not None:
+                error = True
+            elif result is not None:
+                results.append(result)
 
-    if error and not results:
-        log.warning('All collection queries failed. No results returned.')
+        if error and not results:
+            log.warning('All collection queries failed. No results returned.')
 
-    return merge_and_sort_query_results(results, k=k)
+        return merge_and_sort_query_results(results, k=k)
+    finally:
+        # Clean up memory after RAG search to prevent accumulation across requests.
+        cleanup_memory()
 
 
 async def query_collection_with_hybrid_search(
@@ -752,94 +1215,144 @@ async def query_collection_with_hybrid_search(
     r: float,
     hybrid_bm25_weight: float,
     enable_enriched_texts: bool = False,
+    enable_reranking: bool = True,
 ) -> dict:
     results = []
     error = False
 
-    if not enable_enriched_texts:
+    try:
+        if not enable_enriched_texts:
 
-        async def process_native_query(collection_name, query):
-            result = await query_doc_with_native_hybrid_search(
-                collection_name=collection_name,
-                query=query,
-                embedding_function=embedding_function,
-                k=k,
-                reranking_function=reranking_function,
-                k_reranker=k_reranker,
-                r=r,
-                hybrid_bm25_weight=hybrid_bm25_weight,
+            async def process_native_query(collection_name, query):
+                result = await query_doc_with_native_hybrid_search(
+                    collection_name=collection_name,
+                    query=query,
+                    embedding_function=embedding_function,
+                    k=k,
+                    reranking_function=reranking_function,
+                    k_reranker=k_reranker,
+                    r=r,
+                    hybrid_bm25_weight=hybrid_bm25_weight,
+                    enable_reranking=enable_reranking,
+                )
+                return result
+
+            native_task_results = await asyncio.gather(
+                *[
+                    process_native_query(collection_name, query)
+                    for collection_name in collection_names
+                    for query in queries
+                ]
             )
-            return result
+            if native_task_results and all(result is not None for result in native_task_results):
+                return merge_and_sort_query_results(native_task_results, k=k)
 
-        native_task_results = await asyncio.gather(
-            *[process_native_query(collection_name, query) for collection_name in collection_names for query in queries]
+        # Fetch every collection's contents once up front so the
+        # per-query/per-document loop below can reuse them. Each fetch
+        # offloads to a worker thread, so run them concurrently with
+        # `asyncio.gather` instead of awaiting them serially — otherwise
+        # latency scales linearly with `len(collection_names)`.
+        log.debug(
+            'query_collection_with_hybrid_search: prefetching %d collections',
+            len(collection_names),
         )
-        if native_task_results and all(result is not None for result in native_task_results):
-            return merge_and_sort_query_results(native_task_results, k=k)
 
-    # Fetch every collection's contents once up front so the
-    # per-query/per-document loop below can reuse them. Each fetch
-    # offloads to a worker thread, so run them concurrently with
-    # `asyncio.gather` instead of awaiting them serially — otherwise
-    # latency scales linearly with `len(collection_names)`.
-    log.debug(
-        'query_collection_with_hybrid_search: prefetching %d collections',
-        len(collection_names),
+        async def _fetch_collection(name: str):
+            try:
+                return name, await ASYNC_VECTOR_DB_CLIENT.get(collection_name=name)
+            except Exception as e:
+                log.exception(f'Failed to fetch collection {name}: {e}')
+                return name, None
+
+        collection_results = dict(await asyncio.gather(*(_fetch_collection(name) for name in collection_names)))
+
+        log.info(f'Starting hybrid search for {len(queries)} queries in {len(collection_names)} collections...')
+
+        async def process_query(collection_name, query):
+            try:
+                result = await query_doc_with_hybrid_search(
+                    collection_name=collection_name,
+                    collection_result=collection_results[collection_name],
+                    query=query,
+                    embedding_function=embedding_function,
+                    k=k,
+                    reranking_function=reranking_function,
+                    k_reranker=k_reranker,
+                    r=r,
+                    hybrid_bm25_weight=hybrid_bm25_weight,
+                    enable_enriched_texts=enable_enriched_texts,
+                    native_hybrid_search=False,
+                    enable_reranking=enable_reranking,
+                )
+                return result, None
+            except Exception as e:
+                log.exception(f'Error when querying the collection with hybrid_search: {e}')
+                return None, e
+
+        # Prepare tasks for all collections and queries
+        # Avoid running any tasks for collections that failed to fetch data (have assigned None)
+        tasks = [
+            (collection_name, query)
+            for collection_name in collection_names
+            if collection_results[collection_name] is not None
+            for query in queries
+        ]
+
+        # Run all queries in parallel using asyncio.gather
+        task_results = await asyncio.gather(
+            *[process_query(collection_name, query) for collection_name, query in tasks]
+        )
+
+        for result, err in task_results:
+            if err is not None:
+                error = True
+            elif result is not None:
+                results.append(result)
+
+        if error and not results:
+            raise Exception('Hybrid search failed for all collections. Using Non-hybrid search as fallback.')
+
+        return merge_and_sort_query_results(results, k=k)
+    finally:
+        # Clean up memory after hybrid search to prevent accumulation. This matters
+        # especially for BM25, which builds an in-memory index per query.
+        cleanup_memory()
+
+
+async def query_collection_with_hybrid_search_settings(
+    collection_names: list[str],
+    queries: list[str],
+    embedding_function,
+    reranking_function,
+    settings: RAGQuerySettings,
+) -> dict:
+    """
+    Query multiple collections using hybrid search with unified RAGQuerySettings.
+
+    This is the settings-object interface; it delegates to query_collection_with_hybrid_search.
+
+    Args:
+        collection_names: List of vector collection names
+        queries: List of search queries
+        embedding_function: Function to generate embeddings
+        reranking_function: Function to rerank results (can be None)
+        settings: Unified RAG query settings
+
+    Returns:
+        Dict with 'documents', 'metadatas', 'distances' keys
+    """
+    return await query_collection_with_hybrid_search(
+        collection_names=collection_names,
+        queries=queries,
+        embedding_function=embedding_function,
+        k=settings.top_k,
+        reranking_function=reranking_function,
+        k_reranker=settings.top_k_reranker,
+        r=settings.relevance_threshold,
+        hybrid_bm25_weight=settings.hybrid_bm25_weight,
+        enable_enriched_texts=settings.enable_enriched_texts,
+        enable_reranking=settings.enable_reranking,
     )
-
-    async def _fetch_collection(name: str):
-        try:
-            return name, await ASYNC_VECTOR_DB_CLIENT.get(collection_name=name)
-        except Exception as e:
-            log.exception(f'Failed to fetch collection {name}: {e}')
-            return name, None
-
-    collection_results = dict(await asyncio.gather(*(_fetch_collection(name) for name in collection_names)))
-
-    log.info(f'Starting hybrid search for {len(queries)} queries in {len(collection_names)} collections...')
-
-    async def process_query(collection_name, query):
-        try:
-            result = await query_doc_with_hybrid_search(
-                collection_name=collection_name,
-                collection_result=collection_results[collection_name],
-                query=query,
-                embedding_function=embedding_function,
-                k=k,
-                reranking_function=reranking_function,
-                k_reranker=k_reranker,
-                r=r,
-                hybrid_bm25_weight=hybrid_bm25_weight,
-                enable_enriched_texts=enable_enriched_texts,
-                native_hybrid_search=False,
-            )
-            return result, None
-        except Exception as e:
-            log.exception(f'Error when querying the collection with hybrid_search: {e}')
-            return None, e
-
-    # Prepare tasks for all collections and queries
-    # Avoid running any tasks for collections that failed to fetch data (have assigned None)
-    tasks = [
-        (collection_name, query)
-        for collection_name in collection_names
-        if collection_results[collection_name] is not None
-        for query in queries
-    ]
-
-    # Run all queries in parallel using asyncio.gather
-    task_results = await asyncio.gather(*[process_query(collection_name, query) for collection_name, query in tasks])
-
-    for result, err in task_results:
-        if err is not None:
-            error = True
-        elif result is not None:
-            results.append(result)
-
-    if error and not results:
-        raise Exception('Hybrid search failed for all collections. Using Non-hybrid search as fallback.')
-
-    return merge_and_sort_query_results(results, k=k)
 
 
 def generate_openai_batch_embeddings(
@@ -1105,18 +1618,19 @@ def get_embedding_function(
 
         return async_embedding_function
     elif embedding_engine in ['ollama', 'openai', 'azure_openai']:
-        embedding_function = lambda query, prefix=None, user=None: generate_embeddings(
+        embedding_function = lambda query, prefix=None, user=None, tracker=None: generate_embeddings(
             engine=embedding_engine,
             model=embedding_model,
             text=query,
             prefix=prefix,
+            tracker=tracker,
             url=url,
             key=key,
             user=user,
             azure_api_version=azure_api_version,
         )
 
-        async def async_embedding_function(query, prefix=None, user=None):
+        async def async_embedding_function(query, prefix=None, user=None, tracker=None):
             if isinstance(query, list):
                 # Create batches
                 batches = [query[i : i + embedding_batch_size] for i in range(0, len(query), embedding_batch_size)]
@@ -1130,23 +1644,25 @@ def get_embedding_function(
 
                         async def generate_batch_with_semaphore(batch):
                             async with semaphore:
-                                return await embedding_function(batch, prefix=prefix, user=user)
+                                return await embedding_function(batch, prefix=prefix, user=user, tracker=tracker)
 
                         tasks = [generate_batch_with_semaphore(batch) for batch in batches]
                     else:
-                        tasks = [embedding_function(batch, prefix=prefix, user=user) for batch in batches]
+                        tasks = [
+                            embedding_function(batch, prefix=prefix, user=user, tracker=tracker) for batch in batches
+                        ]
                     batch_results = await asyncio.gather(*tasks)
                 else:
                     log.debug(f'generate_multiple_async: Processing {len(batches)} batches sequentially')
                     batch_results = []
                     for batch in batches:
-                        batch_results.append(await embedding_function(batch, prefix=prefix, user=user))
+                        batch_results.append(await embedding_function(batch, prefix=prefix, user=user, tracker=tracker))
 
                 # Flatten results — raise if any batch failed
                 embeddings = []
                 for i, batch_embeddings in enumerate(batch_results):
                     if batch_embeddings is None:
-                        raise Exception(f'Embedding generation failed for batch {i + 1}/{len(batches)}')
+                        raise EmbeddingError(f'Embedding generation failed for batch {i + 1}/{len(batches)}')
                     embeddings.extend(batch_embeddings)
 
                 log.debug(
@@ -1154,7 +1670,7 @@ def get_embedding_function(
                 )
                 return embeddings
             else:
-                return await embedding_function(query, prefix, user)
+                return await embedding_function(query, prefix, user, tracker)
 
         return async_embedding_function
     else:
@@ -1166,8 +1682,27 @@ async def generate_embeddings(
     model: str,
     text: Union[str, list[str]],
     prefix: Union[str, None] = None,
+    tracker=None,
     **kwargs,
 ):
+    """
+    Generate embeddings, retrying transient errors (connection issues, timeouts,
+    partial API results) via embedding_with_retry.
+
+    Args:
+        engine: The embedding engine (ollama, openai, azure_openai)
+        model: The model name/deployment ID
+        text: Single string or list of strings to embed
+        prefix: Optional prefix to prepend to texts
+        tracker: Optional ProcessingTaskTracker for cancellation checking
+        **kwargs: Additional arguments (url, key, user, azure_api_version)
+
+    Returns:
+        Single embedding (if text is str) or list of embeddings (if text is list)
+
+    Raises:
+        EmbeddingError: If all retry attempts fail
+    """
     url = kwargs.get('url', '')
     key = kwargs.get('key', '')
     user = kwargs.get('user')
@@ -1178,41 +1713,75 @@ async def generate_embeddings(
         else:
             text = f'{prefix}{text}'
 
+    texts_list = text if isinstance(text, list) else [text]
+    is_single = isinstance(text, str)
+
+    # Filter out empty/whitespace-only strings to prevent API errors, and
+    # reconstruct the full (zero-padded) list afterwards so callers still get
+    # one embedding per input text.
+    non_empty_indices = [i for i, t in enumerate(texts_list) if t and t.strip()]
+    non_empty_texts = [texts_list[i] for i in non_empty_indices]
+
+    if not non_empty_texts:
+        log.debug(f'[Embedding] All {len(texts_list)} texts empty, returning zero-vectors')
+        zero_embedding = [0.0] * 1536
+        return zero_embedding if is_single else [zero_embedding] * len(texts_list)
+
     if engine == 'ollama':
-        embeddings = await agenerate_ollama_batch_embeddings(
-            **{
-                'model': model,
-                'texts': text if isinstance(text, list) else [text],
-                'url': url,
-                'key': key,
-                'prefix': prefix,
-                'user': user,
-            }
+        non_empty_embeddings = await embedding_with_retry(
+            embedding_func=agenerate_ollama_batch_embeddings,
+            texts=non_empty_texts,
+            tracker=tracker,
+            model=model,
+            url=url,
+            key=key,
+            prefix=prefix,
+            user=user,
         )
-        if embeddings is None:
-            return None
-        return embeddings[0] if isinstance(text, str) else embeddings
     elif engine == 'openai':
-        embeddings = await agenerate_openai_batch_embeddings(
-            model, text if isinstance(text, list) else [text], url, key, prefix, user
+        non_empty_embeddings = await embedding_with_retry(
+            embedding_func=agenerate_openai_batch_embeddings,
+            texts=non_empty_texts,
+            tracker=tracker,
+            model=model,
+            url=url,
+            key=key,
+            prefix=prefix,
+            user=user,
         )
-        if embeddings is None:
-            return None
-        return embeddings[0] if isinstance(text, str) else embeddings
     elif engine == 'azure_openai':
         azure_api_version = kwargs.get('azure_api_version', '')
-        embeddings = await agenerate_azure_openai_batch_embeddings(
-            model,
-            text if isinstance(text, list) else [text],
-            url,
-            key,
-            azure_api_version,
-            prefix,
-            user,
+        non_empty_embeddings = await embedding_with_retry(
+            embedding_func=agenerate_azure_openai_batch_embeddings,
+            texts=non_empty_texts,
+            tracker=tracker,
+            model=model,
+            url=url,
+            key=key,
+            version=azure_api_version,
+            prefix=prefix,
+            user=user,
         )
-        if embeddings is None:
-            return None
-        return embeddings[0] if isinstance(text, str) else embeddings
+    else:
+        raise ValueError(f'Unknown embedding engine: {engine}')
+
+    if len(non_empty_texts) == len(texts_list):
+        embeddings = non_empty_embeddings
+    else:
+        # Reconstruct the full list, filling empty-text slots with zero-vectors.
+        embedding_dim = len(non_empty_embeddings[0]) if non_empty_embeddings else 1536
+        zero_embedding = [0.0] * embedding_dim
+        non_empty_set = set(non_empty_indices)
+        embeddings = []
+        non_empty_idx = 0
+        for i in range(len(texts_list)):
+            if i in non_empty_set:
+                embeddings.append(non_empty_embeddings[non_empty_idx])
+                non_empty_idx += 1
+            else:
+                embeddings.append(zero_embedding)
+
+    return embeddings[0] if is_single else embeddings
 
 
 def get_reranking_function(reranking_engine, reranking_model, reranking_function, reranking_batch_size=32):
@@ -1316,7 +1885,12 @@ async def get_sources_from_items(
     hybrid_bm25_weight,
     hybrid_search,
     full_context=False,
+    # FORK: per-KB / per-query RAG settings overlay (all defaulted so the
+    # base call signature stays backward-compatible).
+    enable_reranking=True,
     user: UserModel | None = None,
+    per_knowledge_settings: Optional[dict] = None,
+    base_settings: Optional[dict] = None,
 ):
     log.debug(f'items: {items} {queries} {embedding_function} {reranking_function} {full_context}')
 
@@ -1466,8 +2040,9 @@ async def get_sources_from_items(
                                 collection_names.append(f'file-{file_id}')
 
         elif item.get('type') == 'collection':
-            # Manual Full Mode Toggle for Collection
-            knowledge_base = await Knowledges.get_knowledge_by_id(item.get('id'))
+            # Knowledge Base Collection
+            knowledge_id = item.get('id')
+            knowledge_base = await Knowledges.get_knowledge_by_id(knowledge_id)
 
             if knowledge_base and (
                 user.role == 'admin'
@@ -1490,7 +2065,29 @@ async def get_sources_from_items(
                     extracted_collections.append(knowledge_base.id)
 
                 else:
-                    if item.get('context') == 'full' or bypass_embedding_and_retrieval:
+                    # FORK: per-KB RAG settings overlay. Resolve this KB's effective
+                    # settings BEFORE deciding full-context vs. vector-search, so each
+                    # KB's full_context/threshold/top_k/... overrides are respected
+                    # independently of other KBs in the same request.
+                    kb_settings = (per_knowledge_settings or {}).get(knowledge_id, {})
+
+                    ui_full_context = item.get('context') == 'full'
+                    kb_full_context = kb_settings.get('full_context')  # None if not overridden
+                    if ui_full_context:
+                        effective_full_context = True
+                    elif kb_full_context is not None:
+                        effective_full_context = kb_full_context
+                    else:
+                        effective_full_context = full_context
+
+                    effective_r = kb_settings.get('relevance_threshold', r)
+                    effective_k = kb_settings.get('top_k', k)
+                    effective_k_reranker = kb_settings.get('top_k_reranker', k_reranker)
+                    effective_hybrid_search = kb_settings.get('enable_hybrid_search', hybrid_search)
+                    effective_hybrid_bm25_weight = kb_settings.get('hybrid_bm25_weight', hybrid_bm25_weight)
+                    effective_enable_reranking = kb_settings.get('enable_reranking', enable_reranking)
+
+                    if effective_full_context or bypass_embedding_and_retrieval:
                         if knowledge_base and (
                             user.role == 'admin'
                             or knowledge_base.user_id == user.id
@@ -1520,9 +2117,11 @@ async def get_sources_from_items(
                                 'metadatas': [metadatas],
                             }
                     else:
+                        # Cross-tenant legacy collection-name validation guard is
+                        # preserved as-is (must not regress to an unguarded body).
                         if item.get('legacy'):
                             if BYPASS_RETRIEVAL_ACCESS_CONTROL:
-                                collection_names = item.get('collection_names', [])
+                                kb_collection_names = item.get('collection_names', [])
                             else:
                                 # Legacy KB: item.collection_names is client-supplied.
                                 # Validate against the KB's actual files to prevent
@@ -1531,9 +2130,58 @@ async def get_sources_from_items(
                                 owned_names = {f'file-{f.id}' for f in files}
                                 owned_names.add(knowledge_base.id)
                                 valid_names = [n for n in (item.get('collection_names') or []) if n in owned_names]
-                                collection_names = valid_names if valid_names else [knowledge_base.id]
+                                kb_collection_names = valid_names if valid_names else [knowledge_base.id]
                         else:
-                            collection_names.append(item['id'])
+                            kb_collection_names = [knowledge_id]
+
+                        # Query this KB's collections independently, with its own
+                        # effective settings.
+                        kb_collection_names_set = set(kb_collection_names).difference(extracted_collections)
+                        if kb_collection_names_set:
+                            try:
+                                if effective_hybrid_search:
+                                    enriched_texts_cfg = await Config.get(
+                                        'rag.enable_hybrid_search_enriched_texts'
+                                    )
+                                    query_result = await query_collection_with_hybrid_search(
+                                        collection_names=list(kb_collection_names_set),
+                                        queries=queries,
+                                        embedding_function=embedding_function,
+                                        k=effective_k,
+                                        reranking_function=reranking_function,
+                                        k_reranker=effective_k_reranker,
+                                        r=effective_r,
+                                        hybrid_bm25_weight=effective_hybrid_bm25_weight,
+                                        enable_enriched_texts=enriched_texts_cfg,
+                                        enable_reranking=effective_enable_reranking,
+                                    )
+                                else:
+                                    # request=None: this KB's effective_hybrid_search is
+                                    # False, so skip query_collection's own (global-config
+                                    # driven) hybrid-search branch — otherwise a global
+                                    # ENABLE_RAG_HYBRID_SEARCH=True would silently override
+                                    # this KB's explicit opt-out.
+                                    query_result = await query_collection(
+                                        request=None,
+                                        collection_names=list(kb_collection_names_set),
+                                        queries=queries,
+                                        embedding_function=embedding_function,
+                                        k=effective_k,
+                                    )
+                                    if query_result and effective_r and effective_r > 0:
+                                        query_result = filter_results_by_relevance(query_result, effective_r)
+
+                                extracted_collections.extend(kb_collection_names_set)
+                            except Exception as e:
+                                log.exception(f'Error querying KB {knowledge_id}: {e}')
+
+                        # This KB has already been queried above; skip the generic
+                        # collection_names handling below for this item.
+                        if query_result:
+                            if 'data' in item:
+                                del item['data']
+                            query_results.append({**query_result, 'file': item})
+                        continue
 
         elif item.get('docs'):
             # BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL
@@ -1581,14 +2229,30 @@ async def get_sources_from_items(
                     # Sync helper makes blocking VECTOR_DB_CLIENT calls;
                     # offload so the async caller's event loop stays free.
                     query_result = await asyncio.to_thread(get_all_items_from_collections, collection_names)
+                elif hybrid_search:
+                    enriched_texts_cfg = await Config.get('rag.enable_hybrid_search_enriched_texts')
+                    query_result = await query_collection_with_hybrid_search(
+                        collection_names=collection_names,
+                        queries=queries,
+                        embedding_function=embedding_function,
+                        k=k,
+                        reranking_function=reranking_function,
+                        k_reranker=k_reranker,
+                        r=r,
+                        hybrid_bm25_weight=hybrid_bm25_weight,
+                        enable_enriched_texts=enriched_texts_cfg,
+                        enable_reranking=enable_reranking,
+                    )
                 else:
                     query_result = await query_collection(
-                        request,
+                        request=None,
                         collection_names=collection_names,
                         queries=queries,
                         embedding_function=embedding_function,
                         k=k,
                     )
+                    if query_result and r and r > 0:
+                        query_result = filter_results_by_relevance(query_result, r)
             except Exception as e:
                 log.exception(e)
 
@@ -1616,6 +2280,60 @@ async def get_sources_from_items(
         except Exception as e:
             log.exception(e)
     return sources
+
+
+async def get_sources_from_items_with_settings(
+    request,
+    items,
+    queries,
+    embedding_function,
+    reranking_function,
+    settings: RAGQuerySettings,
+    user: Optional[UserModel] = None,
+    per_knowledge_settings: Optional[dict[str, RAGQuerySettings]] = None,
+):
+    """
+    Retrieve sources from items using unified RAGQuerySettings.
+
+    This is the settings-object interface; it delegates to get_sources_from_items.
+
+    Args:
+        request: FastAPI request object
+        items: List of items to retrieve sources from
+        queries: List of search queries
+        embedding_function: Function to generate embeddings
+        reranking_function: Function to rerank results (can be None)
+        settings: Unified RAG query settings (base/global settings)
+        user: Optional user model for access control
+        per_knowledge_settings: Optional dict mapping knowledge_id to RAGQuerySettings overrides
+
+    Returns:
+        List of source dicts with 'source', 'document', 'metadata', 'distances' keys
+    """
+    per_kb_dict = None
+    if per_knowledge_settings:
+        per_kb_dict = {
+            kb_id: (kb_settings.model_dump() if isinstance(kb_settings, RAGQuerySettings) else kb_settings)
+            for kb_id, kb_settings in per_knowledge_settings.items()
+        }
+
+    return await get_sources_from_items(
+        request=request,
+        items=items,
+        queries=queries,
+        embedding_function=embedding_function,
+        k=settings.top_k,
+        reranking_function=reranking_function,
+        k_reranker=settings.top_k_reranker,
+        r=settings.relevance_threshold,
+        hybrid_bm25_weight=settings.hybrid_bm25_weight,
+        hybrid_search=settings.enable_hybrid_search,
+        full_context=settings.full_context,
+        enable_reranking=settings.enable_reranking,
+        user=user,
+        per_knowledge_settings=per_kb_dict,
+        base_settings=settings.model_dump(),
+    )
 
 
 def get_model_path(model: str, update_model: bool = False):
@@ -1669,6 +2387,7 @@ class RerankCompressor(BaseDocumentCompressor):
     top_n: int
     reranking_function: Any
     r_score: float
+    enable_reranking: bool = True  # When False, pass through with original ensemble scores
 
     class Config:
         extra = 'forbid'
@@ -1699,6 +2418,18 @@ class RerankCompressor(BaseDocumentCompressor):
         query: str,
         callbacks: Callbacks | None = None,
     ) -> Sequence[Document]:
+        if not self.enable_reranking:
+            # Pass through documents unranked, preserving any existing vector/BM25
+            # score in metadata, or assigning a rank-based score (RRF-style) for
+            # results that don't carry one (e.g. BM25-only matches).
+            result_docs = []
+            for idx, doc in enumerate(list(documents[: self.top_n])):
+                metadata = doc.metadata.copy()
+                if metadata.get('score') is None:
+                    metadata['score'] = 1.0 / (idx + 1)
+                result_docs.append(Document(page_content=doc.page_content, metadata=metadata))
+            return result_docs
+
         reranking = self.reranking_function is not None
 
         scores = None

@@ -73,20 +73,38 @@ def _make_folder_listing(
 # Module paths for patching
 _KNOWLEDGE_MOD = "open_webui.routers.knowledge"
 
+# The router reads the SharePoint size cap via `Config.get(...)` (the
+# per-key Config system), not via a request.app.state.config attribute.
+# `_make_request` stashes the desired limit here; the autouse fixture below
+# feeds it back out of a mocked Config.get.
+_SHAREPOINT_SIZE_LIMIT_MB = {"value": 0}
+
+
+@pytest.fixture(autouse=True)
+def _patch_sharepoint_config_get():
+    async def _fake_get(key, default=None):
+        if key == "rag.sharepoint.import_max_total_size_mb":
+            return _SHAREPOINT_SIZE_LIMIT_MB["value"]
+        return default
+
+    with patch(f"{_KNOWLEDGE_MOD}.Config") as mock_config:
+        mock_config.get = AsyncMock(side_effect=_fake_get)
+        yield mock_config
+    _SHAREPOINT_SIZE_LIMIT_MB["value"] = 0
+
 
 def _make_request(
     sharepoint_import_max_total_size_mb: int = 0,
     access_token: str = "graph-token-123",
     session_cookie: str = "test-session-id",
 ) -> MagicMock:
-    """Build a Request mock whose app.state carries the SharePoint size cap
-    and an oauth_manager.get_oauth_token that returns a valid Microsoft
-    token. Pass access_token=None to simulate refresh failure and
-    session_cookie=None to simulate a missing oauth_session_id cookie."""
+    """Build a Request mock whose app.state carries an oauth_manager.get_oauth_token
+    that returns a valid Microsoft token, and register the SharePoint size cap
+    with the mocked Config.get (see `_patch_sharepoint_config_get`). Pass
+    access_token=None to simulate refresh failure and session_cookie=None to
+    simulate a missing oauth_session_id cookie."""
+    _SHAREPOINT_SIZE_LIMIT_MB["value"] = sharepoint_import_max_total_size_mb
     request = MagicMock()
-    request.app.state.config.SHAREPOINT_IMPORT_MAX_TOTAL_SIZE_MB = (
-        sharepoint_import_max_total_size_mb
-    )
     request.cookies = {"oauth_session_id": session_cookie} if session_cookie else {}
     token_payload = {"access_token": access_token} if access_token else None
     request.app.state.oauth_manager = MagicMock(spec=OAuthManager)
