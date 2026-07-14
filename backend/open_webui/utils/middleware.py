@@ -2351,6 +2351,10 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     if not folder_id:
         folder_id = metadata.get('folder_id', None)
 
+    # FORK: KB-deterministic-inject — restores deterministic knowledge injection
+    # even when function_calling is native/default (upstream injects only on 'legacy').
+    force_retrieval = await Config.get('rag.native_fc_force_retrieval', True)
+
     if folder_id and user:
         folder = await Folders.get_folder_by_id_and_user_id(folder_id, user.id)
 
@@ -2360,21 +2364,26 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             if 'files' in folder.data:
                 # Defensive: filter to entries the caller can still read.
                 allowed_files = await get_accessible_folder_files(folder.data['files'], user)
-                if metadata.get('params', {}).get('function_calling') == 'legacy':
+                # FORK: KB-deterministic-inject — intentional dual-path when
+                # force_retrieval=True on non-legacy FC: RAG injection AND the
+                # folder_knowledge sidecar both populate, so deterministic
+                # retrieval and builtin tools can each see the KB.
+                if metadata.get('params', {}).get('function_calling') == 'legacy' or force_retrieval:
                     form_data['files'] = [
                         *allowed_files,
                         *form_data.get('files', []),
                     ]
-                else:
-                    # Native FC: skip RAG injection, builtin tools
-                    # will read folder knowledge from metadata.
+                if metadata.get('params', {}).get('function_calling') != 'legacy':
+                    # Non-legacy FC: builtin tools read folder knowledge from metadata.
                     metadata['folder_knowledge'] = allowed_files
 
     # Model "Knowledge" handling
     user_message = get_last_user_message(form_data['messages'])
     model_knowledge = model.get('info', {}).get('meta', {}).get('knowledge', False)
 
-    if model_knowledge and metadata.get('params', {}).get('function_calling') == 'legacy':
+    # FORK: KB-deterministic-inject — see folder_knowledge above. model_knowledge
+    # needs no sidecar: tools.py reads it from model.info.meta.knowledge directly.
+    if model_knowledge and (metadata.get('params', {}).get('function_calling') == 'legacy' or force_retrieval):
         await event_emitter(
             {
                 'type': 'status',
@@ -2466,6 +2475,11 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         if 'code_interpreter' in features and features['code_interpreter']:
             engine = await Config.get('code_interpreter.engine', 'pyodide')
 
+            # FORK: admin-tunable pyodide guardrail; empty -> baked-in default.
+            pyodide_prompt = (
+                await Config.get('code_interpreter.pyodide_prompt_template', '') or CODE_INTERPRETER_PYODIDE_PROMPT
+            )
+
             # Skip XML-tag prompt injection when native FC is enabled —
             # execute_code will be injected as a builtin tool instead
             if metadata.get('params', {}).get('function_calling') == 'legacy':
@@ -2477,7 +2491,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
                 # Append filesystem awareness only for pyodide engine
                 if engine != 'jupyter':
-                    prompt += CODE_INTERPRETER_PYODIDE_PROMPT
+                    prompt += pyodide_prompt
 
                 form_data['messages'] = add_or_update_user_message(
                     prompt,
@@ -2492,7 +2506,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 # conversation on every turn.
                 if engine != 'jupyter':
                     form_data['messages'] = add_or_update_system_message(
-                        CODE_INTERPRETER_PYODIDE_PROMPT,
+                        pyodide_prompt,
                         form_data['messages'],
                         append=True,
                     )
