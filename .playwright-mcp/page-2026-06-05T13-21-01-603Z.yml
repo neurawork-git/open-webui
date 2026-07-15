@@ -1,0 +1,38 @@
+- generic [ref=e4]:
+  - generic [ref=e7]:
+    - img "logo" [ref=e11]
+    - generic [ref=e19]:
+      - generic [ref=e20]:
+        - generic [ref=e60]: Den Kosmos erkunden
+        - generic [ref=e24]: wo immer Sie sind
+      - generic [ref=e26]:
+        - button "Loslegen" [ref=e27] [cursor=pointer]:
+          - img [ref=e28]
+        - generic [ref=e30]: Loslegen
+  - generic [ref=e38]:
+    - generic [ref=e39]:
+      - generic [ref=e40]: Loslegen mit Open WebUI
+      - generic [ref=e41]: ⓘ Open WebUI stellt keine externen Verbindungen her; Ihre Daten bleiben sicher auf Ihrem lokalen Server.
+    - generic [ref=e42]:
+      - generic [ref=e43]:
+        - generic [ref=e44]: E-Mail
+        - textbox "E-Mail" [ref=e45]:
+          - /placeholder: Ihre E-Mail eingeben
+          - text: admin@replay.test
+      - generic [ref=e46]:
+        - generic [ref=e47]: Passwort
+        - generic [ref=e48]:
+          - generic [ref=e49]: Ihr Passwort eingeben
+          - textbox "Passwort Ihr Passwort eingeben" [active] [ref=e50]:
+            - /placeholder: Ihr Passwort eingeben
+            - text: replaytest123
+          - button "Passwort in der Benutzeroberfläche sichtbar machen" [ref=e51] [cursor=pointer]:
+            - img [ref=e52]
+    - button "Anmelden" [ref=e56] [cursor=pointer]
+  - region "Notifications alt+T":
+    - list:
+      - status [ref=e61]:
+        - button "Close toast" [ref=e62] [cursor=pointer]:
+          - img [ref=e63]
+        - img [ref=e67]
+        - generic [ref=e70]: The email or password provided is incorrect. Please check for typos and try logging in again.

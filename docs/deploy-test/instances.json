@@ -29,6 +29,19 @@
       "db_migrations_on_boot": true,
       "expected_features": {},
       "notes": "Dedizierte Test-Umgebung. Erst hier deployen+testen, dann prod. Hat eigenen Postgres (...-postgres-0) + grafana/prometheus/markitdown/alt-text Sidecars."
+    },
+    "falkensteg": {
+      "label": "Kunde Falkensteg (aks-falkensteg)",
+      "url": "https://falkensteg.ai",
+      "kube_context": "aks-falkensteg",
+      "namespace": "falkensteg",
+      "deployment": "open-webui-webui",
+      "container": "open-webui",
+      "image_repo": "neuraworkacr.azurecr.io/open-webui",
+      "db": "postgres",
+      "db_migrations_on_boot": true,
+      "expected_features": {},
+      "notes": "KUNDE-PROD. Supabase-Postgres (supabase-supabase-db), VECTOR_DB=pgvector (Embeddings in-DB, document_chunk ~3.3GB regenerierbar). Lief bis 2026-06 auf altem Pre-0.9.6-Fork (git-dab2d79, DB @ a2b3c4d5e6f7). 0.9.6-Upgrade = 5 additive Migrations bis 7e66bdd43a43; note.is_pinned wird in pinned_note migriert+gedroppt -> altes Image danach inkompatibel, Rollback = DB-Restore/alembic-downgrade, NICHT image-undo. URL ggf. anpassen."
     }
   }
 }

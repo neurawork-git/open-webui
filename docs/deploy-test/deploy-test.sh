@@ -17,13 +17,15 @@
 # `./deploy-test.sh record <instance> <checkId> pass|fail --tag <tag>` zurück.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-INST_JSON="$HERE/instances.json"
+# Windows-native python can't open git-bash '/c/...' paths -> convert with cygpath.
+INST_JSON="$(cygpath -w "$HERE/instances.json" 2>/dev/null || echo "$HERE/instances.json")"
+STATE_PY="$(cygpath -w "$HERE/lib/state.py" 2>/dev/null || echo "$HERE/lib/state.py")"
 PY="python"
 
 jqget() { # jqget <instance> <key>
   "$PY" -c "import json,sys; d=json.load(open(r'$INST_JSON',encoding='utf-8'))['instances']; print(d['$1'].get('$2',''))"
 }
-state() { "$PY" "$HERE/lib/state.py" "$@"; }
+state() { "$PY" "$STATE_PY" "$@"; }
 
 inst_exists() {
   "$PY" -c "import json,sys; d=json.load(open(r'$INST_JSON',encoding='utf-8'))['instances']; sys.exit(0 if '$1' in d else 1)"
@@ -76,7 +78,7 @@ cmd_preflight() {
     # Benign: socket session-pool-cleanup lock (Redis) ist KEIN Migration-Error -> ausschließen
     MIGERR=$(kubectl --context "$CTX" -n "$NS" logs "$POD" 2>/dev/null \
       | grep -iE 'error|traceback|sqlalchemy.exc|does not exist|alembic.*fail' \
-      | grep -viE 'periodic_session_pool_cleanup|renew session cleanup lock' | head -5)
+      | grep -viE 'periodic_session_pool_cleanup|renew session cleanup lock|HTTP/[0-9]|.php|GET |POST ' | head -5)
     echo "[migrate] head: ${MIGHEAD:-<keine Migration in Log-Puffer>}"
     if [ -n "$MIGERR" ]; then
       echo "[migrate] ERRORS:"; echo "$MIGERR"
@@ -132,7 +134,7 @@ cmd_migration_log() {
   echo "--- Error-Scan (benign session-lock ausgefiltert) ---"
   kubectl --context "$CTX" -n "$NS" logs "$POD" 2>/dev/null \
     | grep -iE 'error|traceback|sqlalchemy.exc|does not exist' \
-    | grep -viE 'periodic_session_pool_cleanup|renew session cleanup lock'
+    | grep -viE 'periodic_session_pool_cleanup|renew session cleanup lock|HTTP/[0-9]|.php|GET |POST '
 }
 
 main() {

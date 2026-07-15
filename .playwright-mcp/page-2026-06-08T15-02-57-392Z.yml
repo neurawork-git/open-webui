@@ -1,0 +1,383 @@
+- generic [ref=e6]:
+  - generic [ref=e1]:
+    - generic [ref=e8]:
+      - generic [ref=e10]:
+        - generic [ref=e11]:
+          - link [ref=e12] [cursor=pointer]:
+            - /url: /
+          - link "Open WebUI" [ref=e13] [cursor=pointer]:
+            - /url: /
+            - generic [ref=e14]: Open WebUI
+          - button "Seitenleiste schließen" [ref=e16] [cursor=pointer]:
+            - img [ref=e18]
+        - generic [ref=e20]:
+          - generic [ref=e21]:
+            - link "Neuer Chat" [ref=e23] [cursor=pointer]:
+              - /url: /
+              - img [ref=e25]
+              - generic [ref=e28]: Neuer Chat
+            - button "Suchen" [ref=e30] [cursor=pointer]:
+              - img [ref=e32]
+              - generic [ref=e35]: Suchen
+            - generic [ref=e36]:
+              - link "Notizen" [ref=e38] [cursor=pointer]:
+                - /url: /notes
+                - img [ref=e40]
+                - generic [ref=e43]: Notizen
+              - link "Arbeitsbereich" [ref=e45] [cursor=pointer]:
+                - /url: /workspace
+                - img [ref=e47]
+                - generic [ref=e50]: Arbeitsbereich
+          - generic [ref=e52]:
+            - button "Kanäle" [ref=e57] [cursor=pointer]:
+              - generic [ref=e58]: Kanäle
+            - link "test" [ref=e62] [cursor=pointer]:
+              - /url: /channels/7b6d3368-186f-4daf-bca8-004bcd009f91
+              - generic [ref=e63]:
+                - img [ref=e66]
+                - generic [ref=e69]: test
+          - button "Ordner" [ref=e76] [cursor=pointer]:
+            - generic [ref=e77]: Ordner
+          - generic [ref=e79]:
+            - button "Chats" [ref=e84] [cursor=pointer]:
+              - generic [ref=e85]: Chats
+            - generic [ref=e89]:
+              - generic [ref=e90]: Heute
+              - link "🚀 Successful Deployment Confirmation 16 min" [ref=e92] [cursor=pointer]:
+                - /url: /c/772cae8a-75f3-4481-8bca-5385cf350c9a
+                - generic [ref=e96]: 🚀 Successful Deployment Confirmation
+                - generic [ref=e97]: 16 min
+              - generic [ref=e98]: Letzte 30 Tage
+              - link "🤖 Modelle in Open WebUI 3 W" [ref=e100] [cursor=pointer]:
+                - /url: /c/e90a07ad-b260-4bc0-8f9c-f38509101138
+                - generic [ref=e104]: 🤖 Modelle in Open WebUI
+                - generic [ref=e105]: 3 W
+              - link "🐼 Pandas Datentypen und Spalten 3 W" [ref=e107] [cursor=pointer]:
+                - /url: /c/80284fa5-8fe1-4895-b666-fc1493f9fb6b
+                - generic [ref=e109]: 🐼 Pandas Datentypen und Spalten
+                - generic [ref=e110]: 3 W
+              - link "📊 Excel DataFrame Plot 3 W" [ref=e112] [cursor=pointer]:
+                - /url: /c/7985162e-2645-4f99-8d16-1a6ebc0a93da
+                - generic [ref=e116]: 📊 Excel DataFrame Plot
+                - generic [ref=e117]: 3 W
+              - link "👋 Friendly Greeting 3 W" [ref=e119] [cursor=pointer]:
+                - /url: /c/8fa02d2d-0eba-475f-a189-72b7480a3db8
+                - generic [ref=e123]: 👋 Friendly Greeting
+                - generic [ref=e124]: 3 W
+              - link "New Chat 3 W" [ref=e126] [cursor=pointer]:
+                - /url: /c/1ae76744-5d4d-4e6f-9ad9-61859055e401
+                - generic [ref=e130]: New Chat
+                - generic [ref=e131]: 3 W
+              - link "New Chat 3 W" [ref=e133] [cursor=pointer]:
+                - /url: /c/af280fd2-cbd2-4dd0-8f27-4ea76059daae
+                - generic [ref=e137]: New Chat
+                - generic [ref=e138]: 3 W
+              - link "New Chat 3 W" [ref=e140] [cursor=pointer]:
+                - /url: /c/bb38f3a0-8ca5-48d9-9da2-30cff6e23e52
+                - generic [ref=e144]: New Chat
+                - generic [ref=e145]: 3 W
+              - link "New Chat 3 W" [ref=e147] [cursor=pointer]:
+                - /url: /c/ba6383ae-e25f-4358-9023-19a23b1e7e09
+                - generic [ref=e151]: New Chat
+                - generic [ref=e152]: 3 W
+              - generic [ref=e153]: Mai
+              - link "New Chat 4 W" [ref=e155] [cursor=pointer]:
+                - /url: /c/ff703c29-1de9-43cf-8cf1-5234bbc61687
+                - generic [ref=e159]: New Chat
+                - generic [ref=e160]: 4 W
+              - link "📄 Pflegebedarf klären 4 W" [ref=e162] [cursor=pointer]:
+                - /url: /c/0733bac2-9e3f-4b37-a469-be8c15c1e242
+                - generic [ref=e166]: 📄 Pflegebedarf klären
+                - generic [ref=e167]: 4 W
+              - link "📝 Rich Text Erklärung 4 W" [ref=e169] [cursor=pointer]:
+                - /url: /c/41a81c49-1e1d-4bd3-80d7-d85cbb1bdab6
+                - generic [ref=e173]: 📝 Rich Text Erklärung
+                - generic [ref=e174]: 4 W
+              - generic [ref=e175]: April
+              - link "🧭 Open WebUI Funktionen 6 W" [ref=e177] [cursor=pointer]:
+                - /url: /c/338cc1c1-38c2-4708-badd-7b97886d0def
+                - generic [ref=e179]: 🧭 Open WebUI Funktionen
+                - generic [ref=e180]: 6 W
+              - link "📊 Mermaid BPMN Prozess 7 W" [ref=e182] [cursor=pointer]:
+                - /url: /c/4bd804c2-eba4-409b-b2be-3dae34c06535
+                - generic [ref=e184]: 📊 Mermaid BPMN Prozess
+                - generic [ref=e185]: 7 W
+              - link "🤖 Available Models 7 W" [ref=e187] [cursor=pointer]:
+                - /url: /c/1505f08a-6d3a-4d02-b118-226e789f3a05
+                - generic [ref=e189]: 🤖 Available Models
+                - generic [ref=e190]: 7 W
+              - link "🐚 Hello World Bash 7 W" [ref=e192] [cursor=pointer]:
+                - /url: /c/786f699e-ae09-4fad-8d00-81987cd63c86
+                - generic [ref=e194]: 🐚 Hello World Bash
+                - generic [ref=e195]: 7 W
+              - link "🧭 Open WebUI Overview 8 W" [ref=e197] [cursor=pointer]:
+                - /url: /c/e23bc6b2-43f0-4141-8a58-61659955a00b
+                - generic [ref=e199]: 🧭 Open WebUI Overview
+                - generic [ref=e200]: 8 W
+              - link "🧭 Assistenten finden 8 W" [ref=e202] [cursor=pointer]:
+                - /url: /c/e2677531-86ed-4d21-bb12-633ea696d0d9
+                - generic [ref=e204]: 🧭 Assistenten finden
+                - generic [ref=e205]: 8 W
+              - link "👋 Workspace Welcome 8 W" [ref=e207] [cursor=pointer]:
+                - /url: /c/97956da5-1961-4c85-8c1e-9fd064a8d9db
+                - generic [ref=e209]: 👋 Workspace Welcome
+                - generic [ref=e210]: 8 W
+              - link "Alles cool Chat 😄 8 W" [ref=e212] [cursor=pointer]:
+                - /url: /c/e6d78770-0e16-43a9-ace0-718881e5559c
+                - generic [ref=e214]: Alles cool Chat 😄
+                - generic [ref=e215]: 8 W
+              - link "🛠️ Available Tools Overview 8 W" [ref=e217] [cursor=pointer]:
+                - /url: /c/a0a9d60c-74c4-4892-9672-f5c44dbe5096
+                - generic [ref=e219]: 🛠️ Available Tools Overview
+                - generic [ref=e220]: 8 W
+              - link "🤖 Available Models 8 W" [ref=e222] [cursor=pointer]:
+                - /url: /c/2a4c3fd9-49e7-45ec-8471-1c920830f81e
+                - generic [ref=e224]: 🤖 Available Models
+                - generic [ref=e225]: 8 W
+              - link "🏴‍☠️ Pirate Yoda Prompt 8 W" [ref=e227] [cursor=pointer]:
+                - /url: /c/f9a8b44a-f8f1-4b17-9687-d99a501f74cf
+                - generic [ref=e229]: 🏴‍☠️ Pirate Yoda Prompt
+                - generic [ref=e230]: 8 W
+              - link "🏴‍☠️ Pirate Greeting Adventure 8 W" [ref=e232] [cursor=pointer]:
+                - /url: /c/1c299814-2c02-4c5d-b0ea-999d23c18f5f
+                - generic [ref=e234]: 🏴‍☠️ Pirate Greeting Adventure
+                - generic [ref=e235]: 8 W
+              - link "🏴‍☠️ Pirate Test Model 8 W" [ref=e237] [cursor=pointer]:
+                - /url: /c/f5b8cd70-fecb-40a0-8888-c20859272a19
+                - generic [ref=e239]: 🏴‍☠️ Pirate Test Model
+                - generic [ref=e240]: 8 W
+              - link "🛠️ Verfügbare KI-Tools 8 W" [ref=e242] [cursor=pointer]:
+                - /url: /c/5d09eb94-a34d-4976-bc24-0a67b9d8c573
+                - generic [ref=e244]: 🛠️ Verfügbare KI-Tools
+                - generic [ref=e245]: 8 W
+              - link "🤖 Meta-Modell fürs Modellbauen 8 W" [ref=e247] [cursor=pointer]:
+                - /url: /c/9463f61e-8ad9-4031-8dd3-27234cc1c47e
+                - generic [ref=e249]: 🤖 Meta-Modell fürs Modellbauen
+                - generic [ref=e250]: 8 W
+              - link "👨‍💼 Torsten Woitag's Career 8 W" [ref=e252] [cursor=pointer]:
+                - /url: /c/7f8e93f8-6959-45cd-a364-a6d01de00c90
+                - generic [ref=e254]: 👨‍💼 Torsten Woitag's Career
+                - generic [ref=e255]: 8 W
+              - generic [ref=e256]: März
+              - link "📘 OpenWebUI Kursverlauf 10 W" [ref=e258] [cursor=pointer]:
+                - /url: /c/cc6648e4-f7a0-413a-8cb3-0d284cc075c1
+                - generic [ref=e260]: 📘 OpenWebUI Kursverlauf
+                - generic [ref=e261]: 10 W
+              - link "🧭 Sticky Header Code 10 W" [ref=e263] [cursor=pointer]:
+                - /url: /c/1ead9720-6272-4412-bad3-71678473f005
+                - generic [ref=e265]: 🧭 Sticky Header Code
+                - generic [ref=e266]: 10 W
+              - link "🇩🇪🇫🇷 Wohnungsmarkt-Vergleich 10 W" [ref=e268] [cursor=pointer]:
+                - /url: /c/eddb7c58-4f0d-467b-8c6a-5b0fb0c6b0a8
+                - generic [ref=e270]: 🇩🇪🇫🇷 Wohnungsmarkt-Vergleich
+                - generic [ref=e271]: 10 W
+              - link "🏛️ Fun Roman Empire Fact 10 W" [ref=e273] [cursor=pointer]:
+                - /url: /c/d96c35b6-7174-4246-9057-8366ba511123
+                - generic [ref=e275]: 🏛️ Fun Roman Empire Fact
+                - generic [ref=e276]: 10 W
+              - link "🖥️ Open Terminal Directories 10 W" [ref=e278] [cursor=pointer]:
+                - /url: /c/da6e7e58-b5ab-43ef-8672-71e9992691c6
+                - generic [ref=e280]: 🖥️ Open Terminal Directories
+                - generic [ref=e281]: 10 W
+              - link "Neuer Chat 10 W" [ref=e283] [cursor=pointer]:
+                - /url: /c/e0e93f09-4129-41ac-8a91-16b96ba9f031
+                - generic [ref=e285]: Neuer Chat
+                - generic [ref=e286]: 10 W
+              - link "Initial Greetings 10 W" [ref=e288] [cursor=pointer]:
+                - /url: /c/761badb0-aacc-406d-9d0b-47eec7bf4727
+                - generic [ref=e290]: Initial Greetings
+                - generic [ref=e291]: 10 W
+              - generic [ref=e293]:
+                - img [ref=e295]
+                - generic [ref=e298]: Lade...
+        - button "Benutzermenü" [ref=e301] [cursor=pointer]:
+          - button "Benutzermenü" [ref=e302]:
+            - img "Benutzerprofilmenü öffnen" [ref=e304]
+            - generic [ref=e308]: Maximilian König
+      - separator [ref=e309]
+      - generic [ref=e311]:
+        - navigation [ref=e312]:
+          - generic [ref=e315]:
+            - link "Modelle" [ref=e316] [cursor=pointer]:
+              - /url: /workspace/models
+            - link "Wissen" [ref=e317] [cursor=pointer]:
+              - /url: /workspace/knowledge
+            - link "Prompts" [ref=e318] [cursor=pointer]:
+              - /url: /workspace/prompts
+            - link "Skills" [ref=e319] [cursor=pointer]:
+              - /url: /workspace/skills
+            - link "Werkzeuge" [ref=e320] [cursor=pointer]:
+              - /url: /workspace/tools
+        - generic [ref=e416]:
+          - generic [ref=e419]:
+            - generic [ref=e420]:
+              - generic [ref=e421]:
+                - textbox "Wissensname" [ref=e422]: Open WebUI Einführung
+                - generic [ref=e424]: 7 Dateien
+              - generic [ref=e425]:
+                - button "RAG" [ref=e426] [cursor=pointer]:
+                  - img [ref=e427]
+                  - generic [ref=e429]: RAG
+                - button "Zugriff" [ref=e430] [cursor=pointer]:
+                  - img [ref=e431]
+                  - generic [ref=e433]: Zugriff
+                - button "Neu indizieren" [ref=e434] [cursor=pointer]:
+                  - img [ref=e435]
+                  - generic [ref=e437]: Neu indizieren
+            - generic [ref=e438]:
+              - textbox "Wissensbeschreibung" [ref=e439]: Einführung in Open WebUI — Modelle, Wissensbasen, Prompts, Tools, Workflows, Feedback.
+              - button "0c956561-e590-4003-b08b-3521b6cd4fc3" [ref=e442] [cursor=pointer]
+          - generic [ref=e443]:
+            - generic [ref=e445]:
+              - img [ref=e447]
+              - textbox "Sammlung durchsuchen" [ref=e449]
+              - button [ref=e450] [cursor=pointer]:
+                - button [ref=e451]:
+                  - img [ref=e452]
+              - button [ref=e455] [cursor=pointer]:
+                - button [ref=e457]:
+                  - img [ref=e458]
+            - generic [ref=e462]:
+              - button "Select an option" [ref=e463] [cursor=pointer]:
+                - text: Alle
+                - img [ref=e464]
+              - button "Sortieren" [ref=e466] [cursor=pointer]:
+                - text: Sortieren
+                - img [ref=e467]
+            - generic [ref=e474]:
+              - generic [ref=e475] [cursor=pointer]:
+                - button [ref=e477]:
+                  - img [ref=e478]
+                - button "07-feedback-and-help.md 1.9 KB vor 2 Monaten Von Maximilian König" [ref=e481]:
+                  - generic [ref=e484]: 07-feedback-and-help.md 1.9 KB
+                  - generic [ref=e485]:
+                    - generic [ref=e487]: vor 2 Monaten
+                    - generic [ref=e489]: Von Maximilian König
+                - button [ref=e491]:
+                  - button [ref=e492]:
+                    - img [ref=e493]
+              - generic [ref=e495] [cursor=pointer]:
+                - button [ref=e497]:
+                  - img [ref=e498]
+                - button "06-workflows.md 2.5 KB vor 2 Monaten Von Maximilian König" [ref=e501]:
+                  - generic [ref=e504]: 06-workflows.md 2.5 KB
+                  - generic [ref=e505]:
+                    - generic [ref=e507]: vor 2 Monaten
+                    - generic [ref=e509]: Von Maximilian König
+                - button [ref=e511]:
+                  - button [ref=e512]:
+                    - img [ref=e513]
+              - generic [ref=e515] [cursor=pointer]:
+                - button [ref=e517]:
+                  - img [ref=e518]
+                - button "05-tools-skills-files.md 2.6 KB vor 2 Monaten Von Maximilian König" [ref=e521]:
+                  - generic [ref=e524]: 05-tools-skills-files.md 2.6 KB
+                  - generic [ref=e525]:
+                    - generic [ref=e527]: vor 2 Monaten
+                    - generic [ref=e529]: Von Maximilian König
+                - button [ref=e531]:
+                  - button [ref=e532]:
+                    - img [ref=e533]
+              - generic [ref=e535] [cursor=pointer]:
+                - button [ref=e537]:
+                  - img [ref=e538]
+                - button "04-prompts.md 1.8 KB vor 2 Monaten Von Maximilian König" [ref=e541]:
+                  - generic [ref=e544]: 04-prompts.md 1.8 KB
+                  - generic [ref=e545]:
+                    - generic [ref=e547]: vor 2 Monaten
+                    - generic [ref=e549]: Von Maximilian König
+                - button [ref=e551]:
+                  - button [ref=e552]:
+                    - img [ref=e553]
+              - generic [ref=e555] [cursor=pointer]:
+                - button [ref=e557]:
+                  - img [ref=e558]
+                - button "03-knowledge-bases.md 1.8 KB vor 2 Monaten Von Maximilian König" [ref=e561]:
+                  - generic [ref=e564]: 03-knowledge-bases.md 1.8 KB
+                  - generic [ref=e565]:
+                    - generic [ref=e567]: vor 2 Monaten
+                    - generic [ref=e569]: Von Maximilian König
+                - button [ref=e571]:
+                  - button [ref=e572]:
+                    - img [ref=e573]
+              - generic [ref=e575] [cursor=pointer]:
+                - button [ref=e577]:
+                  - img [ref=e578]
+                - button "02-models.md 2.8 KB vor 2 Monaten Von Maximilian König" [ref=e581]:
+                  - generic [ref=e584]: 02-models.md 2.8 KB
+                  - generic [ref=e585]:
+                    - generic [ref=e587]: vor 2 Monaten
+                    - generic [ref=e589]: Von Maximilian König
+                - button [ref=e591]:
+                  - button [ref=e592]:
+                    - img [ref=e593]
+              - generic [ref=e595] [cursor=pointer]:
+                - button [ref=e597]:
+                  - img [ref=e598]
+                - button "01-what-is-openwebui.md 1.2 KB vor 2 Monaten Von Maximilian König" [ref=e601]:
+                  - generic [ref=e604]: 01-what-is-openwebui.md 1.2 KB
+                  - generic [ref=e605]:
+                    - generic [ref=e607]: vor 2 Monaten
+                    - generic [ref=e609]: Von Maximilian König
+                - button [ref=e611]:
+                  - button [ref=e612]:
+                    - img [ref=e613]
+    - generic [ref=e2]: Wissen • Open WebUI
+  - dialog [ref=e615]:
+    - generic [ref=e617]:
+      - generic [ref=e618]:
+        - generic [ref=e619]: RAG Settings Override
+        - button [active] [ref=e620] [cursor=pointer]:
+          - img [ref=e621]
+      - generic [ref=e623]:
+        - generic [ref=e624]: Override global RAG settings for this item. Leave empty to use global defaults.
+        - generic [ref=e625]:
+          - generic [ref=e626]:
+            - generic [ref=e627]:
+              - generic [ref=e628]: Top-K
+              - generic [ref=e629]: Number of chunks to retrieve
+            - spinbutton [ref=e630]
+          - generic [ref=e631]:
+            - generic [ref=e632]:
+              - generic [ref=e633]: Top K (Reranker)
+              - generic [ref=e634]: Results after reranking
+            - spinbutton [ref=e635]
+          - generic [ref=e636]:
+            - generic [ref=e637]:
+              - generic [ref=e638]: Relevanzschwelle
+              - generic [ref=e639]: Minimum score filter (0.0-1.0)
+            - spinbutton [ref=e640]
+          - generic [ref=e641]:
+            - generic [ref=e642]:
+              - generic [ref=e643]: BM25-Gewichtung
+              - generic [ref=e644]: Hybrid search BM25 weight (0.0-1.0)
+            - spinbutton [ref=e645]
+          - generic [ref=e646]:
+            - generic [ref=e647]:
+              - generic [ref=e648]: Hybride Suche
+              - generic [ref=e649]: Enable BM25+Vector hybrid search
+            - combobox [ref=e651]:
+              - option "Global" [selected]
+              - option "Aktiviert"
+              - option "Deaktiviert"
+          - generic [ref=e652]:
+            - generic [ref=e653]:
+              - generic [ref=e654]: Reranking
+              - generic [ref=e655]: Apply reranking model to results
+            - combobox [ref=e657]:
+              - option "Global" [selected]
+              - option "Aktiviert"
+              - option "Deaktiviert"
+          - generic [ref=e658]:
+            - generic [ref=e659]:
+              - generic [ref=e660]: Full Context
+              - generic [ref=e661]: Bypass retrieval, use full documents
+            - combobox [ref=e663]:
+              - option "Global" [selected]
+              - option "Aktiviert"
+              - option "Deaktiviert"
+        - generic [ref=e664]:
+          - button "Reset to Global" [ref=e665] [cursor=pointer]
+          - generic [ref=e666]:
+            - button "Abbrechen" [ref=e667] [cursor=pointer]
+            - button "Speichern" [ref=e668] [cursor=pointer]

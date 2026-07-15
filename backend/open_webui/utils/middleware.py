@@ -2006,8 +2006,20 @@ async def chat_completion_files_handler(
                 }
             )
 
-        if len(queries) == 0:
+        # Drop blank queries (empty/whitespace LLM response or none generated).
+        queries = [q for q in queries if isinstance(q, str) and q.strip()]
+
+        force_full_context = all_full_context or request.app.state.config.RAG_FULL_CONTEXT
+        if not queries:
+            # No usable search query — the last user turn carries no text
+            # (file- or image-only message). Embedding an empty string
+            # retrieves nothing, so inject the attached items in full instead:
+            # the attachment itself is the intent.
+            # ponytail: full-context dump; a large multi-doc KB attached to an
+            # empty message will bloat the prompt — upgrade to a conversation-
+            # history query fallback if that ever bites.
             queries = [get_last_user_message(body['messages']) or '']
+            force_full_context = True
 
         try:
             # Directly await async get_sources_from_items (no thread needed - fully async now)
@@ -2028,7 +2040,7 @@ async def chat_completion_files_handler(
                 r=request.app.state.config.RELEVANCE_THRESHOLD,
                 hybrid_bm25_weight=request.app.state.config.HYBRID_BM25_WEIGHT,
                 hybrid_search=request.app.state.config.ENABLE_RAG_HYBRID_SEARCH,
-                full_context=all_full_context or request.app.state.config.RAG_FULL_CONTEXT,
+                full_context=force_full_context,
                 user=user,
             )
         except Exception as e:

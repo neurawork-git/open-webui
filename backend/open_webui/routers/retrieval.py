@@ -58,6 +58,12 @@ from open_webui.env import (
 from open_webui.internal.db import get_async_db, get_async_session
 from open_webui.models.files import FileModel, Files, FileUpdateForm
 from open_webui.models.knowledge import Knowledges
+from open_webui.models.processing import (
+    ProcessingTasks,
+    ProcessingTaskCreate,
+    ProcessingTaskTracker,
+    ProcessingStage,
+)
 
 # Document loaders
 from open_webui.retrieval.loaders.youtube import YoutubeLoader
@@ -1572,6 +1578,45 @@ class ProcessFileForm(BaseModel):
     collection_name: str | None = None
 
 
+async def _safe_track(awaitable):
+    """Await a ProcessingTaskTracker update without ever breaking the pipeline.
+
+    Dashboard bookkeeping is best-effort: a failed status write must never
+    surface as an upload error.
+    """
+    try:
+        await awaitable
+    except Exception as e:
+        log.debug(f'Processing dashboard tracker update skipped: {e}')
+
+
+async def _start_processing_tracker(file, user, collection_name=None):
+    """Create a processing_task row so the admin dashboard reflects real uploads.
+
+    Returns a ProcessingTaskTracker, or None if the task could not be created.
+    Best-effort: never raises into the calling pipeline.
+    """
+    try:
+        meta = file.meta or {}
+        task = await ProcessingTasks.create_task(
+            user.id,
+            ProcessingTaskCreate(
+                document_id=file.id,
+                document_name=file.filename,
+                knowledge_id=collection_name,
+                meta={
+                    'content_type': meta.get('content_type'),
+                    'size': meta.get('size'),
+                },
+            ),
+        )
+        if task:
+            return ProcessingTaskTracker(task.id)
+    except Exception as e:
+        log.warning(f'Processing dashboard tracker init failed: {e}')
+    return None
+
+
 @router.post('/process/file')
 async def process_file(
     request: Request,
@@ -1579,11 +1624,29 @@ async def process_file(
     user=Depends(get_verified_user),
     db: AsyncSession = Depends(get_async_session),
 ):
+    """Route entrypoint. A standalone call owns its own dashboard task."""
+    return await _process_file(request, form_data, user=user, db=db)
+
+
+async def _process_file(
+    request: Request,
+    form_data: ProcessFileForm,
+    user,
+    db: Optional[AsyncSession] = None,
+    tracker: Optional[ProcessingTaskTracker] = None,
+):
     """
-    Process a file and save its content to the vector database.
     Process a file and save its content to the vector database.
     Note: granular session management is used to prevent connection pool exhaustion.
     The session is committed before external API calls, and updates use a fresh session.
+
+    Dashboard tracking:
+    - When `tracker` is provided, the CALLER owns the task lifecycle
+      (create/complete/fail); this function only advances intermediate stages.
+      This keeps one upload = one task even though the upload pipeline calls
+      this function more than once (extract, then knowledge-link).
+    - When `tracker` is None, this function creates and finalizes its own task
+      so a single standalone call still appears on the dashboard.
     """
     if user.role == 'admin':
         file = await Files.get_file_by_id(form_data.file_id, db=db)
@@ -1591,6 +1654,7 @@ async def process_file(
         file = await Files.get_file_by_id_and_user_id(form_data.file_id, user.id, db=db)
 
     if file:
+        owns_tracker = tracker is None
         try:
             collection_name = form_data.collection_name
 
@@ -1598,6 +1662,12 @@ async def process_file(
                 collection_name = f'file-{file.id}'
             else:
                 await _validate_collection_access([collection_name], user, access_type='write')
+
+            # Feed the admin processing dashboard (best-effort).
+            if owns_tracker:
+                tracker = await _start_processing_tracker(file, user, form_data.collection_name)
+            if tracker:
+                await _safe_track(tracker.update_stage(ProcessingStage.EXTRACTING))
 
             if form_data.content:
                 # Update the content in the file
@@ -1704,6 +1774,8 @@ async def process_file(
             if request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL:
                 await Files.update_file_data_by_id(file.id, {'status': 'completed'}, db=db)
                 await Files.update_file_hash_by_id(file.id, hash, db=db)
+                if owns_tracker and tracker:
+                    await _safe_track(tracker.complete())
                 return {
                     'status': True,
                     'collection_name': None,
@@ -1722,6 +1794,8 @@ async def process_file(
                     # calls asyncio.run_coroutine_threadsafe(..., main_loop).result()
                     # which blocks the calling thread.  We MUST run it in a
                     # worker thread to avoid deadlocking the event loop.
+                    if tracker:
+                        await _safe_track(tracker.update_stage(ProcessingStage.EMBEDDING))
                     result = await run_in_threadpool(
                         save_docs_to_vector_db,
                         request,
@@ -1755,6 +1829,9 @@ async def process_file(
                             )
                             await Files.update_file_hash_by_id(file.id, hash, db=session)
 
+                            if owns_tracker and tracker:
+                                await _safe_track(tracker.complete())
+
                             return {
                                 'status': True,
                                 'collection_name': collection_name,
@@ -1768,6 +1845,8 @@ async def process_file(
 
         except Exception as e:
             log.exception(e)
+            if owns_tracker and tracker:
+                await _safe_track(tracker.fail(str(e)))
             # Fresh session for error status update.
             async with get_async_db() as session:
                 await Files.update_file_data_by_id(

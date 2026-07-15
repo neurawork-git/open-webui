@@ -1,0 +1,303 @@
+- generic [ref=e45]:
+  - generic [ref=e47]:
+    - generic [ref=e49]:
+      - generic [ref=e50]:
+        - link [ref=e51] [cursor=pointer]:
+          - /url: /
+        - link "Open WebUI" [ref=e52] [cursor=pointer]:
+          - /url: /
+          - generic [ref=e53]: Open WebUI
+        - button "Seitenleiste schließen" [ref=e55] [cursor=pointer]:
+          - img [ref=e57]
+      - generic [ref=e59]:
+        - generic [ref=e60]:
+          - link "Neuer Chat" [ref=e62] [cursor=pointer]:
+            - /url: /
+            - img [ref=e64]
+            - generic [ref=e67]: Neuer Chat
+          - button "Suchen" [ref=e69] [cursor=pointer]:
+            - img [ref=e71]
+            - generic [ref=e74]: Suchen
+          - generic [ref=e75]:
+            - link "Notizen" [ref=e77] [cursor=pointer]:
+              - /url: /notes
+              - img [ref=e79]
+              - generic [ref=e82]: Notizen
+            - link "Arbeitsbereich" [ref=e84] [cursor=pointer]:
+              - /url: /workspace
+              - img [ref=e86]
+              - generic [ref=e89]: Arbeitsbereich
+        - generic [ref=e91]:
+          - button "Kanäle" [ref=e96] [cursor=pointer]:
+            - generic [ref=e97]: Kanäle
+          - link "test" [ref=e101] [cursor=pointer]:
+            - /url: /channels/7b6d3368-186f-4daf-bca8-004bcd009f91
+            - generic [ref=e102]:
+              - img [ref=e105]
+              - generic [ref=e108]: test
+        - button "Ordner" [ref=e115] [cursor=pointer]:
+          - generic [ref=e116]: Ordner
+        - generic [ref=e118]:
+          - button "Chats" [ref=e123] [cursor=pointer]:
+            - generic [ref=e124]: Chats
+          - generic [ref=e128]:
+            - generic [ref=e129]: Heute
+            - link "🌐 Open WebUI Overview 2 h" [ref=e131] [cursor=pointer]:
+              - /url: /c/543a8e97-8e48-4569-8c54-8410702abeda
+              - generic [ref=e135]: 🌐 Open WebUI Overview
+              - generic [ref=e136]: 2 h
+            - link "🚀 Successful Deployment Confirmation 2 h" [ref=e138] [cursor=pointer]:
+              - /url: /c/772cae8a-75f3-4481-8bca-5385cf350c9a
+              - generic [ref=e142]: 🚀 Successful Deployment Confirmation
+              - generic [ref=e143]: 2 h
+            - generic [ref=e144]: Letzte 30 Tage
+            - link "🤖 Modelle in Open WebUI 3 W" [ref=e146] [cursor=pointer]:
+              - /url: /c/e90a07ad-b260-4bc0-8f9c-f38509101138
+              - generic [ref=e150]: 🤖 Modelle in Open WebUI
+              - generic [ref=e151]: 3 W
+            - link "🐼 Pandas Datentypen und Spalten 3 W" [ref=e153] [cursor=pointer]:
+              - /url: /c/80284fa5-8fe1-4895-b666-fc1493f9fb6b
+              - generic [ref=e155]: 🐼 Pandas Datentypen und Spalten
+              - generic [ref=e156]: 3 W
+            - link "📊 Excel DataFrame Plot 3 W" [ref=e158] [cursor=pointer]:
+              - /url: /c/7985162e-2645-4f99-8d16-1a6ebc0a93da
+              - generic [ref=e162]: 📊 Excel DataFrame Plot
+              - generic [ref=e163]: 3 W
+            - link "👋 Friendly Greeting 3 W" [ref=e165] [cursor=pointer]:
+              - /url: /c/8fa02d2d-0eba-475f-a189-72b7480a3db8
+              - generic [ref=e169]: 👋 Friendly Greeting
+              - generic [ref=e170]: 3 W
+            - link "New Chat 3 W" [ref=e172] [cursor=pointer]:
+              - /url: /c/1ae76744-5d4d-4e6f-9ad9-61859055e401
+              - generic [ref=e176]: New Chat
+              - generic [ref=e177]: 3 W
+            - link "New Chat 3 W" [ref=e179] [cursor=pointer]:
+              - /url: /c/af280fd2-cbd2-4dd0-8f27-4ea76059daae
+              - generic [ref=e183]: New Chat
+              - generic [ref=e184]: 3 W
+            - link "New Chat 3 W" [ref=e186] [cursor=pointer]:
+              - /url: /c/bb38f3a0-8ca5-48d9-9da2-30cff6e23e52
+              - generic [ref=e190]: New Chat
+              - generic [ref=e191]: 3 W
+            - link "New Chat 3 W" [ref=e193] [cursor=pointer]:
+              - /url: /c/ba6383ae-e25f-4358-9023-19a23b1e7e09
+              - generic [ref=e197]: New Chat
+              - generic [ref=e198]: 3 W
+            - generic [ref=e199]: Mai
+            - link "New Chat 4 W" [ref=e201] [cursor=pointer]:
+              - /url: /c/ff703c29-1de9-43cf-8cf1-5234bbc61687
+              - generic [ref=e205]: New Chat
+              - generic [ref=e206]: 4 W
+            - link "📄 Pflegebedarf klären 4 W" [ref=e208] [cursor=pointer]:
+              - /url: /c/0733bac2-9e3f-4b37-a469-be8c15c1e242
+              - generic [ref=e212]: 📄 Pflegebedarf klären
+              - generic [ref=e213]: 4 W
+            - link "📝 Rich Text Erklärung 4 W" [ref=e215] [cursor=pointer]:
+              - /url: /c/41a81c49-1e1d-4bd3-80d7-d85cbb1bdab6
+              - generic [ref=e219]: 📝 Rich Text Erklärung
+              - generic [ref=e220]: 4 W
+            - generic [ref=e221]: April
+            - link "🧭 Open WebUI Funktionen 6 W" [ref=e223] [cursor=pointer]:
+              - /url: /c/338cc1c1-38c2-4708-badd-7b97886d0def
+              - generic [ref=e225]: 🧭 Open WebUI Funktionen
+              - generic [ref=e226]: 6 W
+            - link "📊 Mermaid BPMN Prozess 7 W" [ref=e228] [cursor=pointer]:
+              - /url: /c/4bd804c2-eba4-409b-b2be-3dae34c06535
+              - generic [ref=e230]: 📊 Mermaid BPMN Prozess
+              - generic [ref=e231]: 7 W
+            - link "🤖 Available Models 7 W" [ref=e233] [cursor=pointer]:
+              - /url: /c/1505f08a-6d3a-4d02-b118-226e789f3a05
+              - generic [ref=e235]: 🤖 Available Models
+              - generic [ref=e236]: 7 W
+            - link "🐚 Hello World Bash 7 W" [ref=e238] [cursor=pointer]:
+              - /url: /c/786f699e-ae09-4fad-8d00-81987cd63c86
+              - generic [ref=e240]: 🐚 Hello World Bash
+              - generic [ref=e241]: 7 W
+            - link "🧭 Open WebUI Overview 8 W" [ref=e243] [cursor=pointer]:
+              - /url: /c/e23bc6b2-43f0-4141-8a58-61659955a00b
+              - generic [ref=e245]: 🧭 Open WebUI Overview
+              - generic [ref=e246]: 8 W
+            - link "🧭 Assistenten finden 8 W" [ref=e248] [cursor=pointer]:
+              - /url: /c/e2677531-86ed-4d21-bb12-633ea696d0d9
+              - generic [ref=e250]: 🧭 Assistenten finden
+              - generic [ref=e251]: 8 W
+            - link "👋 Workspace Welcome 8 W" [ref=e253] [cursor=pointer]:
+              - /url: /c/97956da5-1961-4c85-8c1e-9fd064a8d9db
+              - generic [ref=e255]: 👋 Workspace Welcome
+              - generic [ref=e256]: 8 W
+            - link "Alles cool Chat 😄 8 W" [ref=e258] [cursor=pointer]:
+              - /url: /c/e6d78770-0e16-43a9-ace0-718881e5559c
+              - generic [ref=e260]: Alles cool Chat 😄
+              - generic [ref=e261]: 8 W
+            - link "🛠️ Available Tools Overview 8 W" [ref=e263] [cursor=pointer]:
+              - /url: /c/a0a9d60c-74c4-4892-9672-f5c44dbe5096
+              - generic [ref=e265]: 🛠️ Available Tools Overview
+              - generic [ref=e266]: 8 W
+            - link "🤖 Available Models 8 W" [ref=e268] [cursor=pointer]:
+              - /url: /c/2a4c3fd9-49e7-45ec-8471-1c920830f81e
+              - generic [ref=e270]: 🤖 Available Models
+              - generic [ref=e271]: 8 W
+            - link "🏴‍☠️ Pirate Yoda Prompt 8 W" [ref=e273] [cursor=pointer]:
+              - /url: /c/f9a8b44a-f8f1-4b17-9687-d99a501f74cf
+              - generic [ref=e275]: 🏴‍☠️ Pirate Yoda Prompt
+              - generic [ref=e276]: 8 W
+            - link "🏴‍☠️ Pirate Greeting Adventure 8 W" [ref=e278] [cursor=pointer]:
+              - /url: /c/1c299814-2c02-4c5d-b0ea-999d23c18f5f
+              - generic [ref=e280]: 🏴‍☠️ Pirate Greeting Adventure
+              - generic [ref=e281]: 8 W
+            - link "🏴‍☠️ Pirate Test Model 8 W" [ref=e283] [cursor=pointer]:
+              - /url: /c/f5b8cd70-fecb-40a0-8888-c20859272a19
+              - generic [ref=e285]: 🏴‍☠️ Pirate Test Model
+              - generic [ref=e286]: 8 W
+            - link "🛠️ Verfügbare KI-Tools 8 W" [ref=e288] [cursor=pointer]:
+              - /url: /c/5d09eb94-a34d-4976-bc24-0a67b9d8c573
+              - generic [ref=e290]: 🛠️ Verfügbare KI-Tools
+              - generic [ref=e291]: 8 W
+            - link "🤖 Meta-Modell fürs Modellbauen 8 W" [ref=e293] [cursor=pointer]:
+              - /url: /c/9463f61e-8ad9-4031-8dd3-27234cc1c47e
+              - generic [ref=e295]: 🤖 Meta-Modell fürs Modellbauen
+              - generic [ref=e296]: 8 W
+            - link "👨‍💼 Torsten Woitag's Career 8 W" [ref=e298] [cursor=pointer]:
+              - /url: /c/7f8e93f8-6959-45cd-a364-a6d01de00c90
+              - generic [ref=e300]: 👨‍💼 Torsten Woitag's Career
+              - generic [ref=e301]: 8 W
+            - generic [ref=e302]: März
+            - link "📘 OpenWebUI Kursverlauf 10 W" [ref=e304] [cursor=pointer]:
+              - /url: /c/cc6648e4-f7a0-413a-8cb3-0d284cc075c1
+              - generic [ref=e306]: 📘 OpenWebUI Kursverlauf
+              - generic [ref=e307]: 10 W
+            - link "🧭 Sticky Header Code 10 W" [ref=e309] [cursor=pointer]:
+              - /url: /c/1ead9720-6272-4412-bad3-71678473f005
+              - generic [ref=e311]: 🧭 Sticky Header Code
+              - generic [ref=e312]: 10 W
+            - link "🇩🇪🇫🇷 Wohnungsmarkt-Vergleich 10 W" [ref=e314] [cursor=pointer]:
+              - /url: /c/eddb7c58-4f0d-467b-8c6a-5b0fb0c6b0a8
+              - generic [ref=e316]: 🇩🇪🇫🇷 Wohnungsmarkt-Vergleich
+              - generic [ref=e317]: 10 W
+            - link "🏛️ Fun Roman Empire Fact 10 W" [ref=e319] [cursor=pointer]:
+              - /url: /c/d96c35b6-7174-4246-9057-8366ba511123
+              - generic [ref=e321]: 🏛️ Fun Roman Empire Fact
+              - generic [ref=e322]: 10 W
+            - link "🖥️ Open Terminal Directories 10 W" [ref=e324] [cursor=pointer]:
+              - /url: /c/da6e7e58-b5ab-43ef-8672-71e9992691c6
+              - generic [ref=e326]: 🖥️ Open Terminal Directories
+              - generic [ref=e327]: 10 W
+            - link "Neuer Chat 10 W" [ref=e329] [cursor=pointer]:
+              - /url: /c/e0e93f09-4129-41ac-8a91-16b96ba9f031
+              - generic [ref=e331]: Neuer Chat
+              - generic [ref=e332]: 10 W
+            - link "Initial Greetings 10 W" [ref=e334] [cursor=pointer]:
+              - /url: /c/761badb0-aacc-406d-9d0b-47eec7bf4727
+              - generic [ref=e336]: Initial Greetings
+              - generic [ref=e337]: 10 W
+            - generic [ref=e339]:
+              - img [ref=e341]
+              - generic [ref=e344]: Lade...
+      - button "Benutzermenü" [ref=e347] [cursor=pointer]:
+        - button "Benutzermenü" [ref=e348]:
+          - img "Benutzerprofilmenü öffnen" [ref=e350]
+          - generic [ref=e354]: Maximilian König
+    - separator [ref=e355]
+    - generic [ref=e360]:
+      - navigation [ref=e361]:
+        - generic [ref=e364]:
+          - generic [ref=e365]:
+            - generic [ref=e367]:
+              - 'button "Ausgewähltes Modell: gpt-3.5-turbo" [ref=e371] [cursor=pointer]':
+                - generic [ref=e372]:
+                  - text: gpt-3.5-turbo
+                  - img [ref=e373]
+              - button "Add Model" [ref=e377] [cursor=pointer]:
+                - img [ref=e378]
+            - button "Als Standard festlegen" [ref=e381] [cursor=pointer]
+          - generic [ref=e382]:
+            - button [ref=e384] [cursor=pointer]:
+              - img [ref=e386]
+            - button "Controls" [ref=e389] [cursor=pointer]:
+              - img [ref=e391]
+            - button "Benutzermenü" [ref=e393] [cursor=pointer]:
+              - button "Benutzermenü" [ref=e394]
+      - generic [ref=e398]:
+        - generic [ref=e400]:
+          - generic [ref=e401]:
+            - button [ref=e405] [cursor=pointer]:
+              - img [ref=e406]
+            - generic [ref=e409]: gpt-3.5-turbo
+          - generic [ref=e7]:
+            - paragraph [ref=e12]: Wie kann ich Ihnen heute helfen?
+            - generic [ref=e13]:
+              - generic [ref=e14]:
+                - button "Mehr" [expanded] [ref=e15] [cursor=pointer]:
+                  - button "Mehr" [active] [ref=e17]:
+                    - img [ref=e18]
+                - button "Integrationen" [ref=e21] [cursor=pointer]:
+                  - button "Integrationen" [ref=e23]:
+                    - img [ref=e24]
+              - generic [ref=e29]:
+                - button [ref=e31] [cursor=pointer]:
+                  - button [ref=e33]:
+                    - img [ref=e34]
+                - button "Voice Input" [ref=e37] [cursor=pointer]:
+                  - img [ref=e38]
+                - button "Sprachmodus" [ref=e43] [cursor=pointer]:
+                  - img [ref=e44]
+        - generic [ref=e416]:
+          - generic [ref=e417]:
+            - img [ref=e418]
+            - text: Vorgeschlagen
+          - list [ref=e421]:
+            - listitem [ref=e422] [cursor=pointer]:
+              - generic [ref=e423]:
+                - generic [ref=e424]: Overcome procrastination
+                - generic [ref=e425]: give me tips
+            - listitem [ref=e426] [cursor=pointer]:
+              - generic [ref=e427]:
+                - generic [ref=e428]: Help me study
+                - generic [ref=e429]: vocabulary for a college entrance exam
+            - listitem [ref=e430] [cursor=pointer]:
+              - generic [ref=e431]:
+                - generic [ref=e432]: Show me a code snippet
+                - generic [ref=e433]: of a website's sticky header
+            - listitem [ref=e434] [cursor=pointer]:
+              - generic [ref=e435]:
+                - generic [ref=e436]: Tell me a fun fact
+                - generic [ref=e437]: about the Roman Empire
+            - listitem [ref=e438] [cursor=pointer]:
+              - generic [ref=e439]:
+                - generic [ref=e440]: Explain options trading
+                - generic [ref=e441]: if I'm familiar with buying and selling stocks
+            - listitem [ref=e442] [cursor=pointer]:
+              - generic [ref=e443]:
+                - generic [ref=e444]: Give me ideas
+                - generic [ref=e445]: for what to do with my kids' art
+  - menu [ref=e509]:
+    - generic [ref=e512]:
+      - button "Datei(en) hochladen" [ref=e514] [cursor=pointer]:
+        - img [ref=e515]
+        - generic [ref=e517]: Datei(en) hochladen
+      - button "Aufnahme" [ref=e519] [cursor=pointer]:
+        - img [ref=e520]
+        - generic [ref=e523]: Aufnahme
+      - button "Webseite anhängen" [ref=e525] [cursor=pointer]:
+        - img [ref=e526]
+        - generic [ref=e528]: Webseite anhängen
+      - button "Dateien anhängen" [ref=e530] [cursor=pointer]:
+        - img [ref=e531]
+        - generic [ref=e533]:
+          - generic [ref=e534]: Dateien anhängen
+          - img [ref=e536]
+      - button "Notizen anhängen" [ref=e539] [cursor=pointer]:
+        - img [ref=e540]
+        - generic [ref=e545]:
+          - generic [ref=e546]: Notizen anhängen
+          - img [ref=e548]
+      - button "Wissen anhängen" [ref=e551] [cursor=pointer]:
+        - img [ref=e552]
+        - generic [ref=e556]:
+          - generic [ref=e557]: Wissen anhängen
+          - img [ref=e559]
+      - button "Chats referenzieren" [ref=e562] [cursor=pointer]:
+        - img [ref=e563]
+        - generic [ref=e567]:
+          - generic [ref=e568]: Chats referenzieren
+          - img [ref=e570]

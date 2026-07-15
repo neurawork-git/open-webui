@@ -1,0 +1,62 @@
+- generic [ref=e7]:
+  - generic [ref=e8]:
+    - button "Seitenleiste öffnen Neuer Chat Suchen Notizen Arbeitsbereich" [ref=e9] [cursor=pointer]:
+      - button "Seitenleiste öffnen" [ref=e12]
+      - generic [ref=e14]:
+        - link "Neuer Chat" [ref=e17]:
+          - /url: /
+          - img [ref=e19]
+        - button "Suchen" [ref=e23]:
+          - img [ref=e25]
+        - link "Notizen" [ref=e29]:
+          - /url: /notes
+          - img [ref=e31]
+        - link "Arbeitsbereich" [ref=e35]:
+          - /url: /workspace
+          - img [ref=e37]
+    - button "Benutzermenü" [ref=e42] [cursor=pointer]:
+      - button "Benutzermenü" [ref=e43]:
+        - img "Benutzerprofilmenü öffnen" [ref=e45]
+  - generic [ref=e55]:
+    - navigation [ref=e56]:
+      - generic [ref=e59]:
+        - link "Modelle" [ref=e60] [cursor=pointer]:
+          - /url: /workspace/models
+        - link "Wissen" [ref=e61] [cursor=pointer]:
+          - /url: /workspace/knowledge
+        - link "Prompts" [ref=e62] [cursor=pointer]:
+          - /url: /workspace/prompts
+        - link "Skills" [ref=e63] [cursor=pointer]:
+          - /url: /workspace/skills
+        - link "Werkzeuge" [ref=e64] [cursor=pointer]:
+          - /url: /workspace/tools
+    - generic [ref=e66]:
+      - button "Zurück" [ref=e67] [cursor=pointer]:
+        - img [ref=e69]
+        - generic [ref=e71]: Zurück
+      - generic [ref=e72]:
+        - generic [ref=e73]:
+          - generic [ref=e74]: Wissensspeicher erstellen
+          - generic [ref=e75]:
+            - generic [ref=e76]:
+              - generic [ref=e77]: Woran arbeiten Sie?
+              - textbox "Benennen Sie Ihren Wissensspeicher" [ref=e79]: Replay Smoke KB
+            - generic [ref=e80]:
+              - generic [ref=e81]: Was möchten Sie erreichen?
+              - textbox "Beschreiben Sie Ihren Wissensspeicher und Ziele" [active] [ref=e83]
+        - generic [ref=e85]:
+          - generic [ref=e87]:
+            - img [ref=e90]
+            - generic [ref=e92]:
+              - combobox [ref=e94]:
+                - option "Privat" [selected]
+                - option "Öffentlich"
+              - generic [ref=e95]: Nur ausgewählte Benutzer und Gruppen mit Berechtigung haben Zugriff
+          - generic [ref=e96]:
+            - generic [ref=e97]: Zugriffsliste
+            - button "Zugriff gewähren" [ref=e99] [cursor=pointer]:
+              - img [ref=e100]
+              - text: Zugriff gewähren
+          - generic [ref=e103]: Keine Freigaben konfiguriert. Nur für Sie zugänglich.
+        - button "Wissen erstellen" [ref=e106] [cursor=pointer]:
+          - generic [ref=e107]: Wissen erstellen
