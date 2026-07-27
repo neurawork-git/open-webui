@@ -12,10 +12,10 @@ from enum import Enum
 from typing import Optional, List
 
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import BigInteger, Boolean, Column, Float, Integer, String, Text, select, delete, func
+from sqlalchemy import JSON, BigInteger, Boolean, Column, Float, Integer, String, Text, select, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from open_webui.internal.db import Base, JSONField, get_async_db_context
+from open_webui.internal.db import Base, get_async_db_context
 
 log = logging.getLogger(__name__)
 
@@ -126,7 +126,11 @@ class ProcessingTask(Base):
 
     # Error tracking
     error_message = Column(Text, nullable=True)
-    error_details = Column(JSONField, nullable=True)
+    # sa.JSON, NOT the TEXT-backed JSONField: on Postgres this column is `json`
+    # (both neurawork-test and -prod), and JSONField binds VARCHAR, which makes
+    # every INSERT fail with DatatypeMismatch. SQLite stores sa.JSON as TEXT, so
+    # the fork test suite is unaffected — which is exactly why it never caught it.
+    error_details = Column(JSON, nullable=True)
 
     # Cancellation
     cancel_requested = Column(Boolean, default=False)
@@ -136,7 +140,7 @@ class ProcessingTask(Base):
     # Additional metadata (scraper type, URL, content size, etc.)
     # NOTE: attribute is 'meta' (DB column stays 'metadata') because 'metadata'
     # is reserved by SQLAlchemy's Declarative Base.
-    meta = Column("metadata", JSONField, nullable=True)
+    meta = Column("metadata", JSON, nullable=True)  # see error_details above
 
 
 ####################

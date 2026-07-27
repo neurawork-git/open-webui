@@ -493,3 +493,32 @@ class TestProcessingTasksTable:
 
             assert isinstance(metrics, ProcessingMetrics)
             assert metrics.total_tasks == 100
+
+
+class TestProcessingTaskColumnTypes:
+    """Guards the model against drifting back to TEXT-backed JSON columns.
+
+    On Postgres `processing_task.error_details` and `.metadata` are `json`
+    (verified on neurawork-test and neurawork-prod, 2026-07-27). The TEXT-backed
+    JSONField binds VARCHAR, so every INSERT fails with
+
+        psycopg.errors.DatatypeMismatch: column "error_details" is of type json
+        but expression is of type character varying
+
+    and — because the dashboard tracker is deliberately best-effort — it fails
+    silently: uploads succeed, the dashboard just stays empty forever. SQLite
+    accepts either type, so no amount of local testing catches this. Hence a
+    type assertion rather than a behavioural test.
+    """
+
+    def test_json_columns_are_native_json(self):
+        from sqlalchemy import JSON
+
+        from open_webui.models.processing import ProcessingTask
+
+        for column_name in ('error_details', 'metadata'):
+            column = ProcessingTask.__table__.columns[column_name]
+            assert isinstance(column.type, JSON), (
+                f'{column_name} must be sa.JSON to match the Postgres schema; '
+                f'got {type(column.type).__name__}'
+            )
