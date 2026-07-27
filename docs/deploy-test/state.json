@@ -134,45 +134,45 @@
       "checks": {
         "T0-image": {
           "result": "pass",
-          "tag": "git-f805abe",
+          "tag": "git-59ba1e8",
           "commit": "",
-          "note": "neuraworkacr.azurecr.io/open-webui:git-f805abe",
-          "at": "2026-07-14T12:45:17Z"
+          "note": "neuraworkacr.azurecr.io/open-webui:git-59ba1e8",
+          "at": "2026-07-27T15:55:07Z"
         },
         "T0-rollout": {
           "result": "pass",
-          "tag": "git-f805abe",
+          "tag": "git-59ba1e8",
           "commit": "",
           "note": "",
-          "at": "2026-07-14T12:45:17Z"
+          "at": "2026-07-27T15:55:07Z"
         },
         "T0-migration": {
           "result": "pass",
-          "tag": "git-f805abe",
+          "tag": "git-59ba1e8",
           "commit": "",
           "note": "",
-          "at": "2026-07-14T12:45:46Z"
+          "at": "2026-07-27T15:55:17Z"
         },
         "T0-health": {
           "result": "pass",
-          "tag": "git-f805abe",
+          "tag": "git-59ba1e8",
           "commit": "",
           "note": "",
-          "at": "2026-07-14T12:45:47Z"
+          "at": "2026-07-27T15:55:17Z"
         },
         "T0-version": {
           "result": "pass",
-          "tag": "git-5a9969d",
+          "tag": "git-59ba1e8",
           "commit": "",
-          "note": "{\"version\":\"0.9.6\",\"deployment_id\":\"\"}",
-          "at": "2026-06-08T22:21:38Z"
+          "note": "{\"version\":\"0.11.0\",\"deployment_id\":\"\"}",
+          "at": "2026-07-27T15:55:18Z"
         },
         "T0-config": {
           "result": "pass",
-          "tag": "git-f805abe",
+          "tag": "git-59ba1e8",
           "commit": "",
           "note": "",
-          "at": "2026-07-14T12:45:47Z"
+          "at": "2026-07-27T15:55:18Z"
         }
       }
     }

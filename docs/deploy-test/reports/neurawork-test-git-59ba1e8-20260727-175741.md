@@ -1,0 +1,30 @@
+# Deploy-Test-Report — neurawork-test @ `git-59ba1e8`
+
+- Erzeugt: 2026-07-27T15:57:41Z
+- Instanz: `neurawork-test`
+- Image-Tag: `git-59ba1e8`
+
+| Check | Tier | Ergebnis | Verifiziert @ | Notiz |
+|-------|------|----------|---------------|-------|
+| T0-config — /api/config liefert features + erwartete Flags | T0 | ✅ pass | `git-59ba1e8` |  |
+| T0-health — /health == 200 | T0 | ✅ pass | `git-59ba1e8` |  |
+| T0-image — Image-Tag == erwarteter Build | T0 | ✅ pass | `git-59ba1e8` | neuraworkacr.azurecr.io/open-webui:git-59ba1e8 |
+| T0-migration — Alembic-Kette ohne Error auf Single-Head | T0 | ✅ pass | `git-59ba1e8` |  |
+| T0-rollout — Rollout fertig, Pod ready, 0 restarts | T0 | ✅ pass | `git-59ba1e8` |  |
+| T0-version — /api/version == erwartete Version | T0 | ✅ pass | `git-59ba1e8` | {"version":"0.11.0","deployment_id":""} |
+| T1-kb-api — GET /api/v1/knowledge liefert Sammlungen | T1 | — — | `—` |  |
+| T1-models-api — GET /api/models liefert nicht-leere Liste | T1 | — — | `—` |  |
+| D1-auth — Login/Session, kein /auth-Redirect, Username korrekt | T2 | — — | `—` |  |
+| D10-admin-docs — Admin Settings/Documents: RAG-Engine/Embedding-Config lädt | T2 | — — | `—` |  |
+| D11-upload — File-Upload im Chat -> Verarbeitung -> nutzbar | T2 | — — | `—` |  |
+| D12-channels — Channel öffnen, Historie + Senden | T2 | — — | `—` |  |
+| D2-chat — Chat-Inferenz E2E (Prompt -> Antwort, persistiert, Auto-Titel) | T2 | — — | `—` |  |
+| D3-models-ui — Modell-Selector lädt Liste + Fork-Gruppen | T2 | — — | `—` |  |
+| D4-knowledge — Workspace/Knowledge-Liste rendert | T2 | — — | `—` |  |
+| D5-kb-open — KB öffnen, Dateien + Fork-Buttons (RAG/Zugriff/Neu-indizieren) | T2 | — — | `—` |  |
+| D6-sharepoint — SharePoint/Graph-Import-Picker | T2 | — — | `—` |  |
+| D7-rag — RAG-Retrieval im Chat: # KB-Ref -> Quellen abgerufen + Inline-Zitate | T2 | — — | `—` |  |
+| D8-rag-settings — Per-KB RAG-Settings-Override (BM25/Hybrid/Reranker/Full-Context) | T2 | — — | `—` |  |
+| D9-processing — Admin Document-Processing-Dashboard (Stats + Tabelle + Chunk-Progress) | T2 | — — | `—` |  |
+
+**Summe:** 6 pass · 0 fail · 20 Checks gesamt
