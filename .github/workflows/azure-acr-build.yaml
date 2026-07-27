@@ -27,6 +27,27 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # The v0.11.0 frontend no longer fits in Node's default ~4 GB heap:
+      # `vite build` dies with "Ineffective mark-compacts near heap limit".
+      # Upstream ships the ENV line commented out in the Dockerfile and injects
+      # it from CI instead (see .github/workflows/docker.yaml.disabled) — we do
+      # the same, so Dockerfile stays byte-identical to upstream and never
+      # conflicts on a merge. Built from RUNNER_TEMP, the repo copy is untouched.
+      - name: Prepare CI Dockerfile (raise Node heap limit)
+        run: |
+          awk '
+            /^FROM --platform=\$BUILDPLATFORM node:/ {
+              print
+              print "ENV NODE_OPTIONS=\"--max-old-space-size=12288\""
+              next
+            }
+            { print }
+          ' Dockerfile > "${RUNNER_TEMP}/Dockerfile"
+          grep -n "NODE_OPTIONS" "${RUNNER_TEMP}/Dockerfile" || {
+            echo "::error::NODE_OPTIONS injection failed — the node build stage line changed upstream"
+            exit 1
+          }
+
       - name: Log in to Azure Container Registry
         if: github.event_name != 'pull_request'
         uses: azure/docker-login@v1
@@ -55,7 +76,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: ./Dockerfile
+          file: ${{ runner.temp }}/Dockerfile
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

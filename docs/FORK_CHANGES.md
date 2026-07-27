@@ -75,6 +75,15 @@ Run them with `joserfc` installed — it became a hard backend dependency (`requ
 ls .github/workflows/ | grep -v '\.disabled$'   # must print only azure-acr-build.yaml
 ```
 
+**Node heap injection (added for v0.11.0):** the 0.11.0 frontend no longer builds in Node's
+default ~4 GB heap — `vite build` dies with *"Ineffective mark-compacts near heap limit"*.
+Upstream ships the `ENV NODE_OPTIONS` line **commented out** in the `Dockerfile` and injects it
+from CI instead; `azure-acr-build.yaml` now does the same (awk-copy to `$RUNNER_TEMP/Dockerfile`,
+`--max-old-space-size=12288`, built with `file: ${{ runner.temp }}/Dockerfile`). The step fails
+loudly if the injection does not match, so a renamed upstream build stage cannot silently produce
+an unpatched build. **`Dockerfile` therefore stays byte-identical to upstream — do not "fix" this
+by uncommenting the line in the Dockerfile**, that would create a permanent overlay conflict.
+
 Plus `.mcp.json`, `backend/start-dev.bat`, `migration_scripts/`, `migrate-openwebui.load`, `.gitignore` additions.
 
 ---
