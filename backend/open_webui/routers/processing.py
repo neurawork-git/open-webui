@@ -463,7 +463,7 @@ async def retry_processing_task(
 
     # Re-trigger file processing in background via the retrieval pipeline.
     # Uses a fresh AsyncSession so the request-scoped session can close cleanly.
-    from open_webui.routers.retrieval import ProcessFileForm, process_file
+    from open_webui.routers.retrieval import ProcessFileForm, _process_file
     from open_webui.internal.db import get_async_db_context
 
     document_id = task.document_id
@@ -472,8 +472,12 @@ async def retry_processing_task(
     async def reprocess_file():
         form_data = ProcessFileForm(file_id=document_id, collection_name=collection_name)
         async with get_async_db_context() as new_db:
+            # Reuse THIS task (retry_task already reset it to QUEUED) instead of
+            # letting _process_file create a brand-new row for the retry.
+            tracker = ProcessingTaskTracker(task_id, db=new_db)
             try:
-                await process_file(request, form_data, user=file_user, db=new_db)
+                await _process_file(request, form_data, user=file_user, db=new_db, tracker=tracker)
+                await tracker.complete()
             except Exception as e:
                 log.exception(f"Error reprocessing file {document_id}: {e}")
                 await ProcessingTasks.fail_task(task_id, str(e), db=new_db)

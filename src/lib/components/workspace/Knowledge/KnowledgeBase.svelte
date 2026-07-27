@@ -457,6 +457,15 @@
 		}
 
 		fileItems = [fileItem, ...(fileItems ?? [])];
+
+		// FORK: always clear the optimistic "uploading" row so its spinner can never
+		// hang forever — e.g. when the upload request times out (markitdown /process
+		// 600s). Files.svelte spins on status === 'uploading' and has no failed-state
+		// render, so the row must be removed on any failure.
+		const removeFileItem = () => {
+			fileItems = (fileItems ?? []).filter((item) => item.itemId !== fileItem.itemId);
+		};
+
 		try {
 			let metadata = {
 				knowledge_id: knowledge.id,
@@ -487,16 +496,18 @@
 				if (uploadedFile.error) {
 					console.warn('File upload warning:', uploadedFile.error);
 					toast.warning(uploadedFile.error);
-					fileItems = fileItems.filter((file) => file.id !== uploadedFile.id);
+					removeFileItem();
 				} else {
 					toast.success($i18n.t('File added successfully.'));
 					init();
 				}
 			} else {
 				toast.error($i18n.t('Failed to upload file.'));
+				removeFileItem();
 			}
 		} catch (e) {
 			toast.error(`${e}`);
+			removeFileItem();
 		}
 	};
 

@@ -42,7 +42,13 @@ from open_webui.models.knowledge import Knowledges
 from open_webui.models.users import Users
 from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
 from open_webui.routers.audio import transcribe
-from open_webui.routers.retrieval import ProcessFileForm, process_file
+from open_webui.routers.retrieval import (
+    ProcessFileForm,
+    process_file,
+    _process_file,
+    _start_processing_tracker,
+    _safe_track,
+)
 from open_webui.storage.provider import Storage
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.misc import strict_match_mime_type
@@ -135,6 +141,10 @@ async def process_uploaded_file(
     db: Optional[AsyncSession] = None,
 ):
     async def _process_handler(db_session):
+        # FORK: one dashboard task per upload (best-effort). The same tracker is
+        # passed into every _process_file call below so the extract step and the
+        # knowledge-link step share a single row (one upload = one task).
+        tracker = await _start_processing_tracker(file_item, user, file_metadata.get('knowledge_id'))
         try:
             content_type = file.content_type
 
@@ -158,11 +168,12 @@ async def process_uploaded_file(
                     file_metadata,
                     user,
                 )
-                await process_file(
+                await _process_file(
                     request,
                     ProcessFileForm(file_id=file_item.id, content=result.get('text', '')),
                     user=user,
                     db=db_session,
+                    tracker=tracker,
                 )
 
             elif (
@@ -191,11 +202,12 @@ async def process_uploaded_file(
                 # configured content extraction engine.
                 if not content_type:
                     log.info(f'File type {file.content_type} is not provided, but trying to process anyway')
-                await process_file(
+                await _process_file(
                     request,
                     ProcessFileForm(file_id=file_item.id),
                     user=user,
                     db=db_session,
+                    tracker=tracker,
                 )
 
             # Auto-link to Knowledge Collection when uploaded from one (#24807).
@@ -227,11 +239,12 @@ async def process_uploaded_file(
                         # Keep the generic file status stream open until the
                         # KB-specific vector write and durable link both finish.
                         await Files.update_file_data_by_id(file_item.id, {'status': 'processing'}, db=db_session)
-                        await process_file(
+                        await _process_file(
                             request,
                             ProcessFileForm(file_id=file_item.id, collection_name=knowledge_id),
                             user=user,
                             db=db_session,
+                            tracker=tracker,
                         )
                         knowledge_file = await Knowledges.add_file_to_knowledge_by_id(
                             knowledge_id=knowledge_id,
@@ -247,8 +260,14 @@ async def process_uploaded_file(
                     log.warning(f'Failed to link file {file_item.id} to knowledge {knowledge_id}: {e}')
                     raise
 
+            # FORK: extraction (and any KB-link) succeeded → close the dashboard task.
+            if tracker:
+                await _safe_track(tracker.complete())
+
         except Exception as e:
             log.error(f'Error processing file: {file_item.id}')
+            if tracker:
+                await _safe_track(tracker.fail(str(e.detail) if hasattr(e, 'detail') else str(e)))
             await Files.update_file_data_by_id(
                 file_item.id,
                 {

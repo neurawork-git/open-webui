@@ -1877,8 +1877,20 @@ async def chat_completion_files_handler(
                 }
             )
 
-        if len(queries) == 0:
+        # FORK: drop blank queries (empty/whitespace LLM response or none generated).
+        queries = [q for q in queries if isinstance(q, str) and q.strip()]
+
+        force_full_context = False
+        if not queries:
+            # No usable search query — the last user turn carries no text
+            # (file- or image-only message). Embedding an empty string
+            # retrieves nothing, so inject the attached items in full instead:
+            # the attachment itself is the intent.
+            # ponytail: full-context dump; a large multi-doc KB attached to an
+            # empty message will bloat the prompt — upgrade to a conversation-
+            # history query fallback if that ever bites.
             queries = [get_last_user_message(body['messages']) or '']
+            force_full_context = True
 
         # FORK: per-level RAG settings — collect per-KB overrides and enrich
         # collection items for the {{KNOWLEDGE_BASES}} template variable.
@@ -1956,7 +1968,9 @@ async def chat_completion_files_handler(
                 r=base_settings.get('relevance_threshold', rag_config.get('rag.relevance_threshold')),
                 hybrid_bm25_weight=base_settings.get('hybrid_bm25_weight', rag_config.get('rag.hybrid_bm25_weight')),
                 hybrid_search=base_settings.get('enable_hybrid_search', rag_config.get('rag.enable_hybrid_search')),
-                full_context=all_full_context or base_settings.get('full_context', rag_config.get('rag.full_context')),
+                full_context=all_full_context
+                or force_full_context
+                or base_settings.get('full_context', rag_config.get('rag.full_context')),
                 enable_reranking=base_settings.get('enable_reranking', rag_config.get('rag.enable_reranking')),
                 user=user,
                 per_knowledge_settings=per_knowledge_rag_settings,

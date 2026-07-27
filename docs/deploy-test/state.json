@@ -25,17 +25,17 @@
         },
         "T0-rollout": {
           "result": "pass",
-          "tag": "git-75d4416",
-          "commit": "75d44161a",
+          "tag": "git-f805abe",
+          "commit": "",
           "note": "",
-          "at": "2026-06-08T17:02:17Z"
+          "at": "2026-07-14T13:12:43Z"
         },
         "T0-image": {
           "result": "pass",
-          "tag": "git-75d4416",
-          "commit": "75d44161a",
-          "note": "",
-          "at": "2026-06-08T17:02:17Z"
+          "tag": "git-f805abe",
+          "commit": "",
+          "note": "neuraworkacr.azurecr.io/open-webui:git-f805abe",
+          "at": "2026-07-14T13:12:42Z"
         },
         "D3-models-ui": {
           "result": "pass",
@@ -46,10 +46,10 @@
         },
         "T0-health": {
           "result": "pass",
-          "tag": "git-75d4416",
-          "commit": "75d44161a",
+          "tag": "git-f805abe",
+          "commit": "",
           "note": "",
-          "at": "2026-06-08T17:02:17Z"
+          "at": "2026-07-14T13:12:45Z"
         },
         "D5-kb-open": {
           "result": "pass",
@@ -67,10 +67,10 @@
         },
         "T0-config": {
           "result": "pass",
-          "tag": "git-75d4416",
-          "commit": "75d44161a",
+          "tag": "git-f805abe",
+          "commit": "",
           "note": "",
-          "at": "2026-06-08T17:02:18Z"
+          "at": "2026-07-14T13:12:46Z"
         },
         "D9-processing": {
           "result": "pass",
@@ -88,10 +88,10 @@
         },
         "T0-migration": {
           "result": "pass",
-          "tag": "git-75d4416",
-          "commit": "75d44161a",
-          "note": "head 7e66bdd43a43 merge upstream v0.9.6+fork recovery",
-          "at": "2026-06-08T17:02:18Z"
+          "tag": "git-f805abe",
+          "commit": "",
+          "note": "false positive: AuthlibDeprecationWarning import line matched error-scan; chain walked to e48721182479 clean",
+          "at": "2026-07-14T13:13:29Z"
         },
         "D6-sharepoint": {
           "result": "na",
@@ -127,6 +127,52 @@
           "commit": "75d44161a",
           "note": "#test Channel laedt + Nachricht gepostet (WebSocket)",
           "at": "2026-06-08T17:13:32Z"
+        }
+      }
+    },
+    "neurawork-test": {
+      "checks": {
+        "T0-image": {
+          "result": "pass",
+          "tag": "git-f805abe",
+          "commit": "",
+          "note": "neuraworkacr.azurecr.io/open-webui:git-f805abe",
+          "at": "2026-07-14T12:45:17Z"
+        },
+        "T0-rollout": {
+          "result": "pass",
+          "tag": "git-f805abe",
+          "commit": "",
+          "note": "",
+          "at": "2026-07-14T12:45:17Z"
+        },
+        "T0-migration": {
+          "result": "pass",
+          "tag": "git-f805abe",
+          "commit": "",
+          "note": "",
+          "at": "2026-07-14T12:45:46Z"
+        },
+        "T0-health": {
+          "result": "pass",
+          "tag": "git-f805abe",
+          "commit": "",
+          "note": "",
+          "at": "2026-07-14T12:45:47Z"
+        },
+        "T0-version": {
+          "result": "pass",
+          "tag": "git-5a9969d",
+          "commit": "",
+          "note": "{\"version\":\"0.9.6\",\"deployment_id\":\"\"}",
+          "at": "2026-06-08T22:21:38Z"
+        },
+        "T0-config": {
+          "result": "pass",
+          "tag": "git-f805abe",
+          "commit": "",
+          "note": "",
+          "at": "2026-07-14T12:45:47Z"
         }
       }
     }
