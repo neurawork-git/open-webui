@@ -134,45 +134,87 @@
       "checks": {
         "T0-image": {
           "result": "pass",
-          "tag": "git-59ba1e8",
+          "tag": "git-f156336",
           "commit": "",
-          "note": "neuraworkacr.azurecr.io/open-webui:git-59ba1e8",
-          "at": "2026-07-27T15:55:07Z"
+          "note": "neuraworkacr.azurecr.io/open-webui:git-f156336",
+          "at": "2026-07-27T21:37:18Z"
         },
         "T0-rollout": {
           "result": "pass",
-          "tag": "git-59ba1e8",
+          "tag": "git-f156336",
           "commit": "",
           "note": "",
-          "at": "2026-07-27T15:55:07Z"
+          "at": "2026-07-27T21:37:19Z"
         },
         "T0-migration": {
           "result": "pass",
-          "tag": "git-59ba1e8",
+          "tag": "git-f156336",
           "commit": "",
           "note": "",
-          "at": "2026-07-27T15:55:17Z"
+          "at": "2026-07-27T21:37:31Z"
         },
         "T0-health": {
           "result": "pass",
-          "tag": "git-59ba1e8",
+          "tag": "git-f156336",
           "commit": "",
           "note": "",
-          "at": "2026-07-27T15:55:17Z"
+          "at": "2026-07-27T21:37:31Z"
         },
         "T0-version": {
           "result": "pass",
-          "tag": "git-59ba1e8",
+          "tag": "git-f156336",
           "commit": "",
           "note": "{\"version\":\"0.11.0\",\"deployment_id\":\"\"}",
-          "at": "2026-07-27T15:55:18Z"
+          "at": "2026-07-27T21:37:31Z"
         },
         "T0-config": {
           "result": "pass",
-          "tag": "git-59ba1e8",
+          "tag": "git-f156336",
           "commit": "",
           "note": "",
-          "at": "2026-07-27T15:55:18Z"
+          "at": "2026-07-27T21:37:32Z"
+        },
+        "D1-auth": {
+          "result": "pass",
+          "tag": "git-f156336",
+          "commit": "",
+          "note": "",
+          "at": "2026-07-27T21:37:32Z"
+        },
+        "D5-kb-open": {
+          "result": "pass",
+          "tag": "git-f156336",
+          "commit": "",
+          "note": "",
+          "at": "2026-07-27T21:37:32Z"
+        },
+        "D8-rag-settings": {
+          "result": "pass",
+          "tag": "git-f156336",
+          "commit": "",
+          "note": "",
+          "at": "2026-07-27T21:37:32Z"
+        },
+        "D9-processing": {
+          "result": "pass",
+          "tag": "git-f156336",
+          "commit": "",
+          "note": "",
+          "at": "2026-07-27T21:37:33Z"
+        },
+        "D10-admin-docs": {
+          "result": "pass",
+          "tag": "git-f156336",
+          "commit": "",
+          "note": "",
+          "at": "2026-07-27T21:37:33Z"
+        },
+        "D11-upload": {
+          "result": "pass",
+          "tag": "git-f156336",
+          "commit": "",
+          "note": "",
+          "at": "2026-07-27T21:37:33Z"
         }
       }
     }
