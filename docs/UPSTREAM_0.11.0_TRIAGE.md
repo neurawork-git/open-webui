@@ -170,6 +170,52 @@ Merge-Ergebnis byte-identisch → kein Zusammenhang mit 0.11.0.
 | `npx vitest run` | 4 passed / 9 failed — ausschließlich §5.3, vorbestehend |
 | Workflow-Renames | nur `azure-acr-build.yaml` aktiv; neues `issue-label.yaml` auf `.disabled` |
 
+### 6.1 Live-Test auf `neurawork-test` (Tier 2, 2026-07-27)
+
+Im Live-Chrome gegen `https://openwebui-test.neurawork.app` durchgeführt.
+
+| Check | Ergebnis |
+|---|---|
+| D1-auth | ✅ Entra-SSO durchgelaufen, kein `/auth`-Redirect; UI zeigt Release-Dialog **v0.11.0** |
+| D9-processing | ✅ Dashboard rendert (Stat-Kacheln, Status-Filter, Tabelle, Live-Polling) |
+| D10-admin-docs | ✅ Fork-Toggle **„Wissensdatenbank-Retrieval bei nativem Tool-Calling erzwingen"** steht ganz oben im Abschnitt „Abruf", Label + Beschreibung im neuen `AdminSettingRow`-Idiom, de-DE-Keys lösen auf |
+| Pyodide-Prompt (CodeExecution) | ✅ Feld **„Pyodide Guardrail Prompt"** hinter der Prompt-Vorlage, gegated auf Engine `pyodide` |
+| Admin-Nav | ✅ Processing-Tab mit der 0.11.0-Tab-Klasse |
+| D5-kb-open | ✅ Button-Reihe wie hand-aufgelöst: **RAG** (Fork) · **Zugriff** (upstream `AccessButton`) · **Neu indizieren** (Fork) |
+| D8-rag-settings | ✅ Override-Modal komplett: Top-K, Top-K (Reranker), Relevanzschwelle, BM25-Gewichtung, Hybride Suche, **Reranking**, Full Context, „Reset to Global" |
+| D11-upload | ⚠️ Upload + Extraktion + KB-Verknüpfung ok (`status: completed`) — **aber kein Dashboard-Task**, siehe §5.4 |
+| D2-chat, D3-models-ui, D7-rag | ⚪ nicht prüfbar: `/api/models` liefert 0 Modelle, die Instanz hat keine LLM-Verbindung |
+| D12-channels | ⚪ offen |
+
+Einschränkung des Live-Chrome-Wegs: der Extension-Modus darf keine File-Inputs setzen
+(`DOM.setFileInputFiles: Not allowed`). Der Upload lief deshalb per `fetch`/FormData aus dem
+Seitenkontext — derselbe Backend-Pfad (`files.py` → `_process_file` → Tracker), aber ohne die
+Svelte-Upload-UI. Der Spinner-Cleanup in `uploadFileHandler` ist damit **nicht** live geprüft.
+
+### 5.4 `processing_task`-JSON-Spalten — Dashboard schrieb nichts (gefixt)
+
+Der Upload-Check deckte einen echten Defekt auf: Datei `completed` und an die Collection
+gebunden, aber `total_tasks: 0`. Pod-Log:
+
+```
+psycopg.errors.DatatypeMismatch: column "error_details" is of type json
+but expression is of type character varying
+```
+
+`error_details` und `metadata` sind auf Postgres `json` (auf **test und prod** verifiziert),
+das Modell deklarierte sie mit dem TEXT-basierten `JSONField` → VARCHAR-Bindung → jedes INSERT
+scheitert. Und zwar **still**, weil `_safe_track` Fehler bewusst schluckt: Uploads laufen weiter,
+das Dashboard bleibt einfach für immer leer.
+
+Kein Merge-Regress — `models/processing.py` und die anlegende Migration sind byte-identisch zu
+`feature/owui-0.10.2`. Der Mismatch lag seit dem 0.9.6-Replay latent, weil die Tracker-Hooks
+fehlten und niemand das INSERT auslöste; Prod läuft auf `git-f805abe`, ebenfalls ohne Hooks.
+Erst das Wiederherstellen der Hooks in diesem Branch machte ihn erreichbar.
+
+Fix modellseitig auf `sa.JSON` (keine Migration — `json` ist der richtige Typ, die 13
+historischen Prod-Zeilen bleiben lesbar), plus Typ-Assertion als Regressionsschutz, da SQLite
+beide Typen akzeptiert und die Suite das nie gefangen hätte.
+
 **Nicht geprüft:** Laufzeitverhalten. Kein Deploy, kein Playwright-Smoke. Vor dem Rollout
 `docs/PLAYWRIGHT_DEPLOY_SMOKE_PROTOCOL.md` fahren — insbesondere Admin-Settings (UI-Rebuild!),
 Processing-Dashboard, SharePoint-Import und KB-RAG-Modal, weil deren Markup neu gesetzt wurde.
