@@ -3,6 +3,7 @@
 	const dispatch = createEventDispatcher();
 
 	import Dropdown from '$lib/components/common/Dropdown.svelte';
+	import DropdownMenu from '$lib/components/common/DropdownMenu.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import ArrowUpCircle from '$lib/components/icons/ArrowUpCircle.svelte';
 	import BarsArrowUp from '$lib/components/icons/BarsArrowUp.svelte';
@@ -36,7 +37,8 @@
 >
 	<Tooltip content={$i18n.t('Add Content')}>
 		<button
-			class=" p-1.5 rounded-xl hover:bg-gray-100 dark:bg-gray-850 dark:hover:bg-gray-800 transition font-medium text-sm flex items-center space-x-1"
+			class="p-1.5 rounded-xl bg-transparent transition text-xs flex items-center space-x-1 hover:text-gray-900 dark:hover:text-gray-100"
+			aria-label={$i18n.t('Add Content')}
 			on:click={(e) => {
 				e.stopPropagation();
 				show = true;
@@ -56,11 +58,9 @@
 	</Tooltip>
 
 	<div slot="content">
-		<div
-			class="min-w-[200px] rounded-2xl px-1 py-1 border border-gray-100 dark:border-gray-800 z-50 bg-white dark:bg-gray-850 dark:text-white shadow-lg transition"
-		>
+		<DropdownMenu className="min-w-[200px] transition">
 			<button
-				class="select-none flex gap-2 items-center px-3 py-1.5 text-sm cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 rounded-xl w-full"
+				class="select-none flex h-[1.6875rem] w-full cursor-pointer items-center gap-2 rounded-xl bg-transparent px-2 text-xs hover:text-gray-900 dark:hover:text-gray-100"
 				on:click={() => {
 					onUpload({ type: 'new_directory' });
 					show = false;
@@ -73,7 +73,7 @@
 			<hr class="my-1 border-gray-100 dark:border-gray-800" />
 
 			<button
-				class="select-none flex gap-2 items-center px-3 py-1.5 text-sm cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 rounded-xl w-full"
+				class="select-none flex h-[1.6875rem] w-full cursor-pointer items-center gap-2 rounded-xl bg-transparent px-2 text-xs hover:text-gray-900 dark:hover:text-gray-100"
 				on:click={() => {
 					onUpload({ type: 'files' });
 				}}
@@ -83,7 +83,7 @@
 			</button>
 
 			<button
-				class="select-none flex gap-2 items-center px-3 py-1.5 text-sm cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 rounded-xl w-full"
+				class="select-none flex h-[1.6875rem] w-full cursor-pointer items-center gap-2 rounded-xl bg-transparent px-2 text-xs hover:text-gray-900 dark:hover:text-gray-100"
 				on:click={() => {
 					onUpload({ type: 'directory' });
 				}}
@@ -99,7 +99,7 @@
 				className="w-full"
 			>
 				<button
-					class="select-none flex gap-2 items-center px-3 py-1.5 text-sm cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 rounded-xl w-full"
+					class="select-none flex h-[1.6875rem] w-full cursor-pointer items-center gap-2 rounded-xl bg-transparent px-2 text-xs hover:text-gray-900 dark:hover:text-gray-100"
 					on:click={() => {
 						onSync();
 					}}
@@ -110,7 +110,7 @@
 			</Tooltip>
 
 			<button
-				class="select-none flex gap-2 items-center px-3 py-1.5 text-sm cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 rounded-xl w-full"
+				class="select-none flex h-[1.6875rem] w-full cursor-pointer items-center gap-2 rounded-xl bg-transparent px-2 text-xs hover:text-gray-900 dark:hover:text-gray-100"
 				on:click={() => {
 					onUpload({ type: 'web' });
 				}}
@@ -120,7 +120,7 @@
 			</button>
 
 			<button
-				class="select-none flex gap-2 items-center px-3 py-1.5 text-sm cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 rounded-xl w-full"
+				class="select-none flex h-[1.6875rem] w-full cursor-pointer items-center gap-2 rounded-xl bg-transparent px-2 text-xs hover:text-gray-900 dark:hover:text-gray-100"
 				on:click={() => {
 					onUpload({ type: 'text' });
 				}}
@@ -177,7 +177,7 @@
 			<hr class="my-1 border-gray-100 dark:border-gray-800" />
 
 			<button
-				class="select-none flex gap-2 items-center px-3 py-1.5 text-sm cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 rounded-xl w-full"
+				class="select-none flex h-[1.6875rem] w-full cursor-pointer items-center gap-2 rounded-xl bg-transparent px-2 text-xs hover:text-gray-900 dark:hover:text-gray-100"
 				on:click={() => {
 					onReset();
 					show = false;
@@ -186,6 +186,6 @@
 				<ArrowUturnLeft strokeWidth="2" />
 				<div class="flex items-center">{$i18n.t('Reset')}</div>
 			</button>
-		</div>
+		</DropdownMenu>
 	</div>
 </Dropdown>
