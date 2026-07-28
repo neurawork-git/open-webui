@@ -242,6 +242,9 @@
 				'interface',
 				'ui',
 				'appearance',
+				'css', // FORK: custom CSS editor lives in this tab
+				'theme',
+				'branding',
 				'banners',
 				'tasks',
 				'prompt suggestions',

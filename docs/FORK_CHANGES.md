@@ -31,6 +31,7 @@
 |---|---|
 | `backend/open_webui/routers/processing.py` | Admin dashboard for document-processing tasks. Registered in `main.py` (see Injection below). |
 | `backend/open_webui/models/processing.py` | `ProcessingTask` ORM + `ProcessingTasks` repository + `ProcessingTaskTracker` + enums. **`error_details` and `metadata` must stay `sa.JSON`, not the TEXT-backed `JSONField`** — the Postgres columns are `json` and JSONField binds VARCHAR, which kills every INSERT silently (see §11.5). Guarded by `test_json_columns_are_native_json`. |
+| `backend/open_webui/routers/custom_css.py` | **Live custom CSS.** Serves `/static/custom.css` (the URL upstream's own `app.html` already links) out of the `config` table instead of the wiped `STATIC_DIR` file, plus `GET`/`POST /api/v1/custom-css` for the editor and for agents. Registered **without a prefix** and **before `app.mount('/static', ...)`** — see Injection below. See `docs/CUSTOM_CSS.md`. |
 | `backend/open_webui/utils/graph_client.py` | Microsoft Graph client used by SharePoint import + OAuth tools. |
 | `backend/open_webui/retrieval/models.py` | RAG settings models (per-level, per-query overrides). Still absent upstream in v0.11.0. |
 | `backend/open_webui/migrations/_fork_helpers.py` | `create_table_if_missing`, `add_column_if_missing`, `drop_table_if_exists`, `drop_column_if_exists`. Used by all fork-local migrations. |
@@ -50,6 +51,8 @@
 | Path | Purpose |
 |---|---|
 | `src/lib/apis/admin/processing.ts` | Client for `/api/v1/admin/processing`. |
+| `src/lib/apis/custom-css/index.ts` | Client for `/api/v1/custom-css` + `reloadCustomCss()`, which re-fetches the `<link>` so a save applies without a page reload. |
+| `src/lib/components/admin/Settings/CustomCss.svelte` | CodeMirror CSS editor, embedded in the Interface settings tab. Exposes `save()`; the parent's Save button drives it. |
 | `src/lib/stores/processing.ts` | Svelte store + polling logic for the processing dashboard. |
 | `src/lib/components/admin/Processing.svelte` | The dashboard UI. |
 | `src/routes/(app)/admin/processing/+page.svelte` | Route wrapper. |
@@ -59,7 +62,7 @@
 
 ## 3. Additive — tests
 
-All under `backend/open_webui/test/`: `processing/` (models, api, router registration), `retrieval/` (bm25 tokenization + keyword integration, hybrid deep dive, keyword matching, rag models/settings/query settings, native-FC force retrieval, embedding function signature), `sharepoint/` (graph client, sharepoint import). Full fork suite: **321 tests, green on the v0.11.0 merge** (unchanged count vs 0.10.2).
+All under `backend/open_webui/test/`: `processing/` (models, api, router registration), `retrieval/` (bm25 tokenization + keyword integration, hybrid deep dive, keyword matching, rag models/settings/query settings, native-FC force retrieval, embedding function signature), `sharepoint/` (graph client, sharepoint import), `custom_css/` (route-registration order vs the `/static` mount, config default, non-string guard, UTF-8 byte size cap). Full fork suite: **329 tests, green** (322 after the v0.11.0 merge + 7 for custom CSS).
 
 Run them with `joserfc` installed — it became a hard backend dependency (`requirements.txt`) and `utils/oauth.py` imports it at module load, so the sharepoint suite fails at *collection* without it.
 
@@ -94,6 +97,7 @@ Plus `.mcp.json`, `backend/start-dev.bat`, `migration_scripts/`, `migrate-openwe
 
 - Import `processing,` in the routers import list. Detector: `grep -n "^    processing,$" backend/open_webui/main.py`
 - `app.include_router(processing.router, prefix='/api/v1/admin/processing', tags=['processing'])`. Detector: `grep -n "processing.router" backend/open_webui/main.py`
+- Import `custom_css,` in the routers import list + `app.include_router(custom_css.router, tags=['custom-css'])` — **no prefix, and it must stay above `app.mount('/static', ...)`.** FastAPI matches routes in registration order, so a router registered after the mount is shadowed and custom branding silently reverts to the empty file. Detector: `grep -n "custom_css.router" backend/open_webui/main.py`; the ordering is asserted by `test/custom_css/test_custom_css.py::TestRouteRegistrationOrder`.
 - `/api/config`: `'client_id_business': config.get('onedrive.client_id_business') or ONEDRIVE_CLIENT_ID_BUSINESS` + key in the surrounding `Config.get_many` list. Detector: `grep -n "onedrive.client_id_business" backend/open_webui/main.py`
 
 ### `backend/open_webui/config.py`
@@ -105,9 +109,10 @@ Per-key registrations (module-level env default + `DEFAULT_CONFIG` entry each), 
 - `SHAREPOINT_IMPORT_MAX_TOTAL_SIZE_MB` → `'rag.sharepoint.import_max_total_size_mb'` (default `200`)
 - `CODE_INTERPRETER_PYODIDE_PROMPT_TEMPLATE` → `'code_interpreter.pyodide_prompt_template'` (default `''`)
 - `'onedrive.client_id_business'` → `ONEDRIVE_CLIENT_ID_BUSINESS` (upstream keeps it env-only)
+- `'ui.custom_css'` (default `''`) — the live custom CSS body. No env var on purpose: it is edited at runtime, and an env default would be silently shadowed by the DB row.
 - `DEFAULT_RAG_TEMPLATE` **overlay**: fork template with `{{KNOWLEDGE_BASES}}`, `{{QUERY}}`, strict `[id]`-citation rules (pairs with the `utils/task.py` injection).
 
-Detector: `grep -n "# FORK:" backend/open_webui/config.py` (expect 4) and `grep -n "KNOWLEDGE_BASES" backend/open_webui/config.py`
+Detector: `grep -n "# FORK:" backend/open_webui/config.py` (expect 5) and `grep -n "KNOWLEDGE_BASES" backend/open_webui/config.py`
 
 ### `backend/open_webui/routers/configs.py`
 
@@ -153,6 +158,8 @@ Detector: `grep -n "# FORK:" backend/open_webui/config.py` (expect 4) and `grep 
 - `src/lib/components/admin/Settings/Documents.svelte` — force-retrieval `AdminSettingRow` at the top of the Retrieval section (14 lines).
 - `src/lib/components/admin/Settings/CodeExecution.svelte` — pyodide prompt `AdminSettingField` in the Code Interpreter section (17 lines).
 - `src/lib/components/chat/MessageInput.svelte` + `src/lib/components/chat/Settings/Interface.svelte` — **shrunk in 0.11.0.** Upstream now ships a `defaultUploadContext` user setting (`'full' | 'focused'`, upstream default `'focused'`); the fork only flips the unset default to `'full'` in both files. The former ~21-line unconditional override is gone. Detector: `grep -n "FORK" src/lib/components/chat/Settings/Interface.svelte`
+- `src/lib/components/admin/Settings/Interface.svelte` — custom CSS: `CustomCss` import, `customCssRef` binding, `customCssRef?.save()` in the `Promise.all` of `updateInterfaceHandler`, and an `Appearance` section at the end of the form (12 lines). Detector: `grep -c "CustomCss" src/lib/components/admin/Settings/Interface.svelte` (expect 3).
+- `src/lib/components/admin/Settings.svelte` — `'css' / 'theme' / 'branding'` added to the `interface` tab's search keywords (3 lines), so the CSS editor is findable from the settings search.
 - `src/lib/i18n/locales/{de-DE,en-US}/translation.json` — force-retrieval label/tooltip keys.
 
 ---
@@ -182,7 +189,7 @@ Detector: `grep -n "# FORK:" backend/open_webui/config.py` (expect 4) and `grep 
 
 ## 8. Binary / static overlays
 
-- `backend/open_webui/static/favicon.ico`, `favicon.png` — fork favicons, **but see §11: they are inert.** `config.py` deletes every loose file in `STATIC_DIR` at import and repopulates from the frontend build, so these are overwritten on every startup. Real branding belongs in the frontend `static/` tree.
+- `backend/open_webui/static/favicon.ico`, `favicon.png` — fork favicons, **but see §11: they are inert.** `config.py` deletes every loose file in `STATIC_DIR` at import and repopulates from the frontend build, so these are overwritten on every startup. Image assets therefore belong in the frontend `static/` tree; **everything expressible as CSS belongs in `ui.custom_css` instead** (§1, `routers/custom_css.py`) — that survives restarts and needs no image rebuild.
 - `static/pyodide/pyodide-lock.json` — regenerated by build; prefer `--theirs` then rebuild.
 
 ## 9. Customer branches currently in flight

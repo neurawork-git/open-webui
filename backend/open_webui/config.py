@@ -3088,6 +3088,9 @@ DEFAULT_CONFIG = {
     'ui.pending_user_overlay_title': PENDING_USER_OVERLAY_TITLE,
     'ui.pending_user_overlay_content': PENDING_USER_OVERLAY_CONTENT,
     'ui.watermark': RESPONSE_WATERMARK,
+    # FORK: runtime-editable custom CSS, served at /static/custom.css by
+    # routers/custom_css.py. Empty means "no custom styling".
+    'ui.custom_css': '',
     'user.permissions': USER_PERMISSIONS,
     'folders.enable': ENABLE_FOLDERS,
     'folders.max_file_count': FOLDER_MAX_FILE_COUNT,

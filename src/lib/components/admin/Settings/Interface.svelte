@@ -13,6 +13,8 @@
 	import AdminSettingField from './AdminSettingField.svelte';
 	import AdminSettingRow from './AdminSettingRow.svelte';
 	import AdminSettingSection from './AdminSettingSection.svelte';
+	// FORK: live custom CSS editor — self-contained, saved via the parent's Save button.
+	import CustomCss from './CustomCss.svelte';
 	import { config as appConfig } from '$lib/stores';
 
 	const dispatch = createEventDispatcher();
@@ -49,10 +51,14 @@
 		CONTEXT_COMPACTION_PROMPT_TEMPLATE: ''
 	};
 
+	// FORK: bound to the custom CSS section below; saved alongside the rest.
+	let customCssRef: CustomCss;
+
 	const updateInterfaceHandler = async () => {
 		[taskConfig, chatConfig] = await Promise.all([
 			updateTaskConfig(localStorage.token, taskConfig),
-			updateChatConfig(localStorage.token, chatConfig)
+			updateChatConfig(localStorage.token, chatConfig),
+			customCssRef?.save()
 		]);
 		appConfig.update((current) =>
 			current
@@ -505,6 +511,12 @@
 						placeholder={$i18n.t('Leave empty to use the default prompt, or enter a custom prompt')}
 					/>
 				</AdminSettingField>
+			</AdminSettingSection>
+
+			<!-- FORK: live custom CSS — lets an instance be re-branded at runtime
+			     instead of maintaining a design fork per customer. -->
+			<AdminSettingSection title={$i18n.t('Appearance')}>
+				<CustomCss bind:this={customCssRef} />
 			</AdminSettingSection>
 		</div>
 

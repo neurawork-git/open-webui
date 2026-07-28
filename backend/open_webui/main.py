@@ -145,6 +145,7 @@ from open_webui.routers import (
     channels,
     chats,
     configs,
+    custom_css,
     evaluations,
     files,
     folders,
@@ -795,6 +796,13 @@ app.include_router(audio.router, prefix='/api/v1/audio', tags=['audio'])
 app.include_router(retrieval.router, prefix='/api/v1/retrieval', tags=['retrieval'])
 
 app.include_router(configs.router, prefix='/api/v1/configs', tags=['configs'])
+
+# FORK: runtime-editable custom CSS. Deliberately mounted without a prefix — the router
+# owns /static/custom.css (the URL app.html already links) as well as its /api/v1 pair.
+# It MUST stay registered ahead of `app.mount('/static', ...)` further down this file,
+# otherwise the static mount shadows the route and branding silently reverts to the
+# empty file. Locked by test/custom_css/test_custom_css.py.
+app.include_router(custom_css.router, tags=['custom-css'])
 
 app.include_router(auths.router, prefix='/api/v1/auths', tags=['auths'])
 app.include_router(users.router, prefix='/api/v1/users', tags=['users'])
