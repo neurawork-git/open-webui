@@ -10,6 +10,7 @@
 
     { "id": "T1-models-api", "tier": 1, "name": "GET /api/models liefert nicht-leere Liste", "surface": ["backend/open_webui/routers/models.py", "backend/open_webui/routers/openai.py", "backend/open_webui/routers/ollama.py"] },
     { "id": "T1-kb-api",     "tier": 1, "name": "GET /api/v1/knowledge liefert Sammlungen", "surface": ["backend/open_webui/routers/knowledge.py", "backend/open_webui/models/knowledge.py"] },
+    { "id": "T1-custom-css", "tier": 1, "name": "Live-Custom-CSS: /static/custom.css kommt aus der DB (nosniff+ETag statt StaticFiles), POST-Round-Trip, 256-KiB-Cap, 401 ohne Token", "surface": ["backend/open_webui/routers/custom_css.py", "src/lib/apis/custom-css", "src/lib/components/admin/Settings/CustomCss.svelte"] },
 
     { "id": "D1-auth",       "tier": 2, "name": "Login/Session, kein /auth-Redirect, Username korrekt", "surface": ["src/routes/auth", "src/lib/apis/auths"] },
     { "id": "D2-chat",       "tier": 2, "name": "Chat-Inferenz E2E (Prompt -> Antwort, persistiert, Auto-Titel)", "surface": ["src/lib/components/chat", "backend/open_webui/utils/middleware.py"] },

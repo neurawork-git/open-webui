@@ -134,45 +134,45 @@
       "checks": {
         "T0-image": {
           "result": "pass",
-          "tag": "git-f156336",
+          "tag": "git-f009b4b",
           "commit": "",
-          "note": "neuraworkacr.azurecr.io/open-webui:git-f156336",
-          "at": "2026-07-27T21:37:18Z"
+          "note": "neuraworkacr.azurecr.io/open-webui:git-f009b4b",
+          "at": "2026-07-28T01:19:11Z"
         },
         "T0-rollout": {
           "result": "pass",
-          "tag": "git-f156336",
+          "tag": "git-f009b4b",
           "commit": "",
           "note": "",
-          "at": "2026-07-27T21:37:19Z"
+          "at": "2026-07-28T01:19:11Z"
         },
         "T0-migration": {
           "result": "pass",
-          "tag": "git-f156336",
+          "tag": "git-f009b4b",
           "commit": "",
           "note": "",
-          "at": "2026-07-27T21:37:31Z"
+          "at": "2026-07-28T01:19:22Z"
         },
         "T0-health": {
           "result": "pass",
-          "tag": "git-f156336",
+          "tag": "git-f009b4b",
           "commit": "",
           "note": "",
-          "at": "2026-07-27T21:37:31Z"
+          "at": "2026-07-28T01:19:22Z"
         },
         "T0-version": {
           "result": "pass",
-          "tag": "git-f156336",
+          "tag": "git-f009b4b",
           "commit": "",
           "note": "{\"version\":\"0.11.0\",\"deployment_id\":\"\"}",
-          "at": "2026-07-27T21:37:31Z"
+          "at": "2026-07-28T01:19:22Z"
         },
         "T0-config": {
           "result": "pass",
-          "tag": "git-f156336",
+          "tag": "git-f009b4b",
           "commit": "",
           "note": "",
-          "at": "2026-07-27T21:37:32Z"
+          "at": "2026-07-28T01:19:23Z"
         },
         "D1-auth": {
           "result": "pass",
@@ -215,6 +215,13 @@
           "commit": "",
           "note": "",
           "at": "2026-07-27T21:37:33Z"
+        },
+        "T1-custom-css": {
+          "result": "pass",
+          "tag": "git-f009b4b",
+          "commit": "",
+          "note": "In-Pod-Round-Trip gegen Postgres: GET stylesheet 200 mit nosniff+eigenem ETag (Route schlaegt /static-Mount), POST -> Stylesheet identisch, 300 KiB -> 400, ohne Token -> 401, danach auf leer zurueckgesetzt",
+          "at": "2026-07-28T01:21:00Z"
         }
       }
     }
