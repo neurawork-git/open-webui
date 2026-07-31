@@ -10,7 +10,13 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.events import EVENTS, publish_event
-from open_webui.env import ENABLE_PROFILE_IMAGE_URL_FORWARDING, PROFILE_IMAGE_ALLOWED_MIME_TYPES, STATIC_DIR
+from open_webui.env import (
+    ENABLE_LDAP_CREDENTIAL_STORE,
+    ENABLE_PROFILE_IMAGE_URL_FORWARDING,
+    PROFILE_IMAGE_ALLOWED_MIME_TYPES,
+    STATIC_DIR,
+)
+from open_webui.models.user_credentials import UserCredentialStatusResponse
 from open_webui.internal.db import get_async_session
 from open_webui.models.auths import Auths
 from open_webui.models.config import Config
@@ -362,6 +368,82 @@ async def update_user_settings_by_session_user(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=ERROR_MESSAGES.USER_NOT_FOUND,
         )
+
+
+############################
+# LDAP credential store (fork) — own account only
+############################
+#
+# Deliberately minimal, and deliberately write/delete only. No endpoint returns the
+# secret, not even to an admin. The admin LDAP config endpoint in routers/auths.py does
+# hand back the bind password in clear (`LdapServerConfig.app_dn_password`); that mistake
+# is not repeated here.
+
+
+class CredentialOptInForm(BaseModel):
+    opted_in: bool
+
+
+@router.get('/user/credentials/status', response_model=UserCredentialStatusResponse)
+async def get_own_credential_status(
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Metadata only: whether a credential exists, for which account, until when."""
+    if not ENABLE_LDAP_CREDENTIAL_STORE:
+        return UserCredentialStatusResponse(exists=False, opted_in=False)
+
+    from open_webui.models.user_credentials import get_user_credentials
+
+    return await get_user_credentials().get_status(user.id, db=db)
+
+
+@router.post('/user/credentials/opt-in', response_model=UserCredentialStatusResponse)
+async def set_own_credential_opt_in(
+    form_data: CredentialOptInForm,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Turn credential storage off (or back on) for one's own account.
+
+    Storing is the default while the feature is enabled, so this exists mainly to switch
+    it OFF. The refusal is persisted: without it the next LDAP login would simply store
+    again and `DELETE /user/credentials/ad` would be meaningless. Turning it off deletes
+    any stored secret immediately."""
+    if not ENABLE_LDAP_CREDENTIAL_STORE:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail='The credential store is not enabled on this instance.',
+        )
+
+    from open_webui.models.user_credentials import get_user_credentials
+
+    credentials = get_user_credentials()
+    if not await credentials.set_opt_in(user.id, form_data.opted_in, db=db):
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail='Could not update the credential consent.',
+        )
+    log.info('User %s set credential opt-in to %s', user.id, form_data.opted_in)
+    return await credentials.get_status(user.id, db=db)
+
+
+@router.delete('/user/credentials/ad')
+async def delete_own_credential(
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Delete one's own stored credential immediately."""
+    if not ENABLE_LDAP_CREDENTIAL_STORE:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail='The credential store is not enabled on this instance.',
+        )
+
+    from open_webui.models.user_credentials import get_user_credentials
+
+    log.info('User %s deleted their stored AD credential', user.id)
+    return {'success': await get_user_credentials().delete(user.id, db=db)}
 
 
 ############################

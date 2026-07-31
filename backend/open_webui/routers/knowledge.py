@@ -31,7 +31,6 @@ from open_webui.models.knowledge import (
     KnowledgeUserResponse,
 )
 from open_webui.models.models import ModelForm, Models
-from open_webui.models.oauth_sessions import OAuthSessions
 from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
 from open_webui.retrieval.external import retrieve_external_knowledge, retrieve_external_knowledge_for_connection
 from open_webui.routers.files import upload_file_handler
@@ -48,10 +47,16 @@ from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.graph_client import (
     GraphChildItem,
     GraphChildrenListing,
-    GraphClient,
     GraphFileItem,
     GraphFolderListing,
     GraphSiteListing,
+)
+from open_webui.env import SHAREPOINT_BACKEND
+from open_webui.utils.sharepoint_backend import (
+    SharePointBackend,
+    forget_credential_after_rejection,
+    get_sharepoint_backend,
+    is_onprem,
 )
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -2428,73 +2433,66 @@ async def _assert_knowledge_write_access(knowledge, user, db):
         )
 
 
-async def _get_microsoft_access_token(request: Request, user, db) -> str:
-    """Fetch the user's Microsoft OAuth access token, refreshing if expiring.
+async def _translate_graph_error(e: httpx.HTTPStatusError, user=None, db=None) -> HTTPException:
+    """Normalise SharePoint backend errors to HTTPExceptions with hints.
 
-    Uses OAuthManager (the manager that actually owns the Microsoft client
-    via OAUTH_PROVIDERS['microsoft']) and its existing session-id-based
-    get_oauth_token path — so refresh + delete-on-fail policy stay in one
-    place. Session id comes from the oauth_session_id cookie set at login;
-    if that cookie is gone we fall back to the newest stored Microsoft
-    session for this user. No new refresh code is added here.
+    The advice differs per backend: telling an on-prem user to grant Files.Read.All would
+    send them after a Graph scope that does not exist on their farm.
+
+    On an on-prem 401 this also *drops* the stored credential. That is the single place the
+    no-retry policy lives: a stale password must never get a second attempt, because the
+    farm's failed NTLM logon increments the same badPwdCount as an LDAP bind.
     """
-    oauth_manager = getattr(request.app.state, 'oauth_manager', None)
-    if oauth_manager is None:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail='OAuth manager not initialised.',
-        )
+    onprem = is_onprem()
 
-    session_id = request.cookies.get('oauth_session_id')
-    if not session_id:
-        fallback = await OAuthSessions.get_session_by_provider_and_user_id(
-            provider='microsoft', user_id=user.id, db=db
-        )
-        session_id = fallback.id if fallback else None
-
-    if not session_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail='No Microsoft OAuth session found. Please log in with Microsoft SSO first.',
-        )
-
-    token = await oauth_manager.get_oauth_token(user.id, session_id)
-    access_token = token.get('access_token') if isinstance(token, dict) else None
-    if access_token:
-        return access_token
-
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail=(
-            'Microsoft OAuth token could not be retrieved or refreshed. '
-            'Sign out of Open WebUI and sign back in via Microsoft to '
-            're-establish the session.'
-        ),
-    )
-
-
-def _translate_graph_error(e: httpx.HTTPStatusError) -> HTTPException:
-    """Normalise Microsoft Graph API errors to HTTPExceptions with hints."""
     if e.response.status_code == 401:
+        if onprem:
+            if user is not None:
+                await forget_credential_after_rejection(user.id, db=db)
+            # Do NOT invite a retry here. A failed NTLM logon counts against the same
+            # badPwdCount as a failed LDAP bind (5 attempts / 15 min lockout on this
+            # domain), so a user hammering the button can lock their own account.
+            return HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=(
+                    'SharePoint hat die Anmeldung abgelehnt. Das hinterlegte AD-Kennwort '
+                    'wurde entfernt. Bitte neu an Open WebUI anmelden — nicht wiederholt '
+                    'versuchen, Fehlversuche zaehlen gegen die Kontosperre.'
+                ),
+            )
         return HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail='Microsoft token expired. Please re-login with Microsoft SSO.',
         )
+
     if e.response.status_code == 403:
+        if onprem:
+            return HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    'Angemeldet, aber keine Berechtigung fuer diese Ressource — '
+                    'so soll es sein.'
+                ),
+            )
         return HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail='Access denied by Microsoft Graph API. Ensure Files.Read.All and Sites.Read.All scopes are granted.',
         )
+
     return HTTPException(
         status_code=status.HTTP_502_BAD_GATEWAY,
-        detail=f'Microsoft Graph API error: {e.response.status_code}',
+        detail=(
+            f'SharePoint error: {e.response.status_code}'
+            if onprem
+            else f'Microsoft Graph API error: {e.response.status_code}'
+        ),
     )
 
 
 async def _import_single_graph_file(
     request: Request,
     knowledge_id: str,
-    graph: GraphClient,
+    graph: SharePointBackend,
     graph_file: GraphFileItem,
     user,
     db: AsyncSession,
@@ -2556,7 +2554,7 @@ async def _import_single_graph_file(
 async def _import_graph_files(
     request: Request,
     knowledge_id: str,
-    graph: GraphClient,
+    graph: SharePointBackend,
     files: list[GraphFileItem],
     user,
     db: AsyncSession,
@@ -2588,6 +2586,10 @@ async def _import_graph_files(
 
 async def _persist_sharepoint_source(knowledge, source: dict, db):
     meta = knowledge.meta or {}
+    # Record which backend produced these ids. Graph ids and on-prem ids are
+    # indistinguishable by inspection, so a re-import after a config change would
+    # otherwise resolve them against a system that never issued them.
+    source = {**source, 'backend': SHAREPOINT_BACKEND}
     meta['sharepoint_source'] = source
     await Knowledges.update_knowledge_by_id(
         id=knowledge.id,
@@ -2647,12 +2649,11 @@ async def import_sharepoint_folder(
     knowledge = await Knowledges.get_knowledge_by_id(id=id, db=db)
     await _assert_knowledge_write_access(knowledge, user, db)
 
-    access_token = await _get_microsoft_access_token(request, user, db)
-    graph = GraphClient(access_token)
+    graph = await get_sharepoint_backend(request, user, db)
     try:
         listing = await graph.list_folder(form_data.drive_id, form_data.item_id)
     except httpx.HTTPStatusError as e:
-        raise _translate_graph_error(e)
+        raise await _translate_graph_error(e, user, db)
 
     await _enforce_sharepoint_size_limit(request, listing.files)
 
@@ -2704,12 +2705,11 @@ async def import_sharepoint_site(
     knowledge = await Knowledges.get_knowledge_by_id(id=id, db=db)
     await _assert_knowledge_write_access(knowledge, user, db)
 
-    access_token = await _get_microsoft_access_token(request, user, db)
-    graph = GraphClient(access_token)
+    graph = await get_sharepoint_backend(request, user, db)
     try:
         listing = await graph.list_site(form_data.site_id)
     except httpx.HTTPStatusError as e:
-        raise _translate_graph_error(e)
+        raise await _translate_graph_error(e, user, db)
 
     await _enforce_sharepoint_size_limit(request, listing.files)
 
@@ -2803,12 +2803,11 @@ async def list_sharepoint_folder(
     knowledge = await Knowledges.get_knowledge_by_id(id=id, db=db)
     await _assert_knowledge_write_access(knowledge, user, db)
 
-    access_token = await _get_microsoft_access_token(request, user, db)
-    graph = GraphClient(access_token)
+    graph = await get_sharepoint_backend(request, user, db)
     try:
         listing = await graph.list_folder(form_data.drive_id, form_data.item_id)
     except httpx.HTTPStatusError as e:
-        raise _translate_graph_error(e)
+        raise await _translate_graph_error(e, user, db)
 
     await _enforce_sharepoint_size_limit(request, listing.files)
 
@@ -2840,12 +2839,11 @@ async def list_sharepoint_site(
     knowledge = await Knowledges.get_knowledge_by_id(id=id, db=db)
     await _assert_knowledge_write_access(knowledge, user, db)
 
-    access_token = await _get_microsoft_access_token(request, user, db)
-    graph = GraphClient(access_token)
+    graph = await get_sharepoint_backend(request, user, db)
     try:
         listing = await graph.list_site(form_data.site_id)
     except httpx.HTTPStatusError as e:
-        raise _translate_graph_error(e)
+        raise await _translate_graph_error(e, user, db)
 
     await _enforce_sharepoint_size_limit(request, listing.files)
 
@@ -2896,15 +2894,14 @@ async def import_sharepoint_file(
     knowledge = await Knowledges.get_knowledge_by_id(id=id, db=db)
     await _assert_knowledge_write_access(knowledge, user, db)
 
-    access_token = await _get_microsoft_access_token(request, user, db)
-    graph = GraphClient(access_token)
+    graph = await get_sharepoint_backend(request, user, db)
 
     # Re-resolve metadata from Graph instead of trusting frontend-echoed
     # values — the file may have been renamed between list and import.
     try:
         graph_file = await graph.get_file_metadata(form_data.drive_id, form_data.item_id, form_data.path)
     except httpx.HTTPStatusError as e:
-        raise _translate_graph_error(e)
+        raise await _translate_graph_error(e, user, db)
 
     display_name = _build_display_filename(graph_file.path, graph_file.name)
     try:
@@ -2970,12 +2967,11 @@ async def search_sharepoint_sites(
     Thin wrapper over Graph `/sites?search=...`. Used by the custom picker
     to surface matches while the user types.
     """
-    access_token = await _get_microsoft_access_token(request, user, db)
-    graph = GraphClient(access_token)
+    graph = await get_sharepoint_backend(request, user, db)
     try:
         results = await graph.search_sites(query)
     except httpx.HTTPStatusError as e:
-        raise _translate_graph_error(e)
+        raise await _translate_graph_error(e, user, db)
 
     return [SharePointSiteSearchResult(**r) for r in results]
 
@@ -2999,12 +2995,11 @@ async def list_sharepoint_sites(
     pass the opaque `next_link` returned in the previous response. Omit both
     to get the first wildcard page.
     """
-    access_token = await _get_microsoft_access_token(request, user, db)
-    graph = GraphClient(access_token)
+    graph = await get_sharepoint_backend(request, user, db)
     try:
         page = await graph.list_sites_paginated(query=query, next_link=next_link)
     except httpx.HTTPStatusError as e:
-        raise _translate_graph_error(e)
+        raise await _translate_graph_error(e, user, db)
     return SharePointSitesPage(
         sites=[SharePointSiteSearchResult(**s) for s in page['sites']],
         next_link=page['next_link'],
@@ -3033,12 +3028,11 @@ async def list_sharepoint_site_drives(
     db: AsyncSession = Depends(get_async_session),
 ):
     """List all document libraries (drives) of a SharePoint site with size."""
-    access_token = await _get_microsoft_access_token(request, user, db)
-    graph = GraphClient(access_token)
+    graph = await get_sharepoint_backend(request, user, db)
     try:
         summary = await graph.list_site_drives_summary(site_id)
     except httpx.HTTPStatusError as e:
-        raise _translate_graph_error(e)
+        raise await _translate_graph_error(e, user, db)
 
     return SharePointSiteDrivesResponse(
         site_name=summary['site_name'],
@@ -3084,12 +3078,11 @@ async def list_sharepoint_folder_children(
     response returned. Sizes are pulled from Graph's `driveItem.size` so no
     recursive walk is required.
     """
-    access_token = await _get_microsoft_access_token(request, user, db)
-    graph = GraphClient(access_token)
+    graph = await get_sharepoint_backend(request, user, db)
     try:
         listing = await graph.list_folder_children(drive_id, item_id, next_link=next_link)
     except httpx.HTTPStatusError as e:
-        raise _translate_graph_error(e)
+        raise await _translate_graph_error(e, user, db)
 
     return SharePointChildrenResponse(
         parent_name=listing.parent_name,
@@ -3122,6 +3115,19 @@ async def reimport_sharepoint_folder(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail='No SharePoint source configured for this knowledge base. Import a folder or site first.',
+        )
+
+    # Sources recorded before this field existed have no 'backend' -- those predate the
+    # on-prem path and can only be Graph, so a missing value is treated as 'graph'.
+    source_backend = source.get('backend', 'graph')
+    if source_backend != SHAREPOINT_BACKEND:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"This knowledge base was imported from the '{source_backend}' SharePoint "
+                f"backend, but this instance is now configured for '{SHAREPOINT_BACKEND}'. "
+                'The stored item ids are not valid there. Re-import the source instead.'
+            ),
         )
 
     source_type = source.get('type', 'folder')
