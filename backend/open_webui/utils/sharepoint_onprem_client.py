@@ -29,10 +29,12 @@ Therefore folders and files go through the classic `_api/web` route, which retur
 data for every library above. `/_api/v2.0/sites/...` is kept only for site enumeration,
 where it is proven.
 
-Identifiers: `drive_id` and `item_id` carry SERVER-RELATIVE URLs (e.g.
-`/Dokumente zur Befragung`), not opaque Graph ids. They are stable while nothing is
-renamed or moved; `knowledge.meta.sharepoint_source.backend` records which backend issued
-them so a re-import cannot resolve them against the wrong system.
+Identifiers: outwards, `drive_id` and `item_id` are opaque `spo_<base64url>` tokens that
+wrap a server-relative URL (see `encode_id`). They must not contain slashes, because they
+travel as FastAPI *path* parameters. Underneath they are paths, so they break when an item
+is renamed or moved -- a re-import then reports the file as missing.
+`knowledge.meta.sharepoint_source.backend` records which backend issued them, so a
+re-import cannot resolve them against the wrong system.
 
 Other measured behaviour worth keeping in mind:
   /_api/web/currentUser                  200  identity, `i:0#.w|skkiel\\user`
@@ -97,6 +99,36 @@ MIME_BY_EXTENSION = {
 
 def _mime_for(name: str) -> Optional[str]:
     return MIME_BY_EXTENSION.get(name.rsplit('.', 1)[-1].lower()) if '.' in name else None
+
+
+ID_PREFIX = 'spo_'
+
+
+def encode_id(server_relative_url: str) -> str:
+    """Server-relative URL -> opaque id without slashes.
+
+    Necessary, not cosmetic: `drive_id` and `item_id` travel as FastAPI *path* parameters
+    (`/sharepoint/drives/{drive_id}/items/{item_id}/children`), and a path parameter does
+    not match `/`. Handing out `/Dokumente zur Befragung` makes that route unreachable.
+    Percent-encoding is not a way out either -- many reverse proxies reject or normalise
+    %2F before it ever reaches the app.
+
+    The prefix also keeps the two worlds apart: a Graph id fed to this backend is
+    recognisable as foreign instead of being sent to the farm as a path.
+    """
+    raw = base64.urlsafe_b64encode(server_relative_url.encode()).decode().rstrip('=')
+    return f'{ID_PREFIX}{raw}'
+
+
+def decode_id(value: str) -> str:
+    """Opaque id -> server-relative URL. Raises on anything not issued by this backend."""
+    if not value.startswith(ID_PREFIX):
+        raise ValueError(
+            f'Not an on-prem SharePoint id: {value[:40]!r}. This knowledge base was most '
+            f'likely imported from Microsoft Graph.'
+        )
+    raw = value[len(ID_PREFIX) :]
+    return base64.urlsafe_b64decode(raw + '=' * (-len(raw) % 4)).decode()
 
 
 def _quote_path(server_relative_url: str) -> str:
@@ -337,10 +369,10 @@ class SharePointOnPremClient:
                 continue
             drives.append(
                 {
-                    'id': root_url,
+                    'id': encode_id(root_url),
                     'name': lst.get('Title') or root_url,
                     'drive_type': 'documentLibrary',
-                    'root_item_id': root_url,
+                    'root_item_id': encode_id(root_url),
                     # The farm reports no per-library byte total, and summing every file
                     # would mean walking every library just to draw a picker. ItemCount
                     # is what it does give us.
@@ -378,7 +410,7 @@ class SharePointOnPremClient:
             name = item.get('Name', '')
             files.append(
                 GraphFileItem(
-                    id=item.get('ServerRelativeUrl', ''),
+                    id=encode_id(item.get('ServerRelativeUrl', '')),
                     name=name,
                     size=int(item.get('Length') or 0),
                     content_type=_mime_for(name),
@@ -406,7 +438,7 @@ class SharePointOnPremClient:
     async def list_folder(
         self, drive_id: str, item_id: str, max_files: int = DEFAULT_MAX_FILES
     ) -> GraphFolderListing:
-        root = item_id or drive_id
+        root = decode_id(item_id or drive_id)
         meta = await self._read_folder(root)
 
         files: list[GraphFileItem] = []
@@ -430,7 +462,7 @@ class SharePointOnPremClient:
     ) -> GraphChildrenListing:
         # The classic Folders/Files collections return in one response; there is no
         # continuation token, so next_link is always None going out.
-        data = await self._read_folder(item_id or drive_id)
+        data = await self._read_folder(decode_id(item_id or drive_id))
 
         folders: list[GraphChildItem] = []
         for sub in data.get('Folders') or []:
@@ -439,7 +471,7 @@ class SharePointOnPremClient:
                 continue
             folders.append(
                 GraphChildItem(
-                    id=sub.get('ServerRelativeUrl', ''),
+                    id=encode_id(sub.get('ServerRelativeUrl', '')),
                     name=name,
                     is_folder=True,
                     size=0,
@@ -452,7 +484,7 @@ class SharePointOnPremClient:
             name = item.get('Name', '')
             files.append(
                 GraphChildItem(
-                    id=item.get('ServerRelativeUrl', ''),
+                    id=encode_id(item.get('ServerRelativeUrl', '')),
                     name=name,
                     is_folder=False,
                     size=int(item.get('Length') or 0),
@@ -488,7 +520,7 @@ class SharePointOnPremClient:
             )
             try:
                 truncated = await self._walk(
-                    drive['id'], f'{drive["name"]}/', files, drive['id'], max_files
+                    decode_id(drive['id']), f'{drive["name"]}/', files, drive['id'], max_files
                 )
             except httpx.HTTPStatusError as e:
                 # One unreadable library must not abort the whole site import.
@@ -515,8 +547,9 @@ class SharePointOnPremClient:
     async def get_file_metadata(
         self, drive_id: str, item_id: str, path: str = ''
     ) -> GraphFileItem:
+        path_url = decode_id(item_id)
         data = await self._get_json(
-            f"/_api/web/GetFileByServerRelativeUrl('{_quote_path(item_id)}')"
+            f"/_api/web/GetFileByServerRelativeUrl('{_quote_path(path_url)}')"
             f'?$select=Name,Length,ServerRelativeUrl,UniqueId'
         )
         name = data.get('Name', '')
@@ -537,5 +570,5 @@ class SharePointOnPremClient:
 
     async def download_file_by_id(self, drive_id: str, item_id: str) -> bytes:
         return await self._get_bytes(
-            f"/_api/web/GetFileByServerRelativeUrl('{_quote_path(item_id)}')/$value"
+            f"/_api/web/GetFileByServerRelativeUrl('{_quote_path(decode_id(item_id))}')/$value"
         )

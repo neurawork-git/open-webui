@@ -15,6 +15,8 @@ from open_webui.utils.sharepoint_onprem_client import (
     NtlmAuth,
     SharePointOnPremClient,
     _parse_ntlm_challenge,
+    decode_id,
+    encode_id,
 )
 
 BASE = 'https://portal.example.intern'
@@ -34,10 +36,12 @@ def _make_client(handler, with_auth: bool = False) -> SharePointOnPremClient:
     )
 
 
-LIB = '/Dokumente zur Befragung'
+LIB_PATH = '/Dokumente zur Befragung'
+# Ids handed to the client are always the opaque form -- that is what the routes carry.
+LIB = encode_id(LIB_PATH)
 
 
-def _file(name: str, folder: str = LIB, size: int = 1024):
+def _file(name: str, folder: str = LIB_PATH, size: int = 1024):
     """A file as the classic `_api/web` route returns it."""
     return {
         'Name': name,
@@ -47,7 +51,7 @@ def _file(name: str, folder: str = LIB, size: int = 1024):
     }
 
 
-def _folder(name: str, parent: str = LIB, item_count: int = 2):
+def _folder(name: str, parent: str = LIB_PATH, item_count: int = 2):
     return {
         'Name': name,
         'ServerRelativeUrl': f'{parent}/{name}',
@@ -155,6 +159,30 @@ class TestNtlmHandshake:
 # ---------------------------------------------------------------------------
 
 
+class TestIdentifiers:
+    """Found by an end-to-end run, not by unit tests: `drive_id` and `item_id` travel as
+    FastAPI *path* parameters, and a path parameter does not match `/`. Handing out raw
+    server-relative URLs made `/sharepoint/drives/{drive_id}/items/{item_id}/children`
+    unreachable on-prem."""
+
+    def test_ids_never_contain_a_slash(self):
+        for path in ['/Freigegebene Dokumente', '/a/b/c.pdf', "/Mitarbeiter's/x.pdf"]:
+            assert '/' not in encode_id(path), path
+
+    def test_roundtrip_survives_spaces_umlauts_and_quotes(self):
+        for path in [
+            '/Dokumente zur Befragung/FAQ.pdf',
+            '/Prüfung/Änderung & Co.pdf',
+            "/Mitarbeiter's.pdf",
+        ]:
+            assert decode_id(encode_id(path)) == path
+
+    def test_a_graph_id_is_rejected_before_any_request(self):
+        """A Graph id must not be sent to the farm as a path."""
+        with pytest.raises(ValueError, match='Not an on-prem SharePoint id'):
+            decode_id('01PDQZT256Y2GOVW7725BZO354PWSELRRZ')
+
+
 class TestEndpoints:
     @pytest.mark.asyncio
     async def test_accept_header_has_no_odata_suffix(self):
@@ -175,7 +203,7 @@ class TestEndpoints:
         def handler(request: httpx.Request) -> httpx.Response:
             seen.append(str(request.url))
             return httpx.Response(
-                200, json=_folder_payload('Dokumente zur Befragung', LIB, files=[_file('a.pdf')])
+                200, json=_folder_payload('Dokumente zur Befragung', LIB_PATH, files=[_file('a.pdf')])
             )
 
         listing = await _make_client(handler).list_folder_children(LIB, '')
@@ -183,18 +211,18 @@ class TestEndpoints:
         assert 'GetFolderByServerRelativeUrl' in seen[0]
         assert 'Folders,Files' in seen[0]
         assert [f.name for f in listing.files] == ['a.pdf']
-        assert listing.files[0].id == f'{LIB}/a.pdf'
+        assert listing.files[0].id == encode_id(f'{LIB_PATH}/a.pdf')
 
     @pytest.mark.asyncio
     async def test_subfolder_is_addressed_by_its_server_relative_url(self):
         seen = []
-        sub = f'{LIB}/Unterordner'
+        sub = f'{LIB_PATH}/Unterordner'
 
         def handler(request: httpx.Request) -> httpx.Response:
             seen.append(str(request.url))
             return httpx.Response(200, json=_folder_payload('Unterordner', sub))
 
-        await _make_client(handler).list_folder_children(LIB, sub)
+        await _make_client(handler).list_folder_children(LIB, encode_id(sub))
         assert 'Unterordner' in seen[0]
 
     @pytest.mark.asyncio
@@ -208,11 +236,11 @@ class TestEndpoints:
                 json=_folder_payload(
                     'Bilder',
                     '/PublishingImages',
-                    folders=[_folder('Forms'), _folder('_t'), _folder('_w'), _folder('Echt')],
+                    folders=[_folder('Forms', '/PublishingImages'), _folder('_t', '/PublishingImages'), _folder('_w', '/PublishingImages'), _folder('Echt', '/PublishingImages')],
                 ),
             )
 
-        listing = await _make_client(handler).list_folder_children('/PublishingImages', '')
+        listing = await _make_client(handler).list_folder_children(encode_id('/PublishingImages'), '')
         assert [f.name for f in listing.folders] == ['Echt']
 
     @pytest.mark.asyncio
@@ -222,7 +250,7 @@ class TestEndpoints:
             assert 'GetFileByServerRelativeUrl' in url and url.endswith('/$value')
             return httpx.Response(200, content=b'%PDF-1.7 bytes')
 
-        blob = await _make_client(handler).download_file_by_id(LIB, f'{LIB}/a.pdf')
+        blob = await _make_client(handler).download_file_by_id(LIB, encode_id(f'{LIB_PATH}/a.pdf'))
         assert blob == b'%PDF-1.7 bytes'
 
     @pytest.mark.asyncio
@@ -235,7 +263,7 @@ class TestEndpoints:
             seen.append(str(request.url))
             return httpx.Response(200, content=b'x')
 
-        await _make_client(handler).download_file_by_id(LIB, f"{LIB}/Mitarbeiter's.pdf")
+        await _make_client(handler).download_file_by_id(LIB, encode_id(f"{LIB_PATH}/Mitarbeiter's.pdf"))
         assert "''" in seen[0]
 
     @pytest.mark.asyncio
@@ -245,14 +273,14 @@ class TestEndpoints:
                 return httpx.Response(
                     200,
                     json=_folder_payload(
-                        'Sub', f'{LIB}/Sub', files=[_file('inner.pdf', f'{LIB}/Sub')]
+                        'Sub', f'{LIB_PATH}/Sub', files=[_file('inner.pdf', f'{LIB_PATH}/Sub')]
                     ),
                 )
             return httpx.Response(
                 200,
                 json=_folder_payload(
                     'Dokumente zur Befragung',
-                    LIB,
+                    LIB_PATH,
                     folders=[_folder('Sub')],
                     files=[_file('top.pdf')],
                 ),
@@ -272,7 +300,7 @@ class TestEndpoints:
             return httpx.Response(
                 200,
                 json=_folder_payload(
-                    'Lib', LIB, files=[_file(f'f{i}.pdf') for i in range(10)]
+                    'Lib', LIB_PATH, files=[_file(f'f{i}.pdf') for i in range(10)]
                 ),
             )
 
@@ -287,7 +315,7 @@ class TestEndpoints:
 
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(
-                200, json=_folder_payload('Lib', LIB, files=[_file('a.pdf')])
+                200, json=_folder_payload('Lib', LIB_PATH, files=[_file('a.pdf')])
             )
 
         listing = await _make_client(handler).list_folder(LIB, '')
@@ -366,7 +394,7 @@ class TestEndpoints:
 
         summary = await _make_client(handler).list_site_drives_summary('')
         assert [d['name'] for d in summary['drives']] == ['Dokumente']
-        assert summary['drives'][0]['id'] == '/Freigegebene Dokumente'
+        assert summary['drives'][0]['id'] == encode_id('/Freigegebene Dokumente')
         assert summary['drives'][0]['item_count'] == 3
 
     @pytest.mark.asyncio

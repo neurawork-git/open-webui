@@ -209,8 +209,10 @@ async def _onprem_backend(user_id: str, db=None) -> SharePointBackend:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=(
-                'Kein hinterlegtes AD-Kennwort. Bitte in den Kontoeinstellungen die '
-                'Speicherung bestaetigen und sich anschliessend neu anmelden.'
+                'Kein hinterlegtes AD-Kennwort. Bitte in Open WebUI abmelden und erneut '
+                'per LDAP anmelden — dabei wird das Kennwort wieder hinterlegt. Falls die '
+                'Speicherung in den Kontoeinstellungen deaktiviert wurde, dort zuerst '
+                'wieder aktivieren.'
             ),
         )
 

@@ -3012,6 +3012,10 @@ class SharePointDriveSummary(BaseModel):
     drive_type: str = ''
     root_item_id: str
     total_size: int = 0
+    # On-prem the farm reports no per-library byte total, and summing every file would mean
+    # walking every library just to draw a picker. Item count is what it does give us, so
+    # the UI has something to show. Graph leaves this at 0 and keeps using total_size.
+    item_count: int = 0
 
 
 class SharePointSiteDrivesResponse(BaseModel):
