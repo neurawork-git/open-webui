@@ -112,17 +112,26 @@ und Größen beide falsch, deshalb nicht benutzt.
    Verdoppeln, dann URL-kodieren.
 6. **Systemordner** (`Forms`, `_t`, `_w`, `_catalogs`) werden gefiltert — sonst landen
    Formularvorlagen und Thumbnail-Caches in der Wissensdatenbank.
-7. **Serverrelative URLs brechen beim Umbenennen.** `drive_id`/`item_id` tragen on-prem
-   Pfade, keine opaken IDs. Ein Re-Import nach einer Umbenennung findet die Datei nicht
-   mehr. Bewusst in Kauf genommen; Ausweg wäre `(Listen-GUID, Item-ID)`.
+7. **IDs dürfen keine Slashes enthalten.** `drive_id` und `item_id` reisen als
+   FastAPI-**Pfadparameter**, und die matchen kein `/`. Serverrelative URLs direkt
+   herauszugeben machte `/sharepoint/drives/{drive_id}/items/{item_id}/children`
+   unerreichbar — gefunden erst im End-to-End-Lauf, nicht von den Unit-Tests. Deshalb
+   opake `spo_<base64url>`-Tokens (`encode_id`/`decode_id`). Prozentkodierung ist kein
+   Ausweg: viele Reverse-Proxies normalisieren oder verwerfen `%2F`.
+   Darunter sind es weiterhin Pfade, also **brechen sie beim Umbenennen und Verschieben**;
+   ein Re-Import meldet die Datei dann als fehlend. Ausweg wäre `(Listen-GUID, Item-ID)`.
 8. **Keine Paginierung.** Die klassischen Collections liefern alles in einer Antwort;
    `next_link` ist immer `None`. Grenze ist der List View Threshold (5000). Grösste
    KHKI-Bibliothek: 350 Elemente.
 
 ## 5. Leitplanken (Teil der Abnahme)
 
-1. **Opt-in vor Speicherung.** Ohne Einwilligung wird nichts abgelegt. Die Einwilligung
-   kann vor dem ersten Login gegeben werden — die Zeile existiert dann ohne `secret`.
+1. **Speichern ist der Default, kein Dialog.** Solange das Feature-Flag an ist, legt
+   jeder LDAP-Login das Kennwort ab. Unterdrückt wird das nur durch ein **explizites
+   Opt-out**, das der Nutzer selbst setzt — und das persistiert wird. Ohne diese
+   Persistenz würde der nächste Login eine Löschung sofort rückgängig machen und der
+   Lösch-Endpunkt wäre Theater. Kann der Store den Zustand nicht lesen, wird **nicht**
+   gespeichert (fail closed).
 2. **Harte TTL** (`LDAP_CREDENTIAL_TTL`, Vorschlag 30 Tage). Die Domäne hat
    `maxPwdAge = nie`, Passwörter laufen also nicht von selbst aus; die TTL ist die
    einzige Begrenzung der Verwahrdauer.
@@ -179,6 +188,12 @@ Gegen `portal.skkiel.intern` am 2026-07-31 mit einem echten AD-Konto durchlaufen
 Identität `i:0#.w|skkiel\<konto>` (claims-basiert, **kein Dienstkonto**), 7 Bibliotheken,
 Ordnerlisting, rekursiver Walk, Download byte-genau (226.966 B, `%PDF-1.7`),
 Metadaten-Roundtrip.
+
+Zusätzlich end-to-end über die **echten HTTP-Routen** (ASGI, Session-Nutzer gemockt):
+`/users/user/credentials/status`, `/knowledge/sharepoint/sites`,
+`/sharepoint/sites/{id}/drives`, `/sharepoint/drives/{id}/items/{iid}/children` — letzterer
+liefert die drei echten PDFs. Ebenso geprüft: Opt-out hält über den nächsten Login hinweg,
+und ohne Credential kommt ein sprechender 401.
 
 **Noch offen:** die Gegenprobe mit einem zweiten, geringer berechtigten Konto. Erst sie
 weist die Rechtetrennung nach — ein erfolgreicher Durchlauf mit einem Konto zeigt nur, dass
