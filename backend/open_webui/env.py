@@ -805,6 +805,37 @@ OAUTH_MAX_SESSIONS_PER_USER = int(os.getenv('OAUTH_MAX_SESSIONS_PER_USER', '10')
 # Allows external apps to exchange OAuth tokens for OpenWebUI tokens
 ENABLE_OAUTH_TOKEN_EXCHANGE = os.getenv('ENABLE_OAUTH_TOKEN_EXCHANGE', 'False').lower() == 'true'
 
+####################################
+# LDAP credential store (fork)
+####################################
+# Stores the AD password of an LDAP-authenticated user, encrypted, so tools can reach
+# NTLM-only on-prem services as that user.  Off unless a deployment opts in.
+ENABLE_LDAP_CREDENTIAL_STORE = os.getenv('ENABLE_LDAP_CREDENTIAL_STORE', 'False').lower() == 'true'
+
+# Deliberately NO fallback to WEBUI_SECRET_KEY, unlike the OAuth keys above: session
+# signing and password custody must not hang off the same value, or one rotation
+# destroys both.  Empty means the store refuses to start -- see models/user_credentials.py.
+LDAP_CREDENTIAL_ENCRYPTION_KEY = os.getenv('LDAP_CREDENTIAL_ENCRYPTION_KEY', '')
+
+# How long a stored credential stays usable.  The domain may never expire passwords,
+# so this is the only bound on custody time.
+LDAP_CREDENTIAL_TTL = int(os.getenv('LDAP_CREDENTIAL_TTL', '2592000'))  # 30 days
+
+# NetBIOS domain prefixed to the account name (DOMAIN\user) for NTLM.
+LDAP_NETBIOS_DOMAIN = os.getenv('LDAP_NETBIOS_DOMAIN', '')
+
+####################################
+# SharePoint backend selection (fork)
+####################################
+# 'graph'  -> Microsoft Graph with a delegated OAuth token (cloud, default)
+# 'onprem' -> SharePoint Server SE over NTLM with the user's stored AD credential
+SHAREPOINT_BACKEND = os.getenv('SHAREPOINT_BACKEND', 'graph')
+
+SHAREPOINT_ONPREM_SITE_URL = os.getenv('SHAREPOINT_ONPREM_SITE_URL', '')
+
+# Off only while the farm's internal CA is missing from the container truststore.
+SHAREPOINT_ONPREM_VERIFY_TLS = os.getenv('SHAREPOINT_ONPREM_VERIFY_TLS', 'True').lower() == 'true'
+
 # Back-Channel Logout Configuration
 # When enabled, exposes POST /oauth/backchannel-logout for IdP-initiated logout
 # per OpenID Connect Back-Channel Logout 1.0 spec.
