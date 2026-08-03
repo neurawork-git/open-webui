@@ -180,7 +180,8 @@ Domänencontroller.
 |---|---|
 | `test/test_user_credentials.py` | Krypto (Roundtrip, AAD, Nonce, Tampering), Schlüsselvalidierung, TTL, Upsert, Opt-in, Rotation, **und dass kein Geheimnis in Antwort oder Log landet — inklusive Fehlerpfade** |
 | `test/sharepoint/test_sharepoint_onprem_client.py` | NTLM-Legs, Endpunkt-Mapping, Systemordner-Filter, Apostroph-Escaping, 401-Unterscheidung, Protokoll-Konformität beider Clients |
-| `test/sharepoint/test_sharepoint_import.py` | Bestehende Import-Tests, auf den Resolver umgezogen |
+| `test/sharepoint/test_sharepoint_import_onprem.py` | Die **KB-Import-Endpunkte** über das On-Prem-Backend: Ordner-Import, Einzeldatei, Listing, `backend`-Feld in `sharepoint_source`, 409 beim Re-Import gegen das falsche Backend, und dass ein echter 401 das Credential genau einmal verwirft |
+| `test/sharepoint/test_sharepoint_import.py` | Bestehende Import-Tests (Graph-Pfad), auf den Resolver umgezogen |
 
 ## 8. Live-Verifikation
 
