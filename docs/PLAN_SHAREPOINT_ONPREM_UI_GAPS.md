@@ -8,12 +8,17 @@ gehört zu [`LDAP_SHAREPOINT_BACKEND.md`](LDAP_SHAREPOINT_BACKEND.md).
 
 Alle Befunde sind am laufenden Pod bzw. am Quelltext gemessen, nicht abgeleitet.
 
-| # | Problem | Wirkung | Größe |
-|---|---|---|---|
-| P1 | Picker hängt am OneDrive-/Entra-Gate | **Feature unbenutzbar** | klein |
-| P2 | Kein Frontend für Status/Widerspruch | Widerspruch nur per API | mittel |
-| P3 | Update-Hinweis zeigt Upstream-Release | irreführend | klein |
-| P4 | `feature/owui-0.11.0` existiert nur lokal | Bus-Faktor 1 | organisatorisch |
+| # | Problem | Wirkung | Größe | Stand |
+|---|---|---|---|---|
+| P1 | Picker hängt am OneDrive-/Entra-Gate | **Feature unbenutzbar** | klein | erledigt 2026-08-03 |
+| P2 | Kein Frontend für Status/Widerspruch | Widerspruch nur per API | mittel | erledigt 2026-08-03 |
+| P3 | Update-Hinweis zeigt Upstream-Release | irreführend | klein | erledigt 2026-08-03 |
+| P4 | `feature/owui-0.11.0` existiert nur lokal | Bus-Faktor 1 | organisatorisch | hinfällig, siehe unten |
+
+> **Nachtrag 2026-08-03.** P1–P3 sind auf `feature/ldap-sharepoint-credential` (0.10.2)
+> umgesetzt; Umsetzungsbericht in
+> [`.claude/PRPs/reports/PLAN_SHAREPOINT_ONPREM_UI_GAPS-report.md`](../.claude/PRPs/reports/PLAN_SHAREPOINT_ONPREM_UI_GAPS-report.md).
+> P4 war beim Schreiben dieses Plans bereits überholt — die Messung dazu steht unten.
 
 ---
 
@@ -78,10 +83,17 @@ kaputter Menüpunkt ist schlechter als gar keiner.
 
 ### Erledigt, wenn
 
-- [ ] `/api/config` liefert `enable_sharepoint_import` unabhängig von jedem OneDrive-Flag
-- [ ] Picker erscheint bei `SHAREPOINT_BACKEND=onprem` **ohne** gesetzte Entra-Variablen
-- [ ] Graph-Instanz mit alter Konfiguration sieht ihn unverändert (Regressionstest)
-- [ ] `FORK_CHANGES.md` nennt die Injection-Stelle in `main.py`
+- [x] `/api/config` liefert `enable_sharepoint_import` unabhängig von jedem OneDrive-Flag
+- [x] Picker erscheint bei `SHAREPOINT_BACKEND=onprem` **ohne** gesetzte Entra-Variablen
+- [x] Graph-Instanz mit alter Konfiguration sieht ihn unverändert (Regressionstest)
+- [x] `FORK_CHANGES.md` nennt die Injection-Stelle in `main.py`
+
+Umgesetzt wie beschrieben, mit einem Zusatz: `SHAREPOINT_BACKEND.strip() != ''`, damit ein
+versehentliches `SHAREPOINT_BACKEND=" "` nicht als eingeschaltet zählt — der Resolver in
+`utils/sharepoint_backend.py:87` strippt ohnehin. Die drei Zusicherungen oben sind in
+`test/sharepoint/test_sharepoint_backend_compat.py::TestSharePointPickerStaysVisibleOnGraph`
+festgenagelt, inklusive der Gegenprobe, dass `SHAREPOINT_BACKEND=''` OneDrive **nicht**
+mit abschaltet.
 
 ---
 
@@ -96,6 +108,24 @@ Dauerzustand nicht: wer widersprechen will, muss dafür einen HTTP-Aufruf absetz
 
 Gehört in die Kontoeinstellungen: Status anzeigen (verwahrt ja/nein, welches Konto, wie
 lange noch), Widerspruch umschalten, Eintrag löschen. Kein neuer Endpunkt nötig.
+
+### Umgesetzt
+
+`src/lib/components/chat/Settings/Account/CredentialStore.svelte`, eingehängt in
+`Settings/Account.svelte` neben „Passwort ändern". Aufklappbar wie die übrigen Blöcke dort;
+zeigt Konto, Ablauf und letzte Verwendung, einen Schalter für den Widerspruch und — nur wenn
+etwas verwahrt ist — einen Löschknopf. Die drei bestehenden Endpunkte reichten, wie im Plan
+angenommen; hinzu kamen nur die Client-Funktionen in `src/lib/apis/users/index.ts`.
+
+**Ein zusätzliches Backend-Flag war doch nötig.** Der Status-Endpunkt kann nicht als Gate
+dienen: er liefert `exists=false, opted_in=true` sowohl bei abgeschaltetem Speicher als auch
+bei eingeschaltetem, aber noch leerem (`models/user_credentials.py:345`). Beides ist von
+außen ununterscheidbar, der Block wäre also auf jeder fremden Instanz erschienen. Deshalb
+`features.enable_ldap_credential_store` in `/api/config`, analog zu P1.
+
+Die deutschen Texte stehen in `de-DE`; die übrigen 62 Locales fallen auf den englischen
+Schlüsseltext zurück. Ein `npm run i18n:parse` hätte alle 63 Dateien angefasst und gehört in
+einen eigenen Commit.
 
 ---
 
@@ -117,31 +147,73 @@ nützlicher, sobald der Fork Releases taggt; bis dahin ist Letzteres ehrlicher.
 
 Kein Blocker, aber jeder Kunde fragt danach — KHKI hat es am ersten Tag gemeldet.
 
+### Umgesetzt
+
+Der zweite Weg: `ENABLE_VERSION_UPDATE_CHECK` steht in `env.py` jetzt per Default auf
+`'false'` statt `'true'`. Die Abfrage-URL blieb unangetastet — wer den Upstream-Vergleich
+sehen will, setzt die Variable auf `true` und bekommt exakt das alte Verhalten. Sobald der
+Fork eigene Releases taggt, ist der ehrlichere erste Weg ein Einzeiler an derselben Stelle.
+
+Der Default ist ein **Overlay** auf eine Upstream-Zeile und überlebt einen Merge nicht von
+selbst; Detektor steht in `FORK_CHANGES.md` unter `env.py`.
+
 ---
 
-## P4 — `feature/owui-0.11.0` liegt auf genau einer Maschine
+## P4 — ~~`feature/owui-0.11.0` liegt auf genau einer Maschine~~ hinfällig
 
-| Branch | Version | Remote |
-|---|---|---|
-| `feature/ldap-sharepoint-credential` | 0.10.2 | `origin` + `neurawork` |
-| `feature/owui-0.11.0` | 0.11.0 | **keins** |
+**Die Prämisse stimmt nicht mehr.** Gemessen am 2026-08-03:
 
-688 Commits, die der 0.11-Branch dem KHKI-Branch voraus hat; 13 in der Gegenrichtung. Die
-Merge-Arbeit steckt in `UPSTREAM_0.11.0_TRIAGE.md` und ist real geleistet — sie liegt nur
-ungesichert lokal. Geht die Arbeitsstation verloren, ist sie weg.
+```
+git merge-base --is-ancestor feature/owui-0.11.0 main   -> ja
+git rev-list --count main..feature/owui-0.11.0          -> 0
+git rev-parse main neurawork/main                       -> 73f5ab2f4 == 73f5ab2f4
+```
 
-Erst pushen, dann die 13 LDAP-Commits darauf cherry-picken. In dieser Reihenfolge, damit
-der Cherry-Pick auf einem gesicherten Stand aufsetzt.
+`feature/owui-0.11.0` (62be7e6e) ist restlos in `main` enthalten, und `main` steht auf
+0.11.0 und ist gepusht. Der Branch trägt keinen einzigen Commit, den `main` nicht hätte —
+er ist nur ein zurückgebliebener Zeiger. `feature/live-custom-css` steckt ebenfalls in
+`main` (und *nicht* im 0.11-Branch). Es ist also nichts ungesichert; der Bus-Faktor ist weg.
+
+| Branch | Version | Remote | in `main`? |
+|---|---|---|---|
+| `main` | 0.11.0 | `neurawork` (identisch) | — |
+| `feature/owui-0.11.0` | 0.11.0 | keins — **egal**, 0 eigene Commits | ja |
+| `feature/live-custom-css` | 0.11.0 | `neurawork` | ja |
+| `feature/ldap-sharepoint-credential` | 0.10.2 | `origin` + `neurawork` | **nein** |
+
+Auch `CLAUDE.md` §1 ist an dieser Stelle veraltet („Latest upstream merge … Not yet on
+`main`").
+
+### Was stattdessen offen ist
+
+Die andere Hälfte: **die LDAP-/SharePoint-Arbeit ist nie auf 0.11 vorgezogen worden.**
+`main` liegt 691 Commits vor dem KHKI-Branch, dieser 14 (jetzt 15) vor `main` — und keiner
+davon ist in `main`. Für KHKI ist das derzeit richtig so, die Instanz fährt 0.10.2; aber
+jede weitere 0.10.2-Arbeit vergrößert den Rückportier-Abstand.
+
+Der Cherry-Pick auf `main` ist damit ein eigener Zuschnitt, kein Nebensatz von P4 — die
+0.11-Oberfläche wurde umgebaut (`AdminSettingRow`/`AdminSettingField`, siehe
+`UPSTREAM_0.11.0_TRIAGE.md`), die Frontend-Teile von P1/P2 werden dort nicht sauber
+auftragen.
 
 ---
 
 ## Reihenfolge
 
-1. **P4 pushen** — billig, sichert vorhandene Arbeit, blockiert nichts
-2. **P1** — schaltet das Feature überhaupt erst frei; ohne P1 ist die Abnahme des
+1. ~~**P4 pushen**~~ — hinfällig, war bereits über `main` gesichert
+2. **P1** ✅ — schaltet das Feature überhaupt erst frei; ohne P1 ist die Abnahme des
    KHKI-Runbooks (§6.3–§6.6, insbesondere die Rechtetrennung) nicht durchführbar
-3. **P3** — Einzeiler, kann mit P1 in denselben Build
-4. **P2** — eigener Zuschnitt, vor dem Ende des Pilotbetriebs
+3. **P3** ✅ — Einzeiler, mit P1 im selben Build
+4. **P2** ✅ — vorgezogen und mit erledigt, statt auf das Ende des Pilotbetriebs zu warten
 
-P1 und P3 zusammen ergeben einen Build; damit wird bei KHKI ein zweites Mal deployed und
-die offene Abnahme kann laufen.
+P1–P3 liegen in einem Build. Damit wird bei KHKI ein zweites Mal deployed und die offene
+Abnahme kann laufen.
+
+## Was danach noch offen ist
+
+- **Deploy + Abnahme bei KHKI** — der Build ist gebaut und getestet, aber nicht ausgerollt.
+  Erst der laufende Pod belegt, dass der Picker erscheint; bis dahin ist P1 „umgesetzt",
+  nicht „bestätigt". Ablauf: `PLAYWRIGHT_DEPLOY_SMOKE_PROTOCOL.md`.
+- **Vorziehen auf 0.11** — siehe P4 oben. Eigener Zuschnitt.
+- **`CLAUDE.md` §1** behauptet weiterhin, 0.11.0 sei nicht auf `main`. Beim nächsten
+  Anfassen mitkorrigieren.

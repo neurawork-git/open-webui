@@ -54,11 +54,15 @@
 | `src/routes/(app)/admin/processing/+page.svelte` | Route wrapper. |
 | `src/lib/components/workspace/Knowledge/SharePointPicker.svelte` | SharePoint site/library/folder browser for knowledge import. |
 | `src/lib/components/common/RagSettingsModal.svelte` | Per-knowledge-base RAG settings modal. |
-| `src/lib/utils/onedrive-file-picker.test.ts` | Unit tests for the OneDrive picker (upstream ships none). |
+| `src/lib/components/chat/Settings/Account/CredentialStore.svelte` | Self-service panel for the LDAP credential store: status, opt-out switch, delete. Storing is the default while the feature is on, so this is the only in-product way out. Rendered from `Settings/Account.svelte` behind `features.enable_ldap_credential_store`. |
+| `src/lib/utils/onedrive-file-picker.test.ts` | Unit tests for the OneDrive picker (upstream ships none). Stubs `window` via `vi.stubGlobal` — vitest runs in the `node` environment here and the module reads `window.location.origin`. Without the stub all 9 real assertions fail on `window is not defined`; don't "fix" that by adding jsdom. |
 
 ## 3. Additive — tests
 
-All under `backend/open_webui/test/`: `processing/` (models, api, router registration), `retrieval/` (bm25 tokenization + keyword integration, hybrid deep dive, keyword matching, rag models/settings/query settings, native-FC force retrieval, embedding function signature), `sharepoint/` (graph client, sharepoint import — 39 tests). Full fork suite: **321 tests** (green on the 0.10.2 merge).
+All under `backend/open_webui/test/`: `processing/` (models, api, router registration), `retrieval/` (bm25 tokenization + keyword integration, hybrid deep dive, keyword matching, rag models/settings/query settings, native-FC force retrieval, embedding function signature), `sharepoint/` (graph client, sharepoint import, on-prem NTLM client, backend compat — **110 tests**, green 2026-08-03). Full fork suite: **321 tests** (green on the 0.10.2 merge).
+
+- `backend/open_webui/test/conftest.py` — `pytest_sessionfinish` disposes the async engine. Without it aiosqlite's **non-daemon** connection worker keeps the interpreter alive after a green run, so pytest reports success and then hangs forever in `threading._shutdown()`. Detector: `ls backend/open_webui/test/conftest.py`.
+- Running the backend suite needs `WEBUI_SECRET_KEY` set — otherwise `env.py:714` raises `SystemExit` at import and every test in the file fails with an unrelated-looking error.
 
 ## 4. Additive — docs, PRPs, research
 
@@ -77,6 +81,7 @@ Unchanged from 0.9.6 regeneration: `.github/workflows/azure-acr-build.yaml` is t
 - Import `processing,` in the routers import list. Detector: `grep -n "^    processing,$" backend/open_webui/main.py`
 - `app.include_router(processing.router, prefix='/api/v1/admin/processing', tags=['processing'])` after the knowledge router. Detector: `grep -n "processing.router" backend/open_webui/main.py`
 - `/api/config`: `'client_id_business': config.get('onedrive.client_id_business') or ONEDRIVE_CLIENT_ID_BUSINESS` + key in the surrounding `Config.get_many` list. Detector: `grep -n "onedrive.client_id_business" backend/open_webui/main.py`
+- `/api/config`: `'enable_sharepoint_import': SHAREPOINT_BACKEND.strip() != ''` in the authenticated `features` block, plus `SHAREPOINT_BACKEND` in the `from open_webui.env import (...)` list. Un-hides the SharePoint picker (`KnowledgeBase.svelte`), which was previously gated on `enable_onedrive_integration && enable_onedrive_business` — both need an Entra app id, so `SHAREPOINT_BACKEND=onprem` could never reach it. Must sit **outside** the `if config.get('onedrive.enable')` dict-spread, or it disappears whenever OneDrive is off. Detector: `grep -n "enable_sharepoint_import" backend/open_webui/main.py`. Pinned by `test/sharepoint/test_sharepoint_backend_compat.py::TestSharePointPickerStaysVisibleOnGraph`.
 
 ### `backend/open_webui/config.py`
 
@@ -103,6 +108,7 @@ Detector: `grep -n "# FORK:" backend/open_webui/config.py` and `grep -n "KNOWLED
 ### `backend/open_webui/env.py`
 
 - `FORK_VERSION_SUFFIX`, 4× `EMBEDDING_RETRY_*`, `GRAPH_*` / SharePoint / dev toggles. Name-disjoint from upstream. Detector: `grep -nE "FORK_VERSION_SUFFIX|EMBEDDING_RETRY_|GRAPH_|SHAREPOINT_" backend/open_webui/env.py`
+- `ENABLE_VERSION_UPDATE_CHECK` **default overlay**: upstream ships `'true'`, the fork ships `'false'`. The check polls upstream's release tags, which cannot be installed on a fork. Detector: `grep -n "ENABLE_VERSION_UPDATE_CHECK" backend/open_webui/env.py` — if the default reads `'true'`, an upstream merge overwrote it.
 - LDAP credential store + backend selection: `ENABLE_LDAP_CREDENTIAL_STORE`, `LDAP_CREDENTIAL_ENCRYPTION_KEY` (**no fallback to `WEBUI_SECRET_KEY`, deliberately**), `LDAP_CREDENTIAL_TTL`, `LDAP_NETBIOS_DOMAIN`, `SHAREPOINT_BACKEND`, `SHAREPOINT_ONPREM_SITE_URL`, `SHAREPOINT_ONPREM_VERIFY_TLS`. Detector: `grep -nE "LDAP_CREDENTIAL|SHAREPOINT_BACKEND|SHAREPOINT_ONPREM" backend/open_webui/env.py`
 
 ### `backend/open_webui/routers/auths.py`
@@ -128,15 +134,23 @@ Detector: `grep -n "# FORK:" backend/open_webui/config.py` and `grep -n "KNOWLED
 
 - `rag_template()` accepts `knowledge_bases` + renders `{{KNOWLEDGE_BASES}}`. Detector: `grep -n "KNOWLEDGE_BASES" backend/open_webui/utils/task.py`
 
+### `package.json`
+
+- `"test:frontend": "vitest run --passWithNoTests"` — upstream omits `run`, so the script starts vitest in **watch mode** and never exits, which hangs any CI step or agent that calls it. Detector: `grep -n '"test:frontend"' package.json` — if `run` is gone, an upstream merge took it.
+
 ### Frontend injections
 
 - `src/routes/(app)/admin/+layout.svelte` — `/admin/processing` nav entry.
 - `src/lib/components/common/FileItem.svelte` — 4 lines.
 - `src/lib/components/chat/MessageInput.svelte` — ~21 lines.
 - `src/lib/components/workspace/Knowledge/KnowledgeBase/AddContentMenu.svelte` — SharePoint picker entry (46 lines).
+- `src/lib/components/workspace/Knowledge/KnowledgeBase.svelte` — `showSharePointImport={!isExternalKnowledge && $config?.features?.enable_sharepoint_import}` (2 lines). **Must not go back to the OneDrive flags** — see the `main.py` entry above. Detector: `grep -n "enable_sharepoint_import" src/lib/components/workspace/Knowledge/KnowledgeBase.svelte`
+- `src/lib/apis/users/index.ts` — `getCredentialStatus` / `setCredentialOptIn` / `deleteCredential` + `CredentialStatus` type against `/users/user/credentials/*` (~48 lines). Detector: `grep -n "credentials/" src/lib/apis/users/index.ts`
+- `src/lib/components/chat/Settings/Account.svelte` — import + `{#if $config?.features?.enable_ldap_credential_store}` block rendering `CredentialStore` (6 lines).
 - `src/lib/components/admin/Settings/Documents.svelte` — force-retrieval toggle (16 lines).
 - `src/lib/components/admin/Settings/CodeExecution.svelte` — pyodide prompt textarea (24 lines).
 - `src/lib/i18n/locales/{de-DE,en-US}/translation.json` — force-retrieval label/tooltip keys.
+- `src/lib/i18n/locales/de-DE/translation.json` — 11 credential-store keys (`Stored network password`, `Allow storing my password`, …). de-DE only; the other locales fall back to the English key text.
 
 ---
 
