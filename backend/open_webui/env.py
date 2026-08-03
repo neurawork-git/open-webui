@@ -854,6 +854,37 @@ OAUTH_TOKEN_EXCHANGE_TRUSTED_CLIENT_IDS = [
     if client_id.strip()
 ]
 
+####################################
+# LDAP credential store (fork)
+####################################
+# Stores the AD password of an LDAP-authenticated user, encrypted, so tools can reach
+# NTLM-only on-prem services as that user.  Off unless a deployment opts in.
+ENABLE_LDAP_CREDENTIAL_STORE = os.getenv('ENABLE_LDAP_CREDENTIAL_STORE', 'False').lower() == 'true'
+
+# Deliberately NO fallback to WEBUI_SECRET_KEY, unlike the OAuth keys above: session
+# signing and password custody must not hang off the same value, or one rotation
+# destroys both.  Empty means the store refuses to start -- see models/user_credentials.py.
+LDAP_CREDENTIAL_ENCRYPTION_KEY = os.getenv('LDAP_CREDENTIAL_ENCRYPTION_KEY', '')
+
+# How long a stored credential stays usable.  The domain may never expire passwords,
+# so this is the only bound on custody time.
+LDAP_CREDENTIAL_TTL = int(os.getenv('LDAP_CREDENTIAL_TTL', '2592000'))  # 30 days
+
+# NetBIOS domain prefixed to the account name (DOMAIN\user) for NTLM.
+LDAP_NETBIOS_DOMAIN = os.getenv('LDAP_NETBIOS_DOMAIN', '')
+
+####################################
+# SharePoint backend selection (fork)
+####################################
+# 'graph'  -> Microsoft Graph with a delegated OAuth token (cloud, default)
+# 'onprem' -> SharePoint Server SE over NTLM with the user's stored AD credential
+SHAREPOINT_BACKEND = os.getenv('SHAREPOINT_BACKEND', 'graph')
+
+SHAREPOINT_ONPREM_SITE_URL = os.getenv('SHAREPOINT_ONPREM_SITE_URL', '')
+
+# Off only while the farm's internal CA is missing from the container truststore.
+SHAREPOINT_ONPREM_VERIFY_TLS = os.getenv('SHAREPOINT_ONPREM_VERIFY_TLS', 'True').lower() == 'true'
+
 # Back-Channel Logout Configuration
 # When enabled, exposes POST /oauth/backchannel-logout for IdP-initiated logout
 # per OpenID Connect Back-Channel Logout 1.0 spec.
@@ -1139,7 +1170,12 @@ PIP_PACKAGE_INDEX_OPTIONS = os.getenv('PIP_PACKAGE_INDEX_OPTIONS', '').split()
 # OFFLINE_MODE
 ####################################
 
-ENABLE_VERSION_UPDATE_CHECK = os.getenv('ENABLE_VERSION_UPDATE_CHECK', 'true').lower() == 'true'
+# FORK: upstream defaults this to 'true', which polls
+# api.github.com/repos/open-webui/open-webui for the latest *upstream* release. This fork
+# carries changes that are not in those tags, so the banner advertises a version that
+# cannot be installed here. Off by default until the fork tags its own releases; set
+# ENABLE_VERSION_UPDATE_CHECK=true to get the upstream comparison back.
+ENABLE_VERSION_UPDATE_CHECK = os.getenv('ENABLE_VERSION_UPDATE_CHECK', 'false').lower() == 'true'
 OFFLINE_MODE = os.getenv('OFFLINE_MODE', 'false').lower() == 'true'
 
 if OFFLINE_MODE:

@@ -1818,8 +1818,7 @@
 							<div>
 								<AddContentMenu
 									showSharePointImport={!isExternalKnowledge &&
-										$config?.features?.enable_onedrive_integration &&
-										$config?.features?.enable_onedrive_business}
+										$config?.features?.enable_sharepoint_import}
 									onUpload={(data) => {
 										if (data.type === 'directory') {
 											uploadDirectoryHandler();

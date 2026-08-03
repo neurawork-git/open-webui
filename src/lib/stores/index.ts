@@ -321,6 +321,11 @@ type Config = {
 		web_search_confirmation_content?: string;
 		enable_google_drive_integration: boolean;
 		enable_onedrive_integration: boolean;
+		// FORK: both are only present for authenticated callers, hence optional.
+		// enable_sharepoint_import gates the SharePoint picker in KnowledgeBase.svelte,
+		// enable_ldap_credential_store the credential panel in Settings/Account.svelte.
+		enable_sharepoint_import?: boolean;
+		enable_ldap_credential_store?: boolean;
 		enable_image_generation: boolean;
 		enable_admin_export: boolean;
 		enable_admin_chat_access: boolean;

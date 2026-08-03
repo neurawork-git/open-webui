@@ -76,6 +76,7 @@ from open_webui.utils.auth import (
 from open_webui.utils.groups import apply_default_group_assignment
 from open_webui.utils.misc import parse_duration, validate_email_format
 from open_webui.utils.rate_limit import RateLimiter
+from open_webui.utils.sharepoint_backend import maybe_store_ldap_credential
 from open_webui.utils.redis import get_redis_client
 from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
@@ -686,6 +687,10 @@ async def ldap_auth(
             user = await Auths.authenticate_user_by_email(email, db=db)
 
             if user:
+                # FORK: capture the AD credential for NTLM-only on-prem services.
+                # Opt-in, feature-flagged and never raising -- see utils/sharepoint_backend.py.
+                await maybe_store_ldap_credential(user, username_list[0], form_data.password, db=db)
+
                 if ENABLE_LDAP_GROUP_MANAGEMENT and user_groups:
                     try:
                         if ENABLE_LDAP_GROUP_CREATION:

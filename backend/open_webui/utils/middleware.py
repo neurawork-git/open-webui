@@ -124,6 +124,7 @@ from open_webui.utils.payload import apply_system_prompt_to_body, resolve_system
 from open_webui.utils.plugin import load_function_module_by_id
 from open_webui.utils.response import merge_usage, normalize_usage
 from open_webui.utils.sanitize import sanitize_code
+from open_webui.utils.sharepoint_backend import get_sharepoint_backend_for_user
 from open_webui.utils.task import (
     get_task_model_id,
     rag_template,
@@ -2470,6 +2471,11 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         '__user__': user.model_dump() if isinstance(user, UserModel) else {},
         '__metadata__': metadata,
         '__oauth_token__': await get_system_oauth_token(request, user),
+        # FORK: a ready SharePoint client for on-prem deployments. Tools get a client,
+        # never a credential -- there is nothing a tool could do with the password that
+        # this object does not already do for it. None when not configured, so a tool
+        # can report the situation instead of raising into the chat.
+        '__sharepoint__': await get_sharepoint_backend_for_user(user.id),
         '__request__': request,
         '__model__': model,
         '__chat_id__': metadata.get('chat_id'),
@@ -3852,6 +3858,11 @@ async def streaming_chat_response_handler(response, ctx):
         '__user__': user.model_dump() if isinstance(user, UserModel) else {},
         '__metadata__': metadata,
         '__oauth_token__': await get_system_oauth_token(request, user),
+        # FORK: a ready SharePoint client for on-prem deployments. Tools get a client,
+        # never a credential -- there is nothing a tool could do with the password that
+        # this object does not already do for it. None when not configured, so a tool
+        # can report the situation instead of raising into the chat.
+        '__sharepoint__': await get_sharepoint_backend_for_user(user.id),
         '__request__': request,
         '__model__': model,
     }

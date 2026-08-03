@@ -83,6 +83,8 @@ from open_webui.env import (
     ENABLE_COMPRESSION_MIDDLEWARE,
     ENABLE_CUSTOM_MODEL_FALLBACK,
     ENABLE_EASTER_EGGS,
+    # LDAP credential store (fork)
+    ENABLE_LDAP_CREDENTIAL_STORE,
     ENABLE_PLUGINS,
     EXTERNAL_PWA_MANIFEST_URL,
     # OAuth Back-Channel Logout
@@ -107,6 +109,9 @@ from open_webui.env import (
     RESET_CONFIG_ON_START,
     SAFE_MODE,
     SCIM_TOKEN,
+    # SharePoint backend selection (fork)
+    SHAREPOINT_BACKEND,
+    SHAREPOINT_ONPREM_SITE_URL,
     VERSION,
     # Admin Account Runtime Creation
     WEBUI_ADMIN_EMAIL,
@@ -2157,6 +2162,23 @@ async def get_app_config(request: Request):
         'ui.watermark',
     )
 
+    # FORK: does this instance have a *usable* SharePoint import?
+    #
+    # Not simply "is a backend named": SHAREPOINT_BACKEND defaults to 'graph', so keying off
+    # the name alone would light the menu entry up on every deployment -- including ones with
+    # no Entra app at all, where the picker opens and dies on a 401. A visible broken entry is
+    # worse than no entry. So each backend is asked whether it can actually serve:
+    #   graph  -> needs the Entra app, i.e. exactly the old OneDrive gate. Unchanged behaviour.
+    #   onprem -> needs the farm URL; the resolver 500s without it (sharepoint_backend.py:187).
+    #   ''     -> deliberate opt-out.
+    _sharepoint_backend = SHAREPOINT_BACKEND.strip().lower()
+    if _sharepoint_backend == 'onprem':
+        enable_sharepoint_import = bool(SHAREPOINT_ONPREM_SITE_URL)
+    elif _sharepoint_backend == 'graph':
+        enable_sharepoint_import = bool(config.get('onedrive.enable') and ENABLE_ONEDRIVE_BUSINESS)
+    else:
+        enable_sharepoint_import = False
+
     return {
         **({'onboarding': True} if onboarding else {}),
         'status': True,
@@ -2216,6 +2238,13 @@ async def get_app_config(request: Request):
                     'enable_admin_analytics': ENABLE_ADMIN_ANALYTICS,
                     'enable_google_drive_integration': config.get('google_drive.enable'),
                     'enable_onedrive_integration': config.get('onedrive.enable'),
+                    # FORK: un-hides the SharePoint picker. Computed above -- see the comment
+                    # there for why it is not simply `SHAREPOINT_BACKEND != ''`.
+                    'enable_sharepoint_import': enable_sharepoint_import,
+                    # FORK: gates the credential section in account settings. The status
+                    # endpoint cannot stand in for this -- it reports exists=False,
+                    # opted_in=True both when the store is off and when it is on but empty.
+                    'enable_ldap_credential_store': ENABLE_LDAP_CREDENTIAL_STORE,
                     'enable_memories': config.get('memories.enable'),
                     **(
                         {

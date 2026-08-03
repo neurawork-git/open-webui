@@ -72,6 +72,9 @@ def _make_folder_listing(
 
 # Module paths for patching
 _KNOWLEDGE_MOD = "open_webui.routers.knowledge"
+# The Microsoft credential path moved out of the router into the backend resolver,
+# so GraphClient and OAuthSessions are patched there now. Behaviour is unchanged.
+_BACKEND_MOD = "open_webui.utils.sharepoint_backend"
 
 # The router reads the SharePoint size cap via `Config.get(...)` (the
 # per-key Config system), not via a request.app.state.config attribute.
@@ -124,8 +127,8 @@ class TestSharePointImport:
 
     @pytest.mark.asyncio
     @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
-    @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
-    @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
+    @patch(f"{_BACKEND_MOD}.OAuthSessions")
+    @patch(f"{_BACKEND_MOD}.GraphClient")
     @patch(f"{_KNOWLEDGE_MOD}.upload_file_handler", new_callable=AsyncMock)
     @patch(f"{_KNOWLEDGE_MOD}.process_file", new_callable=AsyncMock)
     async def test_successful_import(
@@ -174,8 +177,8 @@ class TestSharePointImport:
 
     @pytest.mark.asyncio
     @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
-    @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
-    @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
+    @patch(f"{_BACKEND_MOD}.OAuthSessions")
+    @patch(f"{_BACKEND_MOD}.GraphClient")
     @patch(f"{_KNOWLEDGE_MOD}.upload_file_handler", new_callable=AsyncMock)
     @patch(f"{_KNOWLEDGE_MOD}.process_file", new_callable=AsyncMock)
     async def test_partial_failure(
@@ -223,8 +226,8 @@ class TestSharePointImport:
 
     @pytest.mark.asyncio
     @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
-    @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
-    @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
+    @patch(f"{_BACKEND_MOD}.OAuthSessions")
+    @patch(f"{_BACKEND_MOD}.GraphClient")
     @patch(f"{_KNOWLEDGE_MOD}.upload_file_handler", new_callable=AsyncMock)
     @patch(f"{_KNOWLEDGE_MOD}.process_file", new_callable=AsyncMock)
     async def test_missing_download_url_falls_back_to_content_endpoint(
@@ -315,7 +318,7 @@ class TestSharePointImport:
 
     @pytest.mark.asyncio
     @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
-    @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
+    @patch(f"{_BACKEND_MOD}.OAuthSessions")
     async def test_no_oauth_session(self, mock_oauth, mock_kb):
         """No Microsoft OAuth session → 401."""
         from open_webui.routers.knowledge import import_sharepoint_folder, SharePointImportForm
@@ -346,8 +349,8 @@ class TestSharePointImport:
 
     @pytest.mark.asyncio
     @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
-    @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
-    @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
+    @patch(f"{_BACKEND_MOD}.OAuthSessions")
+    @patch(f"{_BACKEND_MOD}.GraphClient")
     async def test_graph_401_expired_token(self, mock_graph_cls, mock_oauth, mock_kb):
         """Graph API returns 401 → clear re-login message."""
         from open_webui.routers.knowledge import import_sharepoint_folder, SharePointImportForm
@@ -385,8 +388,8 @@ class TestSharePointImport:
 
     @pytest.mark.asyncio
     @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
-    @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
-    @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
+    @patch(f"{_BACKEND_MOD}.OAuthSessions")
+    @patch(f"{_BACKEND_MOD}.GraphClient")
     async def test_graph_403_missing_scope(self, mock_graph_cls, mock_oauth, mock_kb):
         """Graph API returns 403 → message about Files.Read.All."""
         from open_webui.routers.knowledge import import_sharepoint_folder, SharePointImportForm
@@ -424,8 +427,8 @@ class TestSharePointImport:
 
     @pytest.mark.asyncio
     @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
-    @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
-    @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
+    @patch(f"{_BACKEND_MOD}.OAuthSessions")
+    @patch(f"{_BACKEND_MOD}.GraphClient")
     async def test_empty_folder(self, mock_graph_cls, mock_oauth, mock_kb):
         """Empty folder → success with 0 files."""
         from open_webui.routers.knowledge import import_sharepoint_folder, SharePointImportForm
@@ -461,8 +464,8 @@ class TestSharePointImport:
 
     @pytest.mark.asyncio
     @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
-    @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
-    @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
+    @patch(f"{_BACKEND_MOD}.OAuthSessions")
+    @patch(f"{_BACKEND_MOD}.GraphClient")
     async def test_only_subfolders(self, mock_graph_cls, mock_oauth, mock_kb):
         """Folder with only subfolders → 0 files, skipped_folders populated."""
         from open_webui.routers.knowledge import import_sharepoint_folder, SharePointImportForm
@@ -500,8 +503,8 @@ class TestSharePointImport:
 
     @pytest.mark.asyncio
     @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
-    @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
-    @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
+    @patch(f"{_BACKEND_MOD}.OAuthSessions")
+    @patch(f"{_BACKEND_MOD}.GraphClient")
     @patch(f"{_KNOWLEDGE_MOD}.upload_file_handler", new_callable=AsyncMock)
     @patch(f"{_KNOWLEDGE_MOD}.process_file", new_callable=AsyncMock)
     async def test_file_without_download_url(
@@ -546,8 +549,8 @@ class TestSharePointImport:
 
     @pytest.mark.asyncio
     @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
-    @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
-    @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
+    @patch(f"{_BACKEND_MOD}.OAuthSessions")
+    @patch(f"{_BACKEND_MOD}.GraphClient")
     @patch(f"{_KNOWLEDGE_MOD}.upload_file_handler", new_callable=AsyncMock)
     @patch(f"{_KNOWLEDGE_MOD}.process_file", new_callable=AsyncMock)
     async def test_graph_client_receives_correct_token(
@@ -591,8 +594,8 @@ class TestSharePointReimport:
 
     @pytest.mark.asyncio
     @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
-    @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
-    @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
+    @patch(f"{_BACKEND_MOD}.OAuthSessions")
+    @patch(f"{_BACKEND_MOD}.GraphClient")
     @patch(f"{_KNOWLEDGE_MOD}.upload_file_handler", new_callable=AsyncMock)
     @patch(f"{_KNOWLEDGE_MOD}.process_file", new_callable=AsyncMock)
     async def test_reimport_uses_stored_source(
@@ -735,8 +738,8 @@ class TestPathPrefixFlow:
 
     @pytest.mark.asyncio
     @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
-    @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
-    @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
+    @patch(f"{_BACKEND_MOD}.OAuthSessions")
+    @patch(f"{_BACKEND_MOD}.GraphClient")
     @patch(f"{_KNOWLEDGE_MOD}.upload_file_handler", new_callable=AsyncMock)
     @patch(f"{_KNOWLEDGE_MOD}.process_file", new_callable=AsyncMock)
     async def test_subfolder_file_gets_path_prefix(
@@ -783,8 +786,8 @@ class TestPathPrefixFlow:
 
     @pytest.mark.asyncio
     @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
-    @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
-    @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
+    @patch(f"{_BACKEND_MOD}.OAuthSessions")
+    @patch(f"{_BACKEND_MOD}.GraphClient")
     @patch(f"{_KNOWLEDGE_MOD}.upload_file_handler", new_callable=AsyncMock)
     @patch(f"{_KNOWLEDGE_MOD}.process_file", new_callable=AsyncMock)
     async def test_truncated_flag_propagates_to_response(
@@ -861,8 +864,8 @@ class TestSharePointSiteImport:
 
     @pytest.mark.asyncio
     @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
-    @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
-    @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
+    @patch(f"{_BACKEND_MOD}.OAuthSessions")
+    @patch(f"{_BACKEND_MOD}.GraphClient")
     @patch(f"{_KNOWLEDGE_MOD}.upload_file_handler", new_callable=AsyncMock)
     @patch(f"{_KNOWLEDGE_MOD}.process_file", new_callable=AsyncMock)
     async def test_imports_all_site_files_and_persists_source(
@@ -908,8 +911,8 @@ class TestSharePointSiteImport:
 
     @pytest.mark.asyncio
     @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
-    @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
-    @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
+    @patch(f"{_BACKEND_MOD}.OAuthSessions")
+    @patch(f"{_BACKEND_MOD}.GraphClient")
     async def test_graph_401_surfaces_as_401(
         self, mock_graph_cls, mock_oauth, mock_kb
     ):
@@ -1027,8 +1030,8 @@ class TestReimportDispatch:
 class TestSharePointListFolder:
     @pytest.mark.asyncio
     @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
-    @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
-    @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
+    @patch(f"{_BACKEND_MOD}.OAuthSessions")
+    @patch(f"{_BACKEND_MOD}.GraphClient")
     async def test_returns_flat_file_entries_with_display_name(
         self, mock_graph_cls, mock_oauth, mock_kb
     ):
@@ -1075,8 +1078,8 @@ class TestSharePointListFolder:
 
     @pytest.mark.asyncio
     @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
-    @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
-    @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
+    @patch(f"{_BACKEND_MOD}.OAuthSessions")
+    @patch(f"{_BACKEND_MOD}.GraphClient")
     async def test_size_limit_blocks_oversized_listing(
         self, mock_graph_cls, mock_oauth, mock_kb
     ):
@@ -1119,8 +1122,8 @@ class TestSharePointListFolder:
 
     @pytest.mark.asyncio
     @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
-    @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
-    @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
+    @patch(f"{_BACKEND_MOD}.OAuthSessions")
+    @patch(f"{_BACKEND_MOD}.GraphClient")
     async def test_size_limit_zero_means_unlimited(
         self, mock_graph_cls, mock_oauth, mock_kb
     ):
@@ -1166,8 +1169,8 @@ class TestSharePointListFolder:
 class TestSharePointImportFile:
     @pytest.mark.asyncio
     @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
-    @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
-    @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
+    @patch(f"{_BACKEND_MOD}.OAuthSessions")
+    @patch(f"{_BACKEND_MOD}.GraphClient")
     @patch(f"{_KNOWLEDGE_MOD}.upload_file_handler", new_callable=AsyncMock)
     @patch(f"{_KNOWLEDGE_MOD}.process_file", new_callable=AsyncMock)
     async def test_imports_one_file_via_metadata_then_download(
@@ -1227,8 +1230,8 @@ class TestSharePointImportFile:
 
     @pytest.mark.asyncio
     @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
-    @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
-    @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
+    @patch(f"{_BACKEND_MOD}.OAuthSessions")
+    @patch(f"{_BACKEND_MOD}.GraphClient")
     async def test_metadata_403_surfaces_as_403(
         self, mock_graph_cls, mock_oauth, mock_kb
     ):
@@ -1265,8 +1268,8 @@ class TestSharePointImportFile:
 
     @pytest.mark.asyncio
     @patch(f"{_KNOWLEDGE_MOD}.Knowledges")
-    @patch(f"{_KNOWLEDGE_MOD}.OAuthSessions")
-    @patch(f"{_KNOWLEDGE_MOD}.GraphClient")
+    @patch(f"{_BACKEND_MOD}.OAuthSessions")
+    @patch(f"{_BACKEND_MOD}.GraphClient")
     @patch(f"{_KNOWLEDGE_MOD}.upload_file_handler", new_callable=AsyncMock)
     async def test_download_failure_returns_500(
         self, mock_upload, mock_graph_cls, mock_oauth, mock_kb
@@ -1338,17 +1341,23 @@ class TestSharePointPersistSource:
 
 
 # ---------------------------------------------------------------------------
-# _get_microsoft_access_token edge cases
+# Graph credential resolution edge cases (moved to utils/sharepoint_backend.py)
 # ---------------------------------------------------------------------------
 
 
 class TestMicrosoftAccessTokenHelper:
-    """Edge cases for _get_microsoft_access_token in knowledge.py."""
+    """Edge cases for the Graph credential path.
+
+    Formerly `knowledge._get_microsoft_access_token`, which returned a bearer string.
+    It now lives in `utils.sharepoint_backend._graph_backend` and returns a ready
+    GraphClient instead. The policy under test -- when to 500, when to 401, never to
+    delete a session on refresh failure -- is unchanged.
+    """
 
     @pytest.mark.asyncio
     async def test_no_oauth_manager_raises_500(self):
         """app.state has no oauth_client_manager -> HTTP 500."""
-        from open_webui.routers.knowledge import _get_microsoft_access_token
+        from open_webui.utils.sharepoint_backend import _graph_backend
         from fastapi import HTTPException
 
         request = MagicMock()
@@ -1356,7 +1365,7 @@ class TestMicrosoftAccessTokenHelper:
         request.app.state = state
 
         with pytest.raises(HTTPException) as exc_info:
-            await _get_microsoft_access_token(request, _make_user(), MagicMock())
+            await _graph_backend(request, _make_user(), MagicMock())
 
         assert exc_info.value.status_code == 500
         assert "not initialised" in exc_info.value.detail
@@ -1364,20 +1373,20 @@ class TestMicrosoftAccessTokenHelper:
     @pytest.mark.asyncio
     async def test_get_oauth_token_returns_none_raises_401(self):
         """get_oauth_token returns None (refresh failed) -> HTTP 401."""
-        from open_webui.routers.knowledge import _get_microsoft_access_token
+        from open_webui.utils.sharepoint_backend import _graph_backend
         from fastapi import HTTPException
 
         request = _make_request(access_token=None)
 
         with pytest.raises(HTTPException) as exc_info:
-            await _get_microsoft_access_token(request, _make_user(), MagicMock())
+            await _graph_backend(request, _make_user(), MagicMock())
 
         assert exc_info.value.status_code == 401
 
     @pytest.mark.asyncio
     async def test_get_oauth_token_returns_dict_without_access_token_raises_401(self):
         """get_oauth_token returns dict missing access_token key -> HTTP 401."""
-        from open_webui.routers.knowledge import _get_microsoft_access_token
+        from open_webui.utils.sharepoint_backend import _graph_backend
         from fastapi import HTTPException
 
         request = _make_request()
@@ -1386,7 +1395,7 @@ class TestMicrosoftAccessTokenHelper:
         )
 
         with pytest.raises(HTTPException) as exc_info:
-            await _get_microsoft_access_token(request, _make_user(), MagicMock())
+            await _graph_backend(request, _make_user(), MagicMock())
 
         assert exc_info.value.status_code == 401
 
@@ -1394,7 +1403,7 @@ class TestMicrosoftAccessTokenHelper:
     async def test_refresh_failure_does_not_delete_session(self):
         """When get_oauth_token returns None, OAuthSessions.delete_session_by_id
         must NOT be called — transient failures must not force re-linking."""
-        from open_webui.routers.knowledge import _get_microsoft_access_token
+        from open_webui.utils.sharepoint_backend import _graph_backend
         from fastapi import HTTPException
 
         request = _make_request(access_token=None)
@@ -1403,17 +1412,17 @@ class TestMicrosoftAccessTokenHelper:
         mock_oauth_sessions.delete_session_by_id = AsyncMock()
 
         with patch(
-            "open_webui.routers.knowledge.OAuthSessions", mock_oauth_sessions
+            "open_webui.utils.sharepoint_backend.OAuthSessions", mock_oauth_sessions
         ):
             with pytest.raises(HTTPException):
-                await _get_microsoft_access_token(request, _make_user(), MagicMock())
+                await _graph_backend(request, _make_user(), MagicMock())
 
         mock_oauth_sessions.delete_session_by_id.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_missing_cookie_falls_back_to_newest_provider_session(self):
         """No oauth_session_id cookie → use newest stored Microsoft session."""
-        from open_webui.routers.knowledge import _get_microsoft_access_token
+        from open_webui.utils.sharepoint_backend import _graph_backend
 
         request = _make_request(session_cookie=None)
         fallback_session = MagicMock(id="fallback-session-id")
@@ -1424,13 +1433,13 @@ class TestMicrosoftAccessTokenHelper:
         )
 
         with patch(
-            "open_webui.routers.knowledge.OAuthSessions", mock_oauth_sessions
+            "open_webui.utils.sharepoint_backend.OAuthSessions", mock_oauth_sessions
         ):
-            token = await _get_microsoft_access_token(
+            backend = await _graph_backend(
                 request, _make_user(), MagicMock()
             )
 
-        assert token == "graph-token-123"
+        assert backend.headers["Authorization"] == "Bearer graph-token-123"
         request.app.state.oauth_manager.get_oauth_token.assert_awaited_once_with(
             USER_ID, "fallback-session-id"
         )
@@ -1438,7 +1447,7 @@ class TestMicrosoftAccessTokenHelper:
     @pytest.mark.asyncio
     async def test_no_cookie_and_no_stored_session_raises_401(self):
         """Cookie missing AND no stored MS session → HTTP 401 with re-login hint."""
-        from open_webui.routers.knowledge import _get_microsoft_access_token
+        from open_webui.utils.sharepoint_backend import _graph_backend
         from fastapi import HTTPException
 
         request = _make_request(session_cookie=None)
@@ -1448,10 +1457,10 @@ class TestMicrosoftAccessTokenHelper:
         )
 
         with patch(
-            "open_webui.routers.knowledge.OAuthSessions", mock_oauth_sessions
+            "open_webui.utils.sharepoint_backend.OAuthSessions", mock_oauth_sessions
         ):
             with pytest.raises(HTTPException) as exc_info:
-                await _get_microsoft_access_token(
+                await _graph_backend(
                     request, _make_user(), MagicMock()
                 )
 

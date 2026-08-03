@@ -45,6 +45,11 @@
 | `backend/open_webui/migrations/versions/7e66bdd43a43_merge_upstream_v0_9_6_fork_recovery_.py` | Alembic merge node (0.9.6 replay recovery). No DDL. |
 | `backend/open_webui/migrations/versions/e48721182479_merge_upstream_v0_10_2.py` | Alembic merge node for v0.10.2 (`42e2978c7933` + `7e66bdd43a43`). No DDL. |
 | `backend/open_webui/migrations/versions/ad192b50687b_merge_upstream_v0_11_0.py` | Alembic merge node for v0.11.0 (`e48721182479` + `f0bd01a18a3d`). No DDL. |
+| `backend/open_webui/utils/sharepoint_backend.py` | `SharePointBackend` protocol + `get_sharepoint_backend()` resolver. Chooses Graph (OAuth) or on-prem (NTLM) per `SHAREPOINT_BACKEND`. The protocol is derived verbatim from `GraphClient`'s signatures, so `GraphClient` satisfies it with **no adapter** — the cloud path carries no new code. Also owns the credential write path (`maybe_store_ldap_credential`) and the delete-on-rejection rule. **The decrypted password never leaves this module.** |
+| `backend/open_webui/utils/sharepoint_onprem_client.py` | SharePoint Server SE client over NTLM (`pyspnego`). Opaque base64 ids, `/$value` downloads. See `docs/LDAP_SHAREPOINT_BACKEND.md` for the measured farm behaviour. |
+| `backend/open_webui/models/user_credentials.py` | Encrypted per-user AD credential store. `LDAP_CREDENTIAL_ENCRYPTION_KEY` is required and **deliberately has no fallback to `WEBUI_SECRET_KEY`**. Table object stays uninstantiated until first use, so deployments without a key still import `routers/users.py`. |
+| `backend/open_webui/migrations/versions/e7f8a9b0c1d2_add_user_credential_table.py` | Creates `user_credential`. Idempotent via `_fork_helpers`. |
+| `backend/open_webui/migrations/versions/6d45679bb23e_merge_ldap_credential_store.py` | Alembic merge node joining the fork branch to 0.11 (`e7f8a9b0c1d2` + `ad192b50687b`). No DDL. **Created by `alembic merge`, never hand-written**, and `e7f8a9b0c1d2.down_revision` must stay `e48721182479` — re-parenting it would make the KHKI production DB look like it were already at head and silently skip every 0.11 migration (`ALEMBIC_MERGE_PLAYBOOK.md` §2). |
 
 ## 2. Additive — new frontend modules
 
@@ -56,13 +61,16 @@
 | `src/lib/stores/processing.ts` | Svelte store + polling logic for the processing dashboard. |
 | `src/lib/components/admin/Processing.svelte` | The dashboard UI. |
 | `src/routes/(app)/admin/processing/+page.svelte` | Route wrapper. |
+| `src/lib/components/chat/Settings/Account/CredentialStore.svelte` | Self-service panel for the LDAP credential store: status, opt-out switch, delete. Storing is the default while the feature is on, so this is the only in-product way out. Mounted from `Settings/Account.svelte` inside a `UserSettingSection` behind `features.enable_ldap_credential_store`. Uses the 0.11 idiom (`UserSettingRow`, `actionButtonClass`) — it was written against 0.10.2 markup and restyled during the port. |
 | `src/lib/components/workspace/Knowledge/SharePointPicker.svelte` | SharePoint site/library/folder browser for knowledge import. |
 | `src/lib/components/common/RagSettingsModal.svelte` | Per-knowledge-base / per-model / per-user RAG settings modal. |
 | `src/lib/utils/onedrive-file-picker.test.ts` | Unit tests for the OneDrive picker (upstream ships none). **Currently red — see §11.** |
 
 ## 3. Additive — tests
 
-All under `backend/open_webui/test/`: `processing/` (models, api, router registration), `retrieval/` (bm25 tokenization + keyword integration, hybrid deep dive, keyword matching, rag models/settings/query settings, native-FC force retrieval, embedding function signature), `sharepoint/` (graph client, sharepoint import), `custom_css/` (route-registration order vs the `/static` mount, config default, non-string guard, UTF-8 byte size cap). Full fork suite: **329 tests, green** (322 after the v0.11.0 merge + 7 for custom CSS).
+All under `backend/open_webui/test/`: `processing/` (models, api, router registration), `retrieval/` (bm25 tokenization + keyword integration, hybrid deep dive, keyword matching, rag models/settings/query settings, native-FC force retrieval, embedding function signature), `sharepoint/` (graph client, sharepoint import, on-prem NTLM client, backend compat), `test_user_credentials.py`, `custom_css/` (route-registration order vs the `/static` mount, config default, non-string guard, UTF-8 byte size cap). Full fork suite: **329 tests, green** (322 after the v0.11.0 merge + 7 for custom CSS).
+
+`backend/open_webui/test/conftest.py` disposes the async engine in `pytest_sessionfinish`. Without it aiosqlite's **non-daemon** connection worker keeps the interpreter alive, so pytest reports green and then hangs forever in `threading._shutdown()`. The suite also needs `WEBUI_SECRET_KEY` set, or `env.py` raises `SystemExit` at import.
 
 Run them with `joserfc` installed — it became a hard backend dependency (`requirements.txt`) and `utils/oauth.py` imports it at module load, so the sharepoint suite fails at *collection* without it.
 
@@ -99,6 +107,10 @@ Plus `.mcp.json`, `backend/start-dev.bat`, `migration_scripts/`, `migrate-openwe
 - `app.include_router(processing.router, prefix='/api/v1/admin/processing', tags=['processing'])`. Detector: `grep -n "processing.router" backend/open_webui/main.py`
 - Import `custom_css,` in the routers import list + `app.include_router(custom_css.router, tags=['custom-css'])` — **no prefix, and it must stay above `app.mount('/static', ...)`.** FastAPI matches routes in registration order, so a router registered after the mount is shadowed and custom branding silently reverts to the empty file. Detector: `grep -n "custom_css.router" backend/open_webui/main.py`; the ordering is asserted by `test/custom_css/test_custom_css.py::TestRouteRegistrationOrder`.
 - `/api/config`: `'client_id_business': config.get('onedrive.client_id_business') or ONEDRIVE_CLIENT_ID_BUSINESS` + key in the surrounding `Config.get_many` list. Detector: `grep -n "onedrive.client_id_business" backend/open_webui/main.py`
+- `/api/config`: `enable_sharepoint_import` + `enable_ldap_credential_store` in the authenticated `features` block, plus `SHAREPOINT_BACKEND`, `SHAREPOINT_ONPREM_SITE_URL` and `ENABLE_LDAP_CREDENTIAL_STORE` in the `from open_webui.env import (...)` list.
+  - `enable_sharepoint_import` is computed just above the `return` and asks **whether the instance can actually serve an import**, per backend: `graph` → the old `onedrive.enable && ENABLE_ONEDRIVE_BUSINESS` gate, unchanged; `onprem` → `bool(SHAREPOINT_ONPREM_SITE_URL)`; `''` → off. **Never simplify this to `SHAREPOINT_BACKEND != ''`** — the default is `'graph'`, so that lights the picker up on every deployment, including Graph customers with no Entra app where it opens and 401s. That shipped once and was reverted; see `PLAN_SHAREPOINT_ONPREM_UI_GAPS.md` §P1.
+  - Both keys must sit **outside** the `if config.get('onedrive.enable')` dict-spread, or they vanish whenever OneDrive is off.
+  - Detector: `grep -nE "enable_sharepoint_import|enable_ldap_credential_store" backend/open_webui/main.py`. Pinned by `test/sharepoint/test_sharepoint_backend_compat.py::TestSharePointPickerVisibility` (6 cases; the Graph ones are load-bearing).
 
 ### `backend/open_webui/config.py`
 
@@ -133,7 +145,9 @@ Detector: `grep -n "# FORK:" backend/open_webui/config.py` (expect 5) and `grep 
 
 ### `backend/open_webui/env.py`
 
-- `FORK_VERSION_SUFFIX`, 4× `EMBEDDING_RETRY_*`, `GRAPH_*` / SharePoint / dev toggles. Name-disjoint from upstream. Detector: `grep -nE "FORK_VERSION_SUFFIX|EMBEDDING_RETRY_|GRAPH_|SHAREPOINT_" backend/open_webui/env.py`
+- `FORK_VERSION_SUFFIX`, 4× `EMBEDDING_RETRY_*`, `GRAPH_*` / SharePoint / dev toggles. Name-disjoint from upstream. Detector: `grep -nE "FORK_VERSION_SUFFIX|EMBEDDING_RETRY_|GRAPH_|SHAREPOINT_|LDAP_CREDENTIAL" backend/open_webui/env.py`
+- LDAP credential store + backend selection: `ENABLE_LDAP_CREDENTIAL_STORE`, `LDAP_CREDENTIAL_ENCRYPTION_KEY` (**no fallback to `WEBUI_SECRET_KEY`, deliberately**), `LDAP_CREDENTIAL_TTL`, `LDAP_NETBIOS_DOMAIN`, `SHAREPOINT_BACKEND`, `SHAREPOINT_ONPREM_SITE_URL`, `SHAREPOINT_ONPREM_VERIFY_TLS`.
+- `ENABLE_VERSION_UPDATE_CHECK` **default overlay**: upstream ships `'true'`, the fork ships `'false'`. The check polls upstream's release tags, which cannot be installed on a fork. Detector: `grep -n "ENABLE_VERSION_UPDATE_CHECK" backend/open_webui/env.py` — if the default reads `'true'`, an upstream merge overwrote it.
 
 ### `backend/open_webui/internal/db.py`
 
@@ -150,6 +164,14 @@ Detector: `grep -n "# FORK:" backend/open_webui/config.py` (expect 5) and `grep 
 - **Known gap:** no caller passes `knowledge_bases`, so `{{KNOWLEDGE_BASES}}` renders empty. Pre-existing since 0.10.2, not a merge regression — see §11.
 
 ### Frontend injections
+
+- `src/lib/components/workspace/Knowledge/KnowledgeBase.svelte` — `showSharePointImport={!isExternalKnowledge && $config?.features?.enable_sharepoint_import}`. **Must not go back to the OneDrive flags.** Detector: `grep -c enable_sharepoint_import` → 1 **and** `grep -c enable_onedrive_business` → 0; a stray extra key alongside the old conjunction also greps as 1.
+- `src/lib/apis/users/index.ts` — `getCredentialStatus` / `setCredentialOptIn` / `deleteCredential` + `CredentialStatus` type. Detector: `grep -n "credentials/" src/lib/apis/users/index.ts`
+- `src/lib/components/chat/Settings/Account.svelte` — import + `UserSettingSection` block behind `enable_ldap_credential_store`.
+- `src/lib/stores/index.ts` — `enable_sharepoint_import?` / `enable_ldap_credential_store?` on the `Config['features']` type. 0.11 types this strictly (0.10.2 did not); without them `npm run check` errors on every use site.
+- `src/lib/utils/onedrive-file-picker.test.ts` — `vi.stubGlobal('window', …)`. vitest runs in the `node` environment and the module reads `window.location.origin`; without the stub all 9 real assertions die on `window is not defined`. **Do not "fix" this by adding jsdom.**
+- `package.json` — `"test:frontend": "vitest run --passWithNoTests"`. Upstream omits `run`, which starts watch mode and never exits.
+- `src/lib/i18n/locales/de-DE/translation.json` — 12 credential-store keys. de-DE only; other locales fall back to the English key text.
 
 - `src/routes/(app)/admin/+layout.svelte` — `/admin/processing` nav entry (uses the 0.11.0 `px-1 text-sm` tab class).
 - `src/lib/components/common/FileItem.svelte` — 4 lines.

@@ -8,6 +8,7 @@
 	import { WEBUI_BASE_URL } from '$lib/constants';
 
 	import UpdatePassword from './Account/UpdatePassword.svelte';
+	import CredentialStore from './Account/CredentialStore.svelte';
 	import { getGravatarUrl } from '$lib/apis/utils';
 	import { generateInitialsImage, canvasPixelTest } from '$lib/utils';
 	import { copyToClipboard } from '$lib/utils';
@@ -345,6 +346,12 @@
 		{#if $config?.features.enable_login_form && $config?.features.enable_password_change_form}
 			<UserSettingSection title={$i18n.t('Password')}>
 				<UpdatePassword />
+			</UserSettingSection>
+		{/if}
+
+		{#if $config?.features?.enable_ldap_credential_store}
+			<UserSettingSection title={$i18n.t('Network credentials')}>
+				<CredentialStore />
 			</UserSettingSection>
 		{/if}
 
