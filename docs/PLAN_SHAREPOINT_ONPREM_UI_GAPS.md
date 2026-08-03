@@ -88,12 +88,48 @@ kaputter Menüpunkt ist schlechter als gar keiner.
 - [x] Graph-Instanz mit alter Konfiguration sieht ihn unverändert (Regressionstest)
 - [x] `FORK_CHANGES.md` nennt die Injection-Stelle in `main.py`
 
-Umgesetzt wie beschrieben, mit einem Zusatz: `SHAREPOINT_BACKEND.strip() != ''`, damit ein
-versehentliches `SHAREPOINT_BACKEND=" "` nicht als eingeschaltet zählt — der Resolver in
-`utils/sharepoint_backend.py:87` strippt ohnehin. Die drei Zusicherungen oben sind in
-`test/sharepoint/test_sharepoint_backend_compat.py::TestSharePointPickerStaysVisibleOnGraph`
-festgenagelt, inklusive der Gegenprobe, dass `SHAREPOINT_BACKEND=''` OneDrive **nicht**
-mit abschaltet.
+### Korrektur 2026-08-03: der Plan-Vorschlag war zu breit
+
+Die oben vorgeschlagene Formel `SHAREPOINT_BACKEND != ''` wurde zunächst genau so gebaut —
+und ist **falsch**. Der Denkfehler steckt schon im Plansatz „bestehende Graph-Instanzen
+bekommen das Flag also wahr und sehen den Picker weiter". Wahr ist nur die erste Hälfte.
+Gemessen:
+
+| | Default |
+|---|---|
+| `ENABLE_ONEDRIVE_INTEGRATION` (`config.py:842`) | `'False'` |
+| altes Gate `enable_onedrive_integration && enable_onedrive_business` | **False** |
+| `SHAREPOINT_BACKEND != ''` bei Default `'graph'` | **True** |
+
+Eine Graph-Instanz **ohne** OneDrive-Konfiguration sah den Picker vorher *nicht* — sie hätte
+ihn danach neu bekommen, samt 401 beim Klick. Das ist exakt der Fehler, den derselbe Plan
+zwei Absätze weiter unten verbietet („Ein sichtbarer, kaputter Menüpunkt ist schlechter als
+gar keiner"), nur durch die andere Tür. Der erste Test dazu hieß
+`test_graph_default_still_shows_the_picker_without_any_onedrive_config` und nagelte die
+Regression als Zusicherung fest — „still shows" war gemessen „shows for the first time".
+
+Die Frage ist nicht „ist ein Backend benannt", sondern **„kann diese Instanz einen Import
+überhaupt bedienen"**. Deshalb pro Backend:
+
+```python
+_sharepoint_backend = SHAREPOINT_BACKEND.strip().lower()
+if _sharepoint_backend == 'onprem':
+    enable_sharepoint_import = bool(SHAREPOINT_ONPREM_SITE_URL)
+elif _sharepoint_backend == 'graph':
+    enable_sharepoint_import = bool(config.get('onedrive.enable') and ENABLE_ONEDRIVE_BUSINESS)
+else:
+    enable_sharepoint_import = False
+```
+
+`graph` verhält sich damit bitgenau wie vor dem Feature — das ist die Zusicherung aus §9 des
+KHKI-Runbooks. `onprem` verlangt die Farm-URL, weil der Resolver ohne sie 500 wirft
+(`utils/sharepoint_backend.py:187`); den Menüpunkt anzubieten hieße, diesen Fehler zu
+garantieren. Sechs Fälle in
+`test/sharepoint/test_sharepoint_backend_compat.py::TestSharePointPickerVisibility`, wobei
+die **Graph**-Fälle die tragenden sind, nicht der on-prem-Fall.
+
+Gefunden hat das der Port-Workflow (`docs/PLAN_PORT_LDAP_SHAREPOINT_TO_0.11.md`, M8), nicht
+die Tests — die waren ja Teil des Fehlers.
 
 ---
 

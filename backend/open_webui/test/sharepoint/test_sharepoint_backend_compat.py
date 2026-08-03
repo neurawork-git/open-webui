@@ -93,14 +93,18 @@ class TestDefaultsLeaveGraphDeploymentsAlone:
         assert await get_sharepoint_backend_for_user(USER_ID) is None
 
 
-class TestSharePointPickerStaysVisibleOnGraph:
-    """`enable_sharepoint_import` in /api/config is what un-hides the picker. It used to be
-    gated on the two OneDrive flags, which need an Entra app id -- so an on-prem farm could
-    never reach it. It now follows SHAREPOINT_BACKEND, and these pin both directions.
+class TestSharePointPickerVisibility:
+    """`enable_sharepoint_import` in /api/config is what un-hides the picker.
+
+    It must answer "can this instance actually serve a SharePoint import?", not merely "is a
+    backend named". An earlier revision keyed it off `SHAREPOINT_BACKEND != ''`; since that
+    defaults to 'graph', the menu entry appeared on *every* deployment -- including Graph
+    customers with no Entra app, where it opens and 401s. These tests exist to keep that from
+    coming back, so the Graph rows below are the important ones, not the on-prem row.
     """
 
     @staticmethod
-    async def _features(backend: str, onedrive_enabled: bool):
+    async def _features(backend: str, onedrive_enabled: bool, onprem_url: str = '', business: bool = True):
         from open_webui.main import get_app_config
 
         request = MagicMock()
@@ -111,6 +115,8 @@ class TestSharePointPickerStaysVisibleOnGraph:
 
         with (
             patch('open_webui.main.SHAREPOINT_BACKEND', backend),
+            patch('open_webui.main.SHAREPOINT_ONPREM_SITE_URL', onprem_url),
+            patch('open_webui.main.ENABLE_ONEDRIVE_BUSINESS', business),
             patch('open_webui.main.decode_token', return_value={'id': USER_ID}),
             patch('open_webui.main.get_http_authorization_cred') as mock_cred,
             patch('open_webui.main.Config.get_many', new=AsyncMock(return_value=config)),
@@ -123,21 +129,47 @@ class TestSharePointPickerStaysVisibleOnGraph:
         return result['features']
 
     @pytest.mark.asyncio
-    async def test_graph_default_still_shows_the_picker_without_any_onedrive_config(self):
-        """The compatibility guarantee: SHAREPOINT_BACKEND defaults to 'graph', so every
-        existing deployment keeps the picker -- including ones with OneDrive switched off,
-        which previously only saw it by accident of sharing OneDrive's Entra app id."""
+    async def test_graph_without_onedrive_does_not_grow_a_new_menu_entry(self):
+        """**The regression guard.** A Graph deployment with OneDrive off saw no picker
+        before this feature existed, and must still see none -- it has no Entra app, so the
+        entry would only lead to a 401. This is the behavioural equality runbook section 9
+        promises, and it is what a bare `SHAREPOINT_BACKEND != ''` silently broke."""
         features = await self._features('graph', onedrive_enabled=False)
 
+        assert features['enable_sharepoint_import'] is False
+
+    @pytest.mark.asyncio
+    async def test_graph_with_onedrive_configured_keeps_its_picker(self):
+        """The other half of the guarantee: deployments that *did* see it still do."""
+        features = await self._features('graph', onedrive_enabled=True, business=True)
+
         assert features['enable_sharepoint_import'] is True
-        # The old gate's second flag is not even in the response when OneDrive is off.
-        assert 'enable_onedrive_business' not in features
+
+    @pytest.mark.asyncio
+    async def test_graph_without_the_entra_business_app_stays_hidden(self):
+        """`ENABLE_ONEDRIVE_BUSINESS` is False when ONEDRIVE_CLIENT_ID_BUSINESS is unset, and
+        the Graph picker cannot work without it."""
+        features = await self._features('graph', onedrive_enabled=True, business=False)
+
+        assert features['enable_sharepoint_import'] is False
 
     @pytest.mark.asyncio
     async def test_onprem_shows_the_picker_without_entra(self):
-        features = await self._features('onprem', onedrive_enabled=False)
+        """The point of the whole feature: an NTLM farm has no Entra app and must still get
+        the picker."""
+        features = await self._features('onprem', onedrive_enabled=False, onprem_url='https://portal.example.intern')
 
         assert features['enable_sharepoint_import'] is True
+        # ...without dragging OneDrive along.
+        assert features['enable_onedrive_integration'] is False
+
+    @pytest.mark.asyncio
+    async def test_onprem_without_a_farm_url_stays_hidden(self):
+        """`get_sharepoint_backend` raises 500 when SHAREPOINT_ONPREM_SITE_URL is unset
+        (utils/sharepoint_backend.py:187). Offering the entry would guarantee that error."""
+        features = await self._features('onprem', onedrive_enabled=False, onprem_url='')
+
+        assert features['enable_sharepoint_import'] is False
 
     @pytest.mark.asyncio
     async def test_empty_backend_is_the_opt_out(self):
