@@ -1097,7 +1097,12 @@ PIP_PACKAGE_INDEX_OPTIONS = os.getenv('PIP_PACKAGE_INDEX_OPTIONS', '').split()
 # OFFLINE_MODE
 ####################################
 
-ENABLE_VERSION_UPDATE_CHECK = os.getenv('ENABLE_VERSION_UPDATE_CHECK', 'true').lower() == 'true'
+# FORK: upstream defaults this to 'true', which polls
+# api.github.com/repos/open-webui/open-webui for the latest *upstream* release. This fork
+# carries changes that are not in those tags, so the banner advertises a version that
+# cannot be installed here. Off by default until the fork tags its own releases; set
+# ENABLE_VERSION_UPDATE_CHECK=true to get the upstream comparison back.
+ENABLE_VERSION_UPDATE_CHECK = os.getenv('ENABLE_VERSION_UPDATE_CHECK', 'false').lower() == 'true'
 OFFLINE_MODE = os.getenv('OFFLINE_MODE', 'false').lower() == 'true'
 
 if OFFLINE_MODE:

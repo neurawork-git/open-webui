@@ -327,6 +327,58 @@ export const updateUserSettings = async (token: string, settings: object) => {
 	return res;
 };
 
+// FORK: self-service for the LDAP credential store. Metadata only -- no endpoint here
+// ever returns the stored secret. See docs/LDAP_SHAREPOINT_BACKEND.md.
+export type CredentialStatus = {
+	exists: boolean;
+	opted_in: boolean;
+	account?: string | null;
+	expires_at?: number | null;
+	last_used_at?: number | null;
+};
+
+const credentialRequest = async (token: string, path: string, init: RequestInit = {}) => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/users/user/credentials/${path}`, {
+		...init,
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			console.error(err);
+			error = err.detail;
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const getCredentialStatus = async (token: string): Promise<CredentialStatus> =>
+	credentialRequest(token, 'status');
+
+export const setCredentialOptIn = async (
+	token: string,
+	optedIn: boolean
+): Promise<CredentialStatus> =>
+	credentialRequest(token, 'opt-in', {
+		method: 'POST',
+		body: JSON.stringify({ opted_in: optedIn })
+	});
+
+export const deleteCredential = async (token: string) =>
+	credentialRequest(token, 'ad', { method: 'DELETE' });
+
 export const getUserInfoById = async (token: string, userId: string) => {
 	let error = null;
 

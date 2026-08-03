@@ -7,6 +7,7 @@
 	import { WEBUI_BASE_URL } from '$lib/constants';
 
 	import UpdatePassword from './Account/UpdatePassword.svelte';
+	import CredentialStore from './Account/CredentialStore.svelte';
 	import { getGravatarUrl } from '$lib/apis/utils';
 	import { generateInitialsImage, canvasPixelTest } from '$lib/utils';
 	import { copyToClipboard } from '$lib/utils';
@@ -251,6 +252,12 @@
 		{#if $config?.features.enable_login_form && $config?.features.enable_password_change_form}
 			<div class="mt-2">
 				<UpdatePassword />
+			</div>
+		{/if}
+
+		{#if $config?.features?.enable_ldap_credential_store}
+			<div class="mt-2">
+				<CredentialStore />
 			</div>
 		{/if}
 

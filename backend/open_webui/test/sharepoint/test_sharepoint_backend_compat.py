@@ -93,6 +93,70 @@ class TestDefaultsLeaveGraphDeploymentsAlone:
         assert await get_sharepoint_backend_for_user(USER_ID) is None
 
 
+class TestSharePointPickerStaysVisibleOnGraph:
+    """`enable_sharepoint_import` in /api/config is what un-hides the picker. It used to be
+    gated on the two OneDrive flags, which need an Entra app id -- so an on-prem farm could
+    never reach it. It now follows SHAREPOINT_BACKEND, and these pin both directions.
+    """
+
+    @staticmethod
+    async def _features(backend: str, onedrive_enabled: bool):
+        from open_webui.main import get_app_config
+
+        request = MagicMock()
+        request.headers.get.return_value = 'Bearer t'
+        request.cookies = {}
+
+        config = {'onedrive.enable': onedrive_enabled}
+
+        with (
+            patch('open_webui.main.SHAREPOINT_BACKEND', backend),
+            patch('open_webui.main.decode_token', return_value={'id': USER_ID}),
+            patch('open_webui.main.get_http_authorization_cred') as mock_cred,
+            patch('open_webui.main.Config.get_many', new=AsyncMock(return_value=config)),
+            patch('open_webui.main.Users.get_user_by_id', new=AsyncMock(return_value=_make_user())),
+            patch('open_webui.main.Users.has_users', new=AsyncMock(return_value=True)),
+        ):
+            mock_cred.return_value = MagicMock(credentials='t')
+            result = await get_app_config(request)
+
+        return result['features']
+
+    @pytest.mark.asyncio
+    async def test_graph_default_still_shows_the_picker_without_any_onedrive_config(self):
+        """The compatibility guarantee: SHAREPOINT_BACKEND defaults to 'graph', so every
+        existing deployment keeps the picker -- including ones with OneDrive switched off,
+        which previously only saw it by accident of sharing OneDrive's Entra app id."""
+        features = await self._features('graph', onedrive_enabled=False)
+
+        assert features['enable_sharepoint_import'] is True
+        # The old gate's second flag is not even in the response when OneDrive is off.
+        assert 'enable_onedrive_business' not in features
+
+    @pytest.mark.asyncio
+    async def test_onprem_shows_the_picker_without_entra(self):
+        features = await self._features('onprem', onedrive_enabled=False)
+
+        assert features['enable_sharepoint_import'] is True
+
+    @pytest.mark.asyncio
+    async def test_empty_backend_is_the_opt_out(self):
+        features = await self._features('', onedrive_enabled=True)
+
+        assert features['enable_sharepoint_import'] is False
+        # ...and it must not take OneDrive down with it.
+        assert features['enable_onedrive_integration'] is True
+
+
+class TestUpdateCheckDoesNotAdvertiseUpstreamReleases:
+    def test_version_update_check_is_off_by_default(self):
+        """The check compares against upstream's tags, which cannot be installed on this
+        fork. Off unless a deployment asks for it back."""
+        from open_webui.env import ENABLE_VERSION_UPDATE_CHECK
+
+        assert ENABLE_VERSION_UPDATE_CHECK is False
+
+
 class TestLegacyKnowledgeBasesKeepWorking:
     @pytest.mark.asyncio
     @patch(f'{_KNOWLEDGE_MOD}.Knowledges')

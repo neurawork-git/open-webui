@@ -83,6 +83,8 @@ from open_webui.env import (
     ENABLE_COMPRESSION_MIDDLEWARE,
     ENABLE_CUSTOM_MODEL_FALLBACK,
     ENABLE_EASTER_EGGS,
+    # LDAP credential store (fork)
+    ENABLE_LDAP_CREDENTIAL_STORE,
     EXTERNAL_PWA_MANIFEST_URL,
     # OAuth Back-Channel Logout
     ENABLE_OAUTH_BACKCHANNEL_LOGOUT,
@@ -106,6 +108,8 @@ from open_webui.env import (
     RESET_CONFIG_ON_START,
     SAFE_MODE,
     SCIM_TOKEN,
+    # SharePoint backend selection (fork)
+    SHAREPOINT_BACKEND,
     VERSION,
     # Admin Account Runtime Creation
     WEBUI_ADMIN_EMAIL,
@@ -1952,6 +1956,15 @@ async def get_app_config(request: Request):
                     'enable_admin_analytics': ENABLE_ADMIN_ANALYTICS,
                     'enable_google_drive_integration': config.get('google_drive.enable'),
                     'enable_onedrive_integration': config.get('onedrive.enable'),
+                    # FORK: the SharePoint picker used to hang off the two OneDrive flags,
+                    # which need an Entra app id -- an on-prem farm has none, so
+                    # SHAREPOINT_BACKEND=onprem was structurally unreachable from the UI.
+                    # Derived from the backend mode instead; '' opts out of the import.
+                    'enable_sharepoint_import': SHAREPOINT_BACKEND.strip() != '',
+                    # FORK: gates the credential section in account settings. The status
+                    # endpoint cannot stand in for this -- it reports exists=False,
+                    # opted_in=True both when the store is off and when it is on but empty.
+                    'enable_ldap_credential_store': ENABLE_LDAP_CREDENTIAL_STORE,
                     'enable_memories': config.get('memories.enable'),
                     **(
                         {
