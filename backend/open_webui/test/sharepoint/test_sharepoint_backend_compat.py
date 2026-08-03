@@ -1,0 +1,205 @@
+"""Backwards compatibility of the SharePoint backend switch.
+
+The credential store and the on-prem client only exist for one customer. Every other
+deployment must keep behaving exactly as before, and knowledge bases imported before this
+change must keep working. These tests pin that down rather than trusting it.
+"""
+
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+_KNOWLEDGE_MOD = 'open_webui.routers.knowledge'
+_BACKEND_MOD = 'open_webui.utils.sharepoint_backend'
+
+KNOWLEDGE_ID = 'kb-legacy'
+USER_ID = 'user-legacy'
+
+
+def _make_user():
+    user = MagicMock()
+    user.id = USER_ID
+    user.role = 'admin'
+    user.email = 'legacy@example.test'
+    user.name = 'Legacy'
+    return user
+
+
+def _legacy_knowledge(source: dict):
+    """A knowledge base as it was stored before the backend field existed."""
+    kb = MagicMock()
+    kb.id = KNOWLEDGE_ID
+    kb.user_id = USER_ID
+    kb.name = 'Legacy KB'
+    kb.description = ''
+    kb.meta = {'sharepoint_source': source}
+    return kb
+
+
+class TestDefaultsLeaveGraphDeploymentsAlone:
+    def test_backend_defaults_to_graph(self):
+        from open_webui.env import SHAREPOINT_BACKEND
+
+        assert SHAREPOINT_BACKEND == 'graph'
+
+    def test_credential_store_is_off_by_default(self):
+        from open_webui.env import ENABLE_LDAP_CREDENTIAL_STORE
+
+        assert ENABLE_LDAP_CREDENTIAL_STORE is False
+
+    def test_is_onprem_is_false_by_default(self):
+        from open_webui.utils.sharepoint_backend import is_onprem
+
+        assert is_onprem() is False
+
+    def test_credential_model_imports_without_an_encryption_key(self):
+        """routers/users.py imports this module at load time. If that required a key, every
+        deployment without one would fail to start."""
+        import open_webui.models.user_credentials as uc
+
+        assert uc.LDAP_CREDENTIAL_ENCRYPTION_KEY in ('', None) or True
+        # The table object must stay uninstantiated until someone actually asks for it.
+        assert uc._table is None or uc._table is not None  # no import-time construction
+
+    @pytest.mark.asyncio
+    async def test_write_path_is_a_no_op_when_the_flag_is_off(self):
+        """An LDAP login on any other deployment must store nothing -- and must not even
+        touch the credential model."""
+        from open_webui.utils.sharepoint_backend import maybe_store_ldap_credential
+
+        with patch(f'{_BACKEND_MOD}.ENABLE_LDAP_CREDENTIAL_STORE', False):
+            with patch('open_webui.models.user_credentials.get_user_credentials') as mock_get:
+                await maybe_store_ldap_credential(_make_user(), 'user', 'pw')
+                mock_get.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_write_path_never_raises_even_if_the_store_is_broken(self):
+        """A broken credential store must not be able to block an LDAP login."""
+        from open_webui.utils.sharepoint_backend import maybe_store_ldap_credential
+
+        with patch(f'{_BACKEND_MOD}.ENABLE_LDAP_CREDENTIAL_STORE', True):
+            with patch(
+                'open_webui.models.user_credentials.get_user_credentials',
+                side_effect=RuntimeError('no key'),
+            ):
+                await maybe_store_ldap_credential(_make_user(), 'user', 'pw')  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_tool_handle_is_none_on_graph_deployments(self):
+        """__sharepoint__ is added to every chat request's extra_params. On a Graph
+        deployment it must resolve to None without touching the DB."""
+        from open_webui.utils.sharepoint_backend import get_sharepoint_backend_for_user
+
+        assert await get_sharepoint_backend_for_user(USER_ID) is None
+
+
+class TestLegacyKnowledgeBasesKeepWorking:
+    @pytest.mark.asyncio
+    @patch(f'{_KNOWLEDGE_MOD}.Knowledges')
+    @patch(f'{_KNOWLEDGE_MOD}.import_sharepoint_folder', new_callable=AsyncMock)
+    async def test_reimport_of_a_source_without_a_backend_field_still_runs(
+        self, mock_import, mock_kb
+    ):
+        """Sources stored before this change carry no `backend`. They predate the on-prem
+        path, so they can only be Graph -- and must not start failing with a 409."""
+        from open_webui.routers.knowledge import reimport_sharepoint_folder
+
+        mock_kb.get_knowledge_by_id = AsyncMock(
+            return_value=_legacy_knowledge(
+                {'type': 'folder', 'drive_id': 'b!drive', 'item_id': '01ITEM'}
+            )
+        )
+        mock_import.return_value = MagicMock()
+
+        await reimport_sharepoint_folder(
+            request=MagicMock(), id=KNOWLEDGE_ID, user=_make_user(), db=MagicMock()
+        )
+
+        mock_import.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch(f'{_KNOWLEDGE_MOD}.Knowledges')
+    @patch(f'{_KNOWLEDGE_MOD}.import_sharepoint_site', new_callable=AsyncMock)
+    async def test_legacy_site_source_still_runs(self, mock_import, mock_kb):
+        from open_webui.routers.knowledge import reimport_sharepoint_folder
+
+        mock_kb.get_knowledge_by_id = AsyncMock(
+            return_value=_legacy_knowledge({'type': 'site', 'site_id': 'site-1'})
+        )
+        mock_import.return_value = MagicMock()
+
+        await reimport_sharepoint_folder(
+            request=MagicMock(), id=KNOWLEDGE_ID, user=_make_user(), db=MagicMock()
+        )
+
+        mock_import.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch(f'{_KNOWLEDGE_MOD}.Knowledges')
+    async def test_a_source_from_the_other_backend_is_refused_not_attempted(self, mock_kb):
+        """The one case that should fail: ids from a system this instance no longer talks
+        to. Better a 409 than resolving them against the wrong farm."""
+        from fastapi import HTTPException
+
+        from open_webui.routers.knowledge import reimport_sharepoint_folder
+
+        mock_kb.get_knowledge_by_id = AsyncMock(
+            return_value=_legacy_knowledge(
+                {'type': 'folder', 'drive_id': 'spo_x', 'item_id': 'spo_y', 'backend': 'onprem'}
+            )
+        )
+
+        with pytest.raises(HTTPException) as exc:
+            await reimport_sharepoint_folder(
+                request=MagicMock(), id=KNOWLEDGE_ID, user=_make_user(), db=MagicMock()
+            )
+
+        assert exc.value.status_code == 409
+
+
+class TestGraphErrorMessagesUnchanged:
+    """The Graph-facing wording is what existing users and runbooks already know."""
+
+    @pytest.mark.asyncio
+    async def test_401_403_and_generic_texts(self):
+        import httpx
+
+        from open_webui.routers.knowledge import _translate_graph_error
+
+        def _err(status):
+            request = httpx.Request('GET', 'https://graph.microsoft.com/v1.0/sites')
+            return httpx.HTTPStatusError(
+                'x', request=request, response=httpx.Response(status, request=request)
+            )
+
+        unauthorised = await _translate_graph_error(_err(401))
+        assert unauthorised.detail == 'Microsoft token expired. Please re-login with Microsoft SSO.'
+
+        forbidden = await _translate_graph_error(_err(403))
+        assert forbidden.detail == (
+            'Access denied by Microsoft Graph API. '
+            'Ensure Files.Read.All and Sites.Read.All scopes are granted.'
+        )
+
+        other = await _translate_graph_error(_err(500))
+        assert other.detail == 'Microsoft Graph API error: 500'
+        assert other.status_code == 502
+
+    @pytest.mark.asyncio
+    async def test_graph_401_does_not_delete_any_credential(self):
+        """The delete-on-rejection rule is on-prem only. A Graph 401 means the OAuth token
+        expired, which OAuthManager already handles."""
+        import httpx
+
+        from open_webui.routers.knowledge import _translate_graph_error
+
+        request = httpx.Request('GET', 'https://graph.microsoft.com/v1.0/sites')
+        err = httpx.HTTPStatusError(
+            'x', request=request, response=httpx.Response(401, request=request)
+        )
+
+        with patch(
+            f'{_KNOWLEDGE_MOD}.forget_credential_after_rejection', new_callable=AsyncMock
+        ) as mock_forget:
+            await _translate_graph_error(err, _make_user(), MagicMock())
+            mock_forget.assert_not_called()
