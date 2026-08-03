@@ -22,6 +22,13 @@ vi.mock('uuid', () => ({ v4: () => 'test-uuid' }));
 const mockFetch = vi.fn();
 vi.stubGlobal('fetch', mockFetch);
 
+// vitest runs in the `node` environment, so there is no `window`. The two functions under
+// test only read `window.location.origin` (for the MSAL redirectUri and the diagnostic
+// message), so a stub is enough -- pulling in jsdom for one string would be a heavy way to
+// get it. `openOneDrivePicker` guards on `typeof window === 'undefined'`, but no test here
+// exercises it.
+vi.stubGlobal('window', { location: { origin: 'http://localhost:5173' } });
+
 // Config response that OneDriveConfig.getCredentials() fetches
 const configResponse = {
 	onedrive: {
