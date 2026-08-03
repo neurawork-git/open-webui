@@ -554,7 +554,7 @@ class SharePointOnPremClient:
         )
         name = data.get('Name', '')
         return GraphFileItem(
-            id=data.get('ServerRelativeUrl', item_id),
+            id=encode_id(data.get('ServerRelativeUrl') or path_url),
             name=name,
             size=int(data.get('Length') or 0),
             content_type=_mime_for(name),
