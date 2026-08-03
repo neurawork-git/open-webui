@@ -196,6 +196,20 @@ Zusätzlich end-to-end über die **echten HTTP-Routen** (ASGI, Session-Nutzer ge
 liefert die drei echten PDFs. Ebenso geprüft: Opt-out hält über den nächsten Login hinweg,
 und ohne Credential kommt ein sprechender 401.
 
+**Der KB-Import selbst ist live durchgelaufen** (2026-08-03): Wissensdatenbank anlegen →
+`list-folder` → `import-file` → Datei liegt als File-Objekt vor, ist über
+`knowledge_file` mit der KB verknüpft, und aus dem PDF wurden 3.162 Zeichen extrahiert.
+`persist-source` schreibt `backend: onprem`.
+
+Zwei Stolpersteine, falls jemand diesen Lauf nachstellt:
+- `httpx.ASGITransport` fährt den **Lifespan nicht hoch**, und dort wird `app.state.ef`
+  gesetzt — ohne `app.router.lifespan_context(app)` scheitert der Import mit
+  `'State' object has no attribute 'ef'`.
+- Die KB-Mitgliedschaft steht in der Tabelle `knowledge_file`, **nicht** im `files`-Feld
+  der KB-Antwort. `Knowledges.has_file(kb_id, file_id)` ist die verlässliche Prüfung.
+  `add_file_to_knowledge_by_id` verschluckt zudem jede Exception und liefert `None` —
+  ein stiller Fehlschlag sieht dort aus wie ein Erfolg.
+
 **Noch offen:** die Gegenprobe mit einem zweiten, geringer berechtigten Konto. Erst sie
 weist die Rechtetrennung nach — ein erfolgreicher Durchlauf mit einem Konto zeigt nur, dass
 Zugriff funktioniert, nicht dass er korrekt begrenzt ist.
