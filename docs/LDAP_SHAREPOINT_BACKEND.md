@@ -183,7 +183,44 @@ Domänencontroller.
 | `test/sharepoint/test_sharepoint_import_onprem.py` | Die **KB-Import-Endpunkte** über das On-Prem-Backend: Ordner-Import, Einzeldatei, Listing, `backend`-Feld in `sharepoint_source`, 409 beim Re-Import gegen das falsche Backend, und dass ein echter 401 das Credential genau einmal verwirft |
 | `test/sharepoint/test_sharepoint_import.py` | Bestehende Import-Tests (Graph-Pfad), auf den Resolver umgezogen |
 
-## 8. Live-Verifikation
+## 8. Rückwärtskompatibilität
+
+Das Feature existiert für **einen** Kunden. Alle anderen Instanzen (Falkensteg, Stadtbau,
+intern) müssen sich exakt wie vorher verhalten. Festgenagelt in
+`test/sharepoint/test_sharepoint_backend_compat.py`, nicht bloss behauptet.
+
+**Defaults ohne jede Konfiguration:** `SHAREPOINT_BACKEND=graph`,
+`ENABLE_LDAP_CREDENTIAL_STORE=false`, kein Schlüssel. Die Instanz bootet, `is_onprem()` ist
+`False`, der Graph-Pfad läuft.
+
+**Der Graph-Credential-Pfad ist wörtlich derselbe.** `_graph_backend` in
+`utils/sharepoint_backend.py` ist die verschobene Fassung des früheren
+`knowledge.py::_get_microsoft_access_token`; der einzige funktionale Unterschied ist
+`return GraphClient(access_token)` statt `return access_token`. Die drei Graph-Fehlertexte
+sind wortgleich — Runbooks zitieren sie.
+
+**Was sich trotzdem ändert, unabhängig vom Flag** — alles additiv, keine Verhaltensänderung:
+
+| Änderung | Wirkung auf Graph-Instanzen |
+|---|---|
+| Migration legt `user_credential` an | leere Tabelle, sonst nichts |
+| `sharepoint_source` bekommt `backend: 'graph'` | zusätzliches Feld bei neuen Importen |
+| `extra_params` bekommt `__sharepoint__` | immer `None`, ohne DB-Zugriff |
+| `SharePointDriveSummary.item_count` | zusätzliches Feld, Wert `0` |
+| `_translate_graph_error` ist async | rein intern, gleiche Texte |
+| `maybe_store_ldap_credential` im LDAP-Login | kehrt sofort zurück, wirft nie |
+
+**Bestehende Wissensdatenbanken:** Vor dieser Änderung importierte Quellen haben kein
+`backend`-Feld. Ein fehlender Wert gilt als `graph` — solche KBs sind älter als der
+On-Prem-Pfad, können also nur von Graph stammen. Sie laufen unverändert weiter. Nur eine
+Quelle vom **anderen** Backend wird mit 409 abgelehnt; das ist besser, als fremde IDs
+gegen die falsche Farm aufzulösen.
+
+**Wenn der Store kaputt ist** (fehlender Schlüssel, DB-Fehler), scheitert **kein** Login:
+der Schreibpfad fängt, loggt ohne Wert und macht weiter. Ein Credential-Speicher darf
+niemanden aussperren.
+
+## 9. Live-Verifikation
 
 Gegen `portal.skkiel.intern` am 2026-07-31 mit einem echten AD-Konto durchlaufen:
 Identität `i:0#.w|skkiel\<konto>` (claims-basiert, **kein Dienstkonto**), 7 Bibliotheken,
