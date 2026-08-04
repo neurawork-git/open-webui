@@ -1071,10 +1071,6 @@ CHUNK_OVERLAP = int(os.getenv('CHUNK_OVERLAP', '100'))
 DEFAULT_RAG_TEMPLATE = """### Task
 Respond to the user query using the provided context, incorporating inline citations in the format [id] **only when the <source> tag includes an explicit id attribute** (e.g., <source id="1">).
 
-### Knowledge Sources
-The following knowledge bases were searched for this query:
-{{KNOWLEDGE_BASES}}
-
 ### Retrieved Context
 <context>
 {{CONTEXT}}
