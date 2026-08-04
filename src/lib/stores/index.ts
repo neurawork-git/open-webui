@@ -199,7 +199,24 @@ type OllamaModelDetails = {
 	quantization_level: string;
 };
 
+// FORK: mirrors backend/open_webui/models/knowledge.py::RagSettings 1:1. Every field is
+// optional because "unset" is what makes a level fall through to the next one
+// (user -> model -> knowledge base -> global); a `false` is a real override, `undefined`
+// is not. Keep in sync with the Pydantic model -- it is the authority.
+export type RagSettings = {
+	top_k?: number | null;
+	top_k_reranker?: number | null;
+	relevance_threshold?: number | null;
+	enable_hybrid_search?: boolean | null;
+	hybrid_bm25_weight?: number | null;
+	full_context?: boolean | null;
+	enable_reranking?: boolean | null;
+};
+
 type Settings = {
+	// FORK: user-level RAG overrides, edited in Settings/General.svelte and merged
+	// server-side over the per-KB and per-model levels.
+	rag_settings?: RagSettings;
 	pinnedModels?: never[];
 	toolServers?: never[];
 	detectArtifacts?: boolean;

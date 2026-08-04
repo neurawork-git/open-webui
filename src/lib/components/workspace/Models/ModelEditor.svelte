@@ -2,7 +2,7 @@
 	import { toast } from 'svelte-sonner';
 
 	import { onMount, getContext, tick } from 'svelte';
-	import { models, tools, functions, user } from '$lib/stores';
+	import { models, tools, functions, user, type RagSettings } from '$lib/stores';
 	import { WEBUI_BASE_URL, DEFAULT_CAPABILITIES } from '$lib/constants';
 
 	import { getTools } from '$lib/apis/tools';
@@ -85,7 +85,11 @@
 			profile_image_url: `${WEBUI_BASE_URL}/static/favicon.png`,
 			description: '',
 			suggestion_prompts: null,
-			tags: []
+			tags: [],
+			// FORK: per-model RAG overrides. Declared here because `info`'s type is
+			// inferred from this literal -- without it every `info.meta.rag_settings`
+			// use site is a type error.
+			rag_settings: {} as RagSettings
 		},
 		params: {
 			system: ''

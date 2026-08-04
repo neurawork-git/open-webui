@@ -188,6 +188,17 @@ class TestUpdateCheckDoesNotAdvertiseUpstreamReleases:
 
         assert ENABLE_VERSION_UPDATE_CHECK is False
 
+    def test_version_is_marked_as_a_fork_build(self):
+        """`/api/version` must not report a bare upstream version -- this build does not
+        behave like upstream 0.11.0. The suffix is what tells a support case apart."""
+        import open_webui.env as env
+
+        assert env.FORK_VERSION_SUFFIX, 'the fork suffix must not default to empty again'
+        assert env.VERSION.endswith(f'-{env.FORK_VERSION_SUFFIX}')
+        # ...and the upstream part stays intact in front of it, so version comparisons
+        # and support questions still find the real base.
+        assert env.VERSION.split('-')[0].count('.') == 2
+
 
 class TestLegacyKnowledgeBasesKeepWorking:
     @pytest.mark.asyncio

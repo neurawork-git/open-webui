@@ -144,11 +144,16 @@ else:
 
 VERSION = PACKAGE_DATA['version']
 
-# Fork version suffix - allows forks to append a custom suffix without modifying package.json
-# Example: FORK_VERSION_SUFFIX="neurawork.1" results in version "0.6.40-neurawork.1"
-FORK_VERSION_SUFFIX = os.environ.get("FORK_VERSION_SUFFIX", "")
+# FORK: appends a suffix to the reported version without touching package.json, so
+# /api/version and the UI footer say what they actually are: `0.11.0-neurawork`, not a
+# plain `0.11.0` that promises upstream behaviour this build does not have.
+#
+# Defaults to 'neurawork' -- every image built from this repo IS the fork, and a default
+# of '' meant the mechanism existed for a year without ever being visible. Set it to
+# something more specific per deployment (e.g. 'neurawork.khki') or to '' to opt out.
+FORK_VERSION_SUFFIX = os.getenv('FORK_VERSION_SUFFIX', 'neurawork')
 if FORK_VERSION_SUFFIX:
-    VERSION = f"{VERSION}-{FORK_VERSION_SUFFIX}"
+    VERSION = f'{VERSION}-{FORK_VERSION_SUFFIX}'
 
 
 DEPLOYMENT_ID = os.getenv('DEPLOYMENT_ID', '')
