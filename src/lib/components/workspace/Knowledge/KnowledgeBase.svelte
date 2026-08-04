@@ -1942,13 +1942,31 @@
 												directories={directoryItems}
 												{knowledge}
 												{selectedFileId}
-												onClick={(fileId) => {
-													// Row click → quick read-only preview modal (fork WIP).
-													if (fileItems) {
-														const file = fileItems.find((f) => f.id === fileId);
-														if (file) {
-															selectedFile = file;
-															showFilePreview = true;
+												onClick={async (fileId) => {
+													// Row click → quick read-only preview modal.
+													if (!fileItems) {
+														return;
+													}
+													const file = fileItems.find((f) => f.id === fileId);
+													if (!file) {
+														return;
+													}
+
+													selectedFile = file;
+													showFilePreview = true;
+
+													// The listing is fetched WITHOUT content unless the "File
+													// content" toggle is on (`includeContent`, default false), so
+													// the row object usually has no `data.content` and the modal
+													// would render "No content". Fetch it on demand -- the same
+													// thing fileSelectHandler does for the drawer.
+													if (file?.data?.content === undefined) {
+														const fileWithContent = await getFileById(
+															localStorage.token,
+															file.id
+														).catch(() => null);
+														if (fileWithContent && selectedFile?.id === file.id) {
+															selectedFile = fileWithContent;
 														}
 													}
 												}}
@@ -2004,7 +2022,28 @@
 						</div>
 
 						{#if selectedFile !== null}
-							<FileItemModal bind:show={showFilePreview} item={selectedFile} edit={false} />
+							<!--
+								FileItemModal is upstream and reads the content from `item.file.data.content`
+								-- it expects the chat's wrapper shape ({type,file,name,...}, see
+								MessageInput.svelte), not a bare file row. Passing the row straight through
+								left `item.file` undefined and the modal always showed "No content".
+								Wrapped here rather than teaching the modal a second shape, which would turn
+								an untouched upstream file into fork overlay.
+							-->
+							<FileItemModal
+								bind:show={showFilePreview}
+								item={selectedFile
+									? {
+											type: 'file',
+											id: selectedFile.id,
+											name: selectedFile.filename,
+											size: selectedFile.meta?.size,
+											meta: selectedFile.meta,
+											file: selectedFile
+										}
+									: null}
+								edit={false}
+							/>
 						{/if}
 
 						{#if selectedFileId !== null}
