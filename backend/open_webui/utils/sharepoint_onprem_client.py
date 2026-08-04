@@ -474,6 +474,14 @@ class SharePointOnPremClient:
                     id=encode_id(sub.get('ServerRelativeUrl', '')),
                     name=name,
                     is_folder=True,
+                    # ponytail: 0 = unknown, not empty. GetFolderByServerRelativeUrl
+                    # returns no aggregate size for subfolders (Graph's driveItem.size
+                    # has no on-prem equivalent), and summing it would cost one request
+                    # per folder on every listing. The picker hides a 0 instead of
+                    # printing "0 B", and the import size check is unaffected -- it
+                    # walks the tree and sums real `Length` values. Upgrade path if a
+                    # number is ever needed up front: Folder/StorageMetrics, one extra
+                    # $expand per folder.
                     size=0,
                     child_count=int(sub.get('ItemCount') or 0),
                 )

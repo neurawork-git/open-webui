@@ -19,7 +19,11 @@
 
 	export let show = false;
 	export let onSiteSelected: (siteId: string, siteName: string) => void = () => {};
-	export let onFolderSelected: (driveId: string, itemId: string, displayName: string) => void = () => {};
+	export let onFolderSelected: (
+		driveId: string,
+		itemId: string,
+		displayName: string
+	) => void = () => {};
 
 	// -- Sites pane state -------------------------------------------------------
 	let sites: SharePointSiteSearchResult[] = [];
@@ -171,21 +175,12 @@
 		await loadChildren(driveId, folder.id, null);
 	};
 
-	const loadChildren = async (
-		driveId: string,
-		itemId: string,
-		nextLink: string | null
-	) => {
+	const loadChildren = async (driveId: string, itemId: string, nextLink: string | null) => {
 		if (nextLink) paneLoadingMore = true;
 		else paneLoading = true;
 		paneError = '';
 		try {
-			const res = await listSharePointFolderChildren(
-				localStorage.token,
-				driveId,
-				itemId,
-				nextLink
-			);
+			const res = await listSharePointFolderChildren(localStorage.token, driveId, itemId, nextLink);
 			if (!nextLink) {
 				folders = res.folders;
 				files = res.files;
@@ -242,10 +237,14 @@
 		if (!selectedSite) return;
 		const size = breadcrumb[0]?.size ?? 0;
 		const ok = confirm(
-			$i18n.t('Import the entire site "{{site}}" ({{size}}) into this KB?', {
-				site: selectedSite.display_name || selectedSite.name,
-				size: formatBytes(size)
-			})
+			size > 0
+				? $i18n.t('Import the entire site "{{site}}" ({{size}}) into this KB?', {
+						site: selectedSite.display_name || selectedSite.name,
+						size: formatBytes(size)
+					})
+				: $i18n.t('Import the entire site "{{site}}" into this KB?', {
+						site: selectedSite.display_name || selectedSite.name
+					})
 		);
 		if (!ok) return;
 		onSiteSelected(selectedSite.id, selectedSite.display_name || selectedSite.name);
@@ -265,10 +264,12 @@
 			.map((c) => c.label)
 			.join(' › ');
 		const ok = confirm(
-			$i18n.t('Import "{{path}}" ({{size}}) into this KB?', {
-				path: display,
-				size: formatBytes(current.size)
-			})
+			current.size > 0
+				? $i18n.t('Import "{{path}}" ({{size}}) into this KB?', {
+						path: display,
+						size: formatBytes(current.size)
+					})
+				: $i18n.t('Import "{{path}}" into this KB?', { path: display })
 		);
 		if (!ok) return;
 		onFolderSelected(current.driveId, current.itemId, display);
@@ -298,14 +299,15 @@
 	$: currentLevel = breadcrumb[breadcrumb.length - 1];
 	$: canImportCurrent =
 		currentLevel &&
-		(currentLevel.kind === 'site' ||
-			(!!currentLevel.driveId && !!currentLevel.itemId));
+		(currentLevel.kind === 'site' || (!!currentLevel.driveId && !!currentLevel.itemId));
 </script>
 
 <Modal bind:show size="xl">
 	<div class="flex flex-col h-[80vh]">
 		<!-- Header -->
-		<div class="flex items-center justify-between px-5 py-3 border-b border-gray-200 dark:border-gray-800">
+		<div
+			class="flex items-center justify-between px-5 py-3 border-b border-gray-200 dark:border-gray-800"
+		>
 			<div class="flex flex-col">
 				<div class="text-lg font-medium">{$i18n.t('Import from SharePoint')}</div>
 				{#if breadcrumb.length > 0}
@@ -330,7 +332,14 @@
 				aria-label="Close"
 				on:click={resetAndClose}
 			>
-				<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+				<svg
+					xmlns="http://www.w3.org/2000/svg"
+					fill="none"
+					viewBox="0 0 24 24"
+					stroke-width="1.5"
+					stroke="currentColor"
+					class="w-5 h-5"
+				>
 					<path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" />
 				</svg>
 			</button>
@@ -341,7 +350,9 @@
 			<!-- Left: Sites -->
 			<div class="w-72 border-r border-gray-200 dark:border-gray-800 flex flex-col">
 				<div class="p-3 border-b border-gray-200 dark:border-gray-800">
-					<div class="flex items-center gap-2 border border-gray-200 dark:border-gray-700 rounded-lg px-2 py-1.5">
+					<div
+						class="flex items-center gap-2 border border-gray-200 dark:border-gray-700 rounded-lg px-2 py-1.5"
+					>
 						<Search className="w-4 h-4 text-gray-500" strokeWidth="2" />
 						<input
 							type="text"
@@ -360,7 +371,8 @@
 					{:else}
 						{#each filteredSites() as site (site.id)}
 							<button
-								class="w-full text-left px-2 py-1.5 rounded-lg text-sm hover:bg-gray-50 dark:hover:bg-gray-800 {selectedSite?.id === site.id
+								class="w-full text-left px-2 py-1.5 rounded-lg text-sm hover:bg-gray-50 dark:hover:bg-gray-800 {selectedSite?.id ===
+								site.id
 									? 'bg-gray-100 dark:bg-gray-800'
 									: ''}"
 								on:click={() => selectSite(site)}
@@ -418,13 +430,22 @@
 										on:click={() => openDrive(drive)}
 									>
 										<div class="flex items-center gap-2 min-w-0">
-											<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-5 h-5 shrink-0 text-gray-500">
-												<path d="M3.75 3A1.75 1.75 0 0 0 2 4.75v10.5C2 16.216 2.784 17 3.75 17h12.5A1.75 1.75 0 0 0 18 15.25V7.75A1.75 1.75 0 0 0 16.25 6H10L8.72 4.72A1.75 1.75 0 0 0 7.48 4H3.75Z" />
+											<svg
+												xmlns="http://www.w3.org/2000/svg"
+												viewBox="0 0 20 20"
+												fill="currentColor"
+												class="w-5 h-5 shrink-0 text-gray-500"
+											>
+												<path
+													d="M3.75 3A1.75 1.75 0 0 0 2 4.75v10.5C2 16.216 2.784 17 3.75 17h12.5A1.75 1.75 0 0 0 18 15.25V7.75A1.75 1.75 0 0 0 16.25 6H10L8.72 4.72A1.75 1.75 0 0 0 7.48 4H3.75Z"
+												/>
 											</svg>
 											<div class="truncate font-medium text-sm">{drive.name}</div>
 										</div>
 										<div class="text-xs text-gray-500 shrink-0">
-											{formatBytes(drive.total_size)}
+											{#if drive.total_size > 0}
+												{formatBytes(drive.total_size)}
+											{/if}
 										</div>
 									</button>
 								{/each}
@@ -443,14 +464,23 @@
 										on:click={() => openFolder(folder)}
 									>
 										<div class="flex items-center gap-2 min-w-0">
-											<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-5 h-5 shrink-0 text-gray-500">
-												<path d="M3.75 3A1.75 1.75 0 0 0 2 4.75v10.5C2 16.216 2.784 17 3.75 17h12.5A1.75 1.75 0 0 0 18 15.25V7.75A1.75 1.75 0 0 0 16.25 6H10L8.72 4.72A1.75 1.75 0 0 0 7.48 4H3.75Z" />
+											<svg
+												xmlns="http://www.w3.org/2000/svg"
+												viewBox="0 0 20 20"
+												fill="currentColor"
+												class="w-5 h-5 shrink-0 text-gray-500"
+											>
+												<path
+													d="M3.75 3A1.75 1.75 0 0 0 2 4.75v10.5C2 16.216 2.784 17 3.75 17h12.5A1.75 1.75 0 0 0 18 15.25V7.75A1.75 1.75 0 0 0 16.25 6H10L8.72 4.72A1.75 1.75 0 0 0 7.48 4H3.75Z"
+												/>
 											</svg>
 											<div class="truncate font-medium text-sm">{folder.name}</div>
 										</div>
 										<div class="text-xs text-gray-500 shrink-0 flex items-center gap-3">
 											<span>{folder.child_count} {$i18n.t('items')}</span>
-											<span>{formatBytes(folder.size)}</span>
+											{#if folder.size > 0}
+												<span>{formatBytes(folder.size)}</span>
+											{/if}
 										</div>
 									</button>
 								{/each}
@@ -464,7 +494,9 @@
 							</div>
 							<div class="flex flex-col gap-0.5 text-sm">
 								{#each files.slice(0, 25) as file (file.id)}
-									<div class="px-3 py-1 flex justify-between items-center text-gray-600 dark:text-gray-400">
+									<div
+										class="px-3 py-1 flex justify-between items-center text-gray-600 dark:text-gray-400"
+									>
 										<div class="truncate">{file.name}</div>
 										<div class="text-xs text-gray-500 shrink-0">
 											{formatBytes(file.size)}
@@ -498,7 +530,9 @@
 				</div>
 
 				<!-- Footer -->
-				<div class="border-t border-gray-200 dark:border-gray-800 p-3 flex items-center justify-between gap-3">
+				<div
+					class="border-t border-gray-200 dark:border-gray-800 p-3 flex items-center justify-between gap-3"
+				>
 					<div class="text-xs text-gray-500">
 						{#if currentLevel}
 							{currentLevel.kind === 'site'
