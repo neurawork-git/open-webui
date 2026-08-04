@@ -46,7 +46,10 @@ Other measured behaviour worth keeping in mind:
 
 import base64
 import logging
+import re
+import time
 import urllib.parse
+from html import unescape
 from typing import Optional
 
 import httpx
@@ -67,9 +70,34 @@ log = logging.getLogger(__name__)
 # route is happy without it. Measured, not assumed.
 JSON_HEADERS = {'Accept': 'application/json'}
 
-# Document libraries. 101 is the classic document library; the picture/page templates
+# Document libraries. 101 is the classic document library; the picture templates
 # (850/851/109) are technically browsable but are site furniture, not knowledge sources.
 DOCUMENT_LIBRARY_TEMPLATE = 101
+
+# 119 is the Site Pages library. It carries the portal's own prose -- 118 such libraries
+# with 603 pages on the KHKI farm -- so it is browsable even though the .aspx files
+# themselves are not worth downloading. `read_page` is the way to read one; the drive is
+# reported with drive_type 'pages' so a caller can tell the two apart.
+SITE_PAGES_TEMPLATE = 119
+BROWSABLE_LIBRARY_TEMPLATES = {DOCUMENT_LIBRARY_TEMPLATE, SITE_PAGES_TEMPLATE}
+
+# Calendars. Not a library at all, hence not browsable -- `list_events` reads them.
+CALENDAR_TEMPLATE = 106
+
+# Discovery bounds. Both are logged when they bite: a silent truncation reads as
+# completeness, which is exactly the failure this whole feature exists to fix.
+# Measured shape of the KHKI farm: 5 collections, depth 5, 122 webs.
+DISCOVERY_MAX_DEPTH = 6
+DISCOVERY_MAX_WEBS = 500
+
+# A full walk costs ~7 s over an established connection, which must not hang off every
+# chat call. Keyed per account because the result is permission-trimmed.
+DISCOVERY_TTL_SECONDS = 900
+
+# Module-level on purpose: `_onprem_backend` builds a fresh client -- and a fresh NTLM
+# handshake -- for every request, so an instance-level cache would always be empty.
+# {(base_url, account, roots): (expires_at_monotonic, webs)}
+_DISCOVERY_CACHE: dict[tuple, tuple[float, list[dict]]] = {}
 
 # SharePoint's own plumbing inside a library. Importing these would drag form templates
 # and thumbnail caches into a knowledge base.
@@ -138,6 +166,72 @@ def _quote_path(server_relative_url: str) -> str:
     "Mitarbeiter's.pdf" terminates the literal early and the farm answers 400.
     """
     return urllib.parse.quote(server_relative_url.replace("'", "''"), safe="/'()!$&+,;=:@ ")
+
+
+def _odata_rows(payload: dict) -> list[dict]:
+    """Rows out of a classic REST collection, whichever OData verbosity answered.
+
+    `odata=nometadata` gives {'value': [...]}, `odata=verbose` {'d': {'results': [...]}}.
+    The farm decides, not us -- JSON_HEADERS asks for neither explicitly.
+    """
+    if isinstance(payload.get('value'), list):
+        return payload['value']
+    results = (payload.get('d') or {}).get('results')
+    return results if isinstance(results, list) else []
+
+
+def _is_child_of(path: str, parent: str) -> bool:
+    """Direct child in the web hierarchy, compared on segment boundaries.
+
+    `/wissenschaft` must not read as a child of `/wissen`, and the farm is not
+    case-sensitive about paths.
+    """
+    if parent == '/':
+        return path != '/' and path.strip('/').count('/') == 0
+    prefix = parent.casefold().rstrip('/') + '/'
+    lowered = path.casefold()
+    return lowered.startswith(prefix) and '/' not in lowered[len(prefix) :]
+
+
+def _prefix_of(path: str, parent: str) -> bool:
+    """`parent` is `path` itself or an ancestor of it, on segment boundaries."""
+    if parent in ('', '/'):
+        return True
+    lowered = path.casefold()
+    candidate = parent.casefold().rstrip('/')
+    return lowered == candidate or lowered.startswith(candidate + '/')
+
+
+def _html_to_text(html: str) -> str:
+    """Page field HTML down to readable text. No new dependency for a handful of tags."""
+    if not html:
+        return ''
+    text = re.sub(r'(?is)<(script|style)\b.*?</\1>', ' ', html)
+    text = re.sub(r'(?i)<br\s*/?>|</(p|div|li|tr|h[1-6])>', '\n', text)
+    text = re.sub(r'(?s)<[^>]+>', ' ', text)
+    text = unescape(text)
+    text = re.sub(r'[ \t ]+', ' ', text)
+    return re.sub(r'\n\s*\n\s*\n+', '\n\n', text).strip()
+
+
+def parse_site_roots(raw: Optional[str]) -> list[str]:
+    """Comma-separated entry points -> normalised server-relative paths.
+
+    One function for both writers, so the admin panel stores exactly what discovery reads.
+    Empty means '/', not "nothing": an instance that was never configured must behave as
+    it did before this feature existed.
+    """
+    roots: list[str] = []
+    for part in (raw or '').split(','):
+        part = part.strip()
+        if not part:
+            continue
+        # '/' is a legitimate entry point next to '/wissen', so it must survive the
+        # trailing-slash trim that turns '/wissen/' into '/wissen'.
+        path = '/' + part.strip('/')
+        if path not in roots:
+            roots.append(path)
+    return roots or ['/']
 
 
 def _parse_ntlm_challenge(www_authenticate: str) -> Optional[bytes]:
@@ -210,9 +304,11 @@ class SharePointOnPremClient:
         base_url: str,
         http_client: Optional[httpx.AsyncClient] = None,
         verify: bool = True,
+        site_roots: Optional[list[str]] = None,
     ):
         self.base_url = base_url.rstrip('/')
         self._account = account
+        self._site_roots = list(site_roots) if site_roots else ['/']
         self._owns_client = http_client is None
         if http_client is not None:
             self._http_client = http_client
@@ -277,9 +373,11 @@ class SharePointOnPremClient:
         return (await self._request(path_or_url)).content
 
     @staticmethod
-    def _folder_url(server_relative_url: str) -> str:
+    def _folder_url(server_relative_url: str, prefix: str = '') -> str:
+        """`prefix` is the web that owns the folder -- see `_web_for` for why it matters."""
         return (
-            f"/_api/web/GetFolderByServerRelativeUrl('{_quote_path(server_relative_url)}')"
+            f'{prefix}/_api/web/'
+            f"GetFolderByServerRelativeUrl('{_quote_path(server_relative_url)}')"
             f'?$expand=Folders,Files'
         )
 
@@ -292,27 +390,128 @@ class SharePointOnPremClient:
 
     # ------------------------------------------------------------------ sites
 
-    async def _all_sites(self) -> list[dict]:
-        sites: list[dict] = []
-        root = await self._get_json('/_api/v2.0/sites/root')
-        sites.append(root)
-        try:
-            subs = await self._get_json('/_api/v2.0/sites/root/sites')
-            sites.extend(subs.get('value') or [])
-        except httpx.HTTPStatusError as e:
-            log.info('Subsite listing unavailable (%s)', e.response.status_code)
-        return sites
+    def _cache_key(self) -> tuple:
+        # The account, because the farm trims every listing to what that identity may see.
+        # The roots, so an edit in the admin panel takes effect on the next call instead
+        # of after the TTL -- that is the acceptance criterion for the setting.
+        return (self.base_url, self._account, tuple(self._site_roots))
 
-    @staticmethod
-    def _site_summary(site: dict) -> dict:
-        name = site.get('name') or ''
+    async def _discover_webs(self, force: bool = False) -> list[dict]:
+        """Every web reachable from the configured entry points, breadth-first.
+
+        Why not just ask the farm for its sites: `/_api/v2.0/sites` answers
+        400 `Cannot enumerate sites`, the search-backed variants 500, and the crawler
+        interfaces (`SiteData.asmx`, `Webs.asmx`) 401. Measured 2026-08-04 -- there is no
+        call that lists site collections, which is why they are configured.
+
+        Within a collection, `/_api/web/webs` is 401 but
+        `getsubwebsfilteredforcurrentuser` is 200 and permission-trimmed, so it is both
+        the working *and* the correct source. Note that Microsoft documents that method as
+        "SharePoint Online only"; it is nevertheless 200 on this farm (20 calls in 1.07 s).
+        Do not "fix" this back to `web/webs` on the strength of the documentation.
+
+        Returns dicts of {path, title, depth, root} sorted by path. A branch that answers
+        401/404 is skipped, not fatal: one unreadable department must not cost the farm.
+        """
+        key = self._cache_key()
+        if not force:
+            cached = _DISCOVERY_CACHE.get(key)
+            if cached and cached[0] > time.monotonic():
+                return cached[1]
+
+        webs: list[dict] = []
+        seen: set[str] = set()
+        truncated = False
+
+        for root in self._site_roots:
+            if await self._walk_webs(root, webs, seen):
+                truncated = True
+                break
+
+        if truncated:
+            log.warning(
+                'Discovery: stopped at the %s-web limit -- the result is incomplete',
+                DISCOVERY_MAX_WEBS,
+            )
+
+        webs.sort(key=lambda w: w['path'])
+        _DISCOVERY_CACHE[key] = (time.monotonic() + DISCOVERY_TTL_SECONDS, webs)
+        return webs
+
+    async def _walk_webs(self, root: str, webs: list[dict], seen: set[str]) -> bool:
+        """Breadth-first from one entry point. True if the web limit stopped the walk."""
+        queue: list[tuple[str, int]] = [(root, 0)]
+        while queue:
+            path, depth = queue.pop(0)
+            normalised = '/' + path.strip('/')
+            if normalised.casefold() in seen:
+                continue
+            if len(webs) >= DISCOVERY_MAX_WEBS:
+                return True
+
+            try:
+                node = await self._read_web(normalised)
+            except httpx.HTTPStatusError as e:
+                # 401 arrives here as 404 via _request when the identity still resolves;
+                # either way the branch is simply not ours to see.
+                log.info('Discovery: skipping %s (%s)', normalised, e.response.status_code)
+                continue
+
+            seen.add(normalised.casefold())
+            webs.append({**node, 'depth': depth, 'root': root})
+
+            if depth >= DISCOVERY_MAX_DEPTH:
+                log.warning(
+                    'Discovery: depth limit %s reached at %s -- subsites below it are not listed',
+                    DISCOVERY_MAX_DEPTH,
+                    normalised,
+                )
+                continue
+
+            for child in await self._child_webs(node['path']):
+                queue.append((child, depth + 1))
+
+        return False
+
+    async def _read_web(self, path: str) -> dict:
+        """Title and canonical server-relative URL of one web."""
+        prefix = '' if path == '/' else path
+        data = await self._get_json(f'{prefix}/_api/web?$select=Title,ServerRelativeUrl')
+        server_relative = data.get('ServerRelativeUrl') or path
         return {
-            'id': site.get('id', ''),
-            'name': name,
-            # The root site reports an empty name; showing the host is friendlier than
-            # an empty row in the picker.
-            'display_name': site.get('displayName') or name or 'Portal',
-            'web_url': site.get('webUrl', ''),
+            'path': '/' + server_relative.strip('/'),
+            'title': data.get('Title') or '',
+        }
+
+    async def _child_webs(self, path: str) -> list[str]:
+        """Immediate subsites of one web. The method does not recurse -- callers must."""
+        prefix = '' if path == '/' else path
+        try:
+            data = await self._get_json(
+                f'{prefix}/_api/web/getsubwebsfilteredforcurrentuser'
+                f'(nWebTemplateFilter=-1,nConfigurationFilter=-1)'
+            )
+        except httpx.HTTPStatusError as e:
+            log.info('Discovery: no subsites for %s (%s)', path, e.response.status_code)
+            return []
+
+        out = []
+        for entry in _odata_rows(data):
+            url = entry.get('ServerRelativeUrl') or entry.get('Url') or ''
+            if url:
+                out.append('/' + url.strip('/'))
+        return out
+
+    def _site_summary(self, web: dict) -> dict:
+        path = web.get('path') or '/'
+        # The id IS the server-relative path. Previously it was the v2.0 GUID, which
+        # `_site_prefix` could not turn into a prefix -- so every site's library listing
+        # silently answered with the *root* site's libraries.
+        return {
+            'id': path,
+            'name': path,
+            'display_name': web.get('title') or ('Portal' if path == '/' else path),
+            'web_url': f'{self.base_url}{"" if path == "/" else path}',
         }
 
     async def search_sites(self, query: str, top: int = 25) -> list[dict]:
@@ -320,8 +519,8 @@ class SharePointOnPremClient:
         `/_api/search/query` is unusable. Callers get sites whose name contains `query`."""
         needle = (query or '').strip().casefold()
         out = []
-        for site in await self._all_sites():
-            summary = self._site_summary(site)
+        for web in await self._discover_webs():
+            summary = self._site_summary(web)
             haystack = f'{summary["name"]} {summary["display_name"]}'.casefold()
             if not needle or needle == '*' or needle in haystack:
                 out.append(summary)
@@ -331,20 +530,50 @@ class SharePointOnPremClient:
         self, query: str = '*', top: int = 100, next_link: Optional[str] = None
     ) -> dict:
         # An on-prem site list is small and arrives in one response; there is no
-        # continuation token to hand back.
+        # continuation token to hand back. Deliberately flat even at 122 entries -- the
+        # picker filters client-side, and `list_webs` is what serves navigation.
         if next_link:
             return {'sites': [], 'next_link': None}
         return {'sites': await self.search_sites(query, top=top), 'next_link': None}
 
-    def _site_prefix(self, site_id: str) -> str:
-        """`/_api` prefix for a subsite. The root site has no prefix.
+    async def list_webs(self, site_path: Optional[str] = None) -> dict:
+        """Navigable view of the farm. On-prem only, not part of SharePointBackend.
 
-        Site ids from the v2.0 dialect look like `host,guid,guid`; the picker also passes
-        plain subsite paths such as `blog`.
+        122 sites in one flat list is unusable for a language model. Without an argument
+        this returns the entry points and their first level; with one, the children of
+        exactly that web. Every entry carries the `site_path` the other calls expect.
         """
-        if not site_id or ',' in site_id:
-            return ''
-        return '/' + site_id.strip('/')
+        webs = await self._discover_webs()
+        if site_path is None:
+            # depth 0 are the entry points themselves, depth 1 their first level.
+            visible = [w for w in webs if w['depth'] <= 1]
+            parent = None
+        else:
+            parent = '/' + site_path.strip('/')
+            visible = [w for w in webs if _is_child_of(w['path'], parent)]
+
+        return {
+            'parent': parent,
+            'sites': [
+                {
+                    'site_path': w['path'].lstrip('/'),
+                    'title': w['title'],
+                    'depth': w['depth'],
+                    'url': f'{self.base_url}{"" if w["path"] == "/" else w["path"]}',
+                }
+                for w in visible
+            ],
+        }
+
+    def _site_prefix(self, site_id: str) -> str:
+        """`/_api` prefix for a web. The root web has no prefix.
+
+        `site_id` is a server-relative path, possibly several segments deep
+        (`wissen/HygieneInfo`). It used to also carry v2.0 GUID ids, which were silently
+        mapped to no prefix at all -- see `_site_summary`.
+        """
+        path = (site_id or '').strip('/')
+        return f'/{path}' if path else ''
 
     async def list_site_drives_summary(self, site_id: str) -> dict:
         """Document libraries of a site, from the classic list API.
@@ -362,7 +591,8 @@ class SharePointOnPremClient:
 
         drives = []
         for lst in payload.get('value') or []:
-            if lst.get('Hidden') or lst.get('BaseTemplate') != DOCUMENT_LIBRARY_TEMPLATE:
+            template = lst.get('BaseTemplate')
+            if lst.get('Hidden') or template not in BROWSABLE_LIBRARY_TEMPLATES:
                 continue
             root_url = (lst.get('RootFolder') or {}).get('ServerRelativeUrl')
             if not root_url:
@@ -371,7 +601,13 @@ class SharePointOnPremClient:
                 {
                     'id': encode_id(root_url),
                     'name': lst.get('Title') or root_url,
-                    'drive_type': 'documentLibrary',
+                    # 'pages' marks a Site Pages library. Browsable, but its .aspx files
+                    # are markup wrappers -- `read_page` is what reads their content.
+                    'drive_type': (
+                        'documentLibrary'
+                        if template == DOCUMENT_LIBRARY_TEMPLATE
+                        else 'pages'
+                    ),
                     'root_item_id': encode_id(root_url),
                     # The farm reports no per-library byte total, and summing every file
                     # would mean walking every library just to draw a picker. ItemCount
@@ -389,8 +625,80 @@ class SharePointOnPremClient:
 
     # ------------------------------------------------------------------ folders
 
-    async def _read_folder(self, server_relative_url: str) -> dict:
-        return await self._get_json(self._folder_url(server_relative_url))
+    async def _web_for(self, server_relative_url: str) -> str:
+        """Longest known web path that is a prefix of this URL.
+
+        This is the whole point of discovery for file operations. Addressing a folder from
+        the wrong web answers **HTTP 200 with an empty Files collection** rather than an
+        error -- measured on `/wissen/HygieneInfo/Hygiene Handbuch` (194 files from its own
+        web, 0 from `/wissen`) and on `/blog/SiteAssets` (334 from `/blog`, 0 from the root
+        of its own site collection). A caller checking only the status code reads that as
+        an empty folder.
+
+        Unknown path: discovery runs rather than the root context being guessed.
+        """
+        target = '/' + (server_relative_url or '').strip('/')
+        best = ''
+        for web in await self._discover_webs():
+            path = web['path']
+            if _prefix_of(target, path) and len(path) > len(best):
+                best = path
+
+        if not best:
+            # Force one rediscovery -- a library added under a new web is the common case.
+            for web in await self._discover_webs(force=True):
+                path = web['path']
+                if _prefix_of(target, path) and len(path) > len(best):
+                    best = path
+
+        if not best:
+            log.warning(
+                'No known web for %s -- falling back to the root context, which may '
+                'return an empty listing instead of an error',
+                target,
+            )
+        return '' if best in ('', '/') else best
+
+    async def _read_folder(self, server_relative_url: str, prefix: Optional[str] = None) -> dict:
+        if prefix is None:
+            prefix = await self._web_for(server_relative_url)
+        return await self._get_json(self._folder_url(server_relative_url, prefix))
+
+    async def _assert_not_context_blind(
+        self, data: dict, server_relative_url: str, prefix: str
+    ) -> None:
+        """A listing that came back completely empty is a suspect, not a fact.
+
+        `ItemCount` counts folders as well as files, so it cannot be reconciled exactly --
+        but "the list says N>0 and we can see neither a file nor a folder" is the exact
+        signature of the wrong web context (3.4 of the requirements). Reporting it as an
+        empty folder is the silent falsehood this guard exists to prevent.
+        """
+        if (data.get('Files') or []) or (data.get('Folders') or []):
+            return
+
+        try:
+            meta = await self._get_json(
+                f'{prefix}/_api/web/GetList('
+                f"'{_quote_path(server_relative_url)}')?$select=ItemCount,Title"
+            )
+        except httpx.HTTPStatusError:
+            # Not a library root (an ordinary subfolder), so there is nothing to compare
+            # against. An empty subfolder is perfectly normal.
+            return
+
+        item_count = int(meta.get('ItemCount') or 0)
+        if item_count <= 0:
+            return
+
+        raise httpx.HTTPStatusError(
+            f'{server_relative_url!r} returned no files or folders, but the list reports '
+            f'{item_count} items. This is the signature of a wrong site context '
+            f'(context used: {prefix or "/"}). Re-run discovery or pass the site_path of '
+            f'the web that actually owns this library.',
+            request=httpx.Request('GET', self._url(f'{prefix}/_api/web')),
+            response=httpx.Response(409),
+        )
 
     async def _walk(
         self,
@@ -399,10 +707,17 @@ class SharePointOnPremClient:
         files: list[GraphFileItem],
         drive_id: str,
         max_files: int,
+        prefix: Optional[str] = None,
     ) -> bool:
         """Depth-first walk appending files into the shared list. Mirrors
-        GraphClient._walk, including the early-stop semantics."""
-        data = await self._read_folder(folder_url)
+        GraphClient._walk, including the early-stop semantics.
+
+        `prefix` is resolved once by the caller: a walk stays inside one library, hence
+        inside one web, so re-deriving it per folder would only cost requests.
+        """
+        if prefix is None:
+            prefix = await self._web_for(folder_url)
+        data = await self._read_folder(folder_url, prefix)
 
         for item in data.get('Files') or []:
             if len(files) >= max_files:
@@ -429,7 +744,12 @@ class SharePointOnPremClient:
             if len(files) >= max_files:
                 return True
             if await self._walk(
-                sub.get('ServerRelativeUrl', ''), f'{path}{name}/', files, drive_id, max_files
+                sub.get('ServerRelativeUrl', ''),
+                f'{path}{name}/',
+                files,
+                drive_id,
+                max_files,
+                prefix,
             ):
                 return True
 
@@ -439,10 +759,12 @@ class SharePointOnPremClient:
         self, drive_id: str, item_id: str, max_files: int = DEFAULT_MAX_FILES
     ) -> GraphFolderListing:
         root = decode_id(item_id or drive_id)
-        meta = await self._read_folder(root)
+        prefix = await self._web_for(root)
+        meta = await self._read_folder(root, prefix)
+        await self._assert_not_context_blind(meta, root, prefix)
 
         files: list[GraphFileItem] = []
-        truncated = await self._walk(root, '', files, drive_id, max_files)
+        truncated = await self._walk(root, '', files, drive_id, max_files, prefix)
 
         return GraphFolderListing(
             folder_name=meta.get('Name', ''),
@@ -462,7 +784,10 @@ class SharePointOnPremClient:
     ) -> GraphChildrenListing:
         # The classic Folders/Files collections return in one response; there is no
         # continuation token, so next_link is always None going out.
-        data = await self._read_folder(decode_id(item_id or drive_id))
+        target = decode_id(item_id or drive_id)
+        prefix = await self._web_for(target)
+        data = await self._read_folder(target, prefix)
+        await self._assert_not_context_blind(data, target, prefix)
 
         folders: list[GraphChildItem] = []
         for sub in data.get('Folders') or []:
@@ -512,12 +837,19 @@ class SharePointOnPremClient:
         self, site_id: str, max_files: int = DEFAULT_MAX_FILES
     ) -> GraphSiteListing:
         summary = await self.list_site_drives_summary(site_id)
+        site_prefix = self._site_prefix(site_id)
 
         drives: list[GraphDriveInfo] = []
         files: list[GraphFileItem] = []
         truncated = False
 
         for drive in summary['drives']:
+            # Browsable is not the same as importable. A Site Pages library holds .aspx
+            # wrappers whose text lives in list fields, so importing the files verbatim
+            # would fill a knowledge base with markup. They stay visible in the picker and
+            # readable through `read_page`; a whole-site import skips them.
+            if drive.get('drive_type') == 'pages':
+                continue
             drives.append(
                 GraphDriveInfo(
                     id=drive['id'],
@@ -527,8 +859,15 @@ class SharePointOnPremClient:
                 )
             )
             try:
+                # Every library of a site lives in that site's web, so the context is
+                # resolved once per site rather than once per library.
                 truncated = await self._walk(
-                    decode_id(drive['id']), f'{drive["name"]}/', files, drive['id'], max_files
+                    decode_id(drive['id']),
+                    f'{drive["name"]}/',
+                    files,
+                    drive['id'],
+                    max_files,
+                    site_prefix,
                 )
             except httpx.HTTPStatusError as e:
                 # One unreadable library must not abort the whole site import.
@@ -550,14 +889,231 @@ class SharePointOnPremClient:
             truncated=truncated,
         )
 
+    # ------------------------------------------- pages, events, links (on-prem only)
+    #
+    # None of these are part of the SharePointBackend protocol. That protocol is a
+    # contract GraphClient has to honour too, and a cloud tenant has neither this farm's
+    # broken search nor its page layout. Callers reach them through the on-prem client
+    # directly and should guard with hasattr.
+
+    async def _lists_by_template(self, prefix: str, template: int) -> list[dict]:
+        """Lists of one BaseTemplate, addressed by GUID afterwards.
+
+        Deliberately not `getbytitle('Site Pages')`: this farm is German, so that library
+        is called "Websiteseiten". BaseTemplate is language-independent.
+        """
+        payload = await self._get_json(
+            f'{prefix}/_api/web/lists'
+            f'?$select=Id,Title,BaseTemplate,ItemCount,Hidden'
+            f'&$filter=BaseTemplate eq {template}'
+        )
+        return [row for row in _odata_rows(payload) if not row.get('Hidden')]
+
+    async def _page_fields(
+        self, prefix: str, list_id: str, leaf: str, site_path: str
+    ) -> dict:
+        """Title plus whichever content field the page actually has.
+
+        Two requests rather than one $select naming both fields: a classic SP2016 site may
+        not have CanvasContent1 at all, and one unknown field in $select fails the *entire*
+        query with 400 InvalidClientQueryException -- asking for both at once would lose
+        the wiki text too.
+        """
+        base = f"{prefix}/_api/web/lists(guid'{list_id}')/items"
+        filter_clause = f"$filter=FileLeafRef eq '{leaf.replace(chr(39), chr(39) * 2)}'"
+
+        fields: dict[str, str] = {}
+        for field in ('WikiField', 'CanvasContent1'):
+            try:
+                payload = await self._get_json(
+                    f'{base}?$select=Title,FileLeafRef,{field}&{filter_clause}&$top=1'
+                )
+            except httpx.HTTPStatusError as e:
+                # Detected by status, not by message text -- the farm localises it.
+                if e.response.status_code in (400, 404):
+                    log.info('read_page: %s unavailable on %s', field, site_path or '/')
+                    continue
+                raise
+            rows = _odata_rows(payload)
+            if rows:
+                fields.setdefault('title', rows[0].get('Title') or leaf)
+                value = rows[0].get(field)
+                if value:
+                    fields[field] = value
+        return fields
+
+    async def read_page(self, site_path: str, page: str) -> dict:
+        """Text of one portal page.
+
+        The content is in list fields, not in the .aspx file: `WikiField` on classic wiki
+        pages, `CanvasContent1` on modern ones. Downloading the file itself yields markup
+        with no prose in it.
+        """
+        prefix = self._site_prefix(site_path)
+        leaf = (page or '').strip('/').rsplit('/', 1)[-1]
+        if not leaf:
+            raise ValueError('read_page needs a page file name, e.g. Homepage.aspx')
+
+        lists = await self._lists_by_template(prefix, SITE_PAGES_TEMPLATE)
+        if not lists:
+            raise httpx.HTTPStatusError(
+                f'No Site Pages library on {site_path or "/"}.',
+                request=httpx.Request('GET', self._url(f'{prefix}/_api/web/lists')),
+                response=httpx.Response(404),
+            )
+
+        for entry in lists:
+            list_id = entry.get('Id')
+            if not list_id:
+                continue
+
+            fields = await self._page_fields(prefix, list_id, leaf, site_path)
+            if 'title' not in fields:
+                continue
+
+            text = _html_to_text(fields.get('WikiField') or fields.get('CanvasContent1') or '')
+            note = None
+            if not text:
+                # Classic web parts (a calendar rollup, say) keep their configuration in
+                # the web part database. Neither field carries them and no REST call
+                # reveals which list a page displays -- so say so instead of returning
+                # an empty string that reads like an empty page.
+                note = (
+                    'This page carries no text in WikiField or CanvasContent1. Its content '
+                    'most likely comes from web parts, whose configuration is not readable '
+                    'over the REST API -- read the underlying list directly.'
+                )
+
+            return {
+                'site_path': (site_path or '').strip('/'),
+                'page': leaf,
+                'title': fields.get('title') or leaf,
+                'text': text,
+                'note': note,
+            }
+
+        raise httpx.HTTPStatusError(
+            f'Page {leaf!r} not found on {site_path or "/"}.',
+            request=httpx.Request('GET', self._url(f'{prefix}/_api/web')),
+            response=httpx.Response(404),
+        )
+
+    async def list_events(
+        self, site_path: str = '', from_date: str = '', top: int = 20
+    ) -> dict:
+        """Upcoming entries from the calendars of one web.
+
+        Unfiltered this would return events back to 2009 -- 1537 of them in the root
+        calendar alone. `from_date` is an ISO date; the default is today.
+        """
+        prefix = self._site_prefix(site_path)
+        since = (from_date or '').strip() or time.strftime('%Y-%m-%d', time.gmtime())
+        # Classic SP REST speaks OData v2/v3: the literal has to be datetime'...'.
+        # A bare ISO string or datetimeoffset'...' is rejected here.
+        literal = f"datetime'{since}T00:00:00Z'"
+
+        calendars = await self._lists_by_template(prefix, CALENDAR_TEMPLATE)
+        events: list[dict] = []
+        for entry in calendars:
+            list_id = entry.get('Id')
+            if not list_id:
+                continue
+            try:
+                payload = await self._get_json(
+                    f"{prefix}/_api/web/lists(guid'{list_id}')/items"
+                    f'?$select=Title,EventDate,EndDate,Location,fAllDayEvent,fRecurrence'
+                    f'&$filter=EndDate ge {literal}'
+                    f'&$orderby=EventDate asc&$top={int(top)}'
+                )
+            except httpx.HTTPStatusError as e:
+                log.info(
+                    'list_events: calendar %r unreadable (%s)',
+                    entry.get('Title'),
+                    e.response.status_code,
+                )
+                continue
+
+            for row in _odata_rows(payload):
+                events.append(
+                    {
+                        'calendar': entry.get('Title') or '',
+                        'title': row.get('Title') or '',
+                        'start': row.get('EventDate'),
+                        'end': row.get('EndDate'),
+                        'location': row.get('Location') or '',
+                        'all_day': bool(row.get('fAllDayEvent')),
+                        # A recurring event answers as its series head only. REST cannot
+                        # expand occurrences -- DateTimeRangesOverlap is documented as
+                        # unsupported in $filter -- so the head is flagged rather than
+                        # silently standing in for every date it implies.
+                        'recurring': bool(row.get('fRecurrence')),
+                    }
+                )
+
+        events.sort(key=lambda e: (e['start'] or ''))
+        return {
+            'site_path': (site_path or '').strip('/'),
+            'from': since,
+            'calendars': [c.get('Title') or '' for c in calendars],
+            'events': events[:top],
+        }
+
+    async def resolve_url(self, url: str) -> dict:
+        """A shared portal link -> site_path, library and path.
+
+        The everyday entry point is a link someone pasted, not a site path anyone knows.
+        """
+        raw = (url or '').strip()
+        if not raw:
+            raise ValueError('resolve_url needs a URL')
+
+        parsed = urllib.parse.urlparse(raw)
+        if parsed.scheme and f'{parsed.scheme}://{parsed.netloc}'.rstrip('/') != self.base_url:
+            raise ValueError(
+                f'{raw!r} does not belong to this farm ({self.base_url}).'
+            )
+        server_relative = '/' + urllib.parse.unquote(parsed.path or raw).strip('/')
+
+        web = await self._web_for(server_relative)
+        remainder = server_relative[len(web) :].strip('/') if web else server_relative.strip('/')
+
+        library = ''
+        path = ''
+        if remainder:
+            library, _, path = remainder.partition('/')
+
+        # Report the library's display title where one exists -- 'SitePages' is the URL
+        # segment, "Websiteseiten" is what the user sees.
+        library_title = library
+        if library:
+            try:
+                summary = await self.list_site_drives_summary(web.strip('/'))
+                for drive in summary['drives']:
+                    root = decode_id(drive['root_item_id']).rstrip('/')
+                    if root.casefold() == f'{web}/{library}'.casefold():
+                        library_title = drive['name']
+                        break
+            except httpx.HTTPStatusError as e:
+                log.info('resolve_url: no library list for %s (%s)', web, e.response.status_code)
+
+        return {
+            'site_path': web.strip('/'),
+            'library': library_title,
+            'library_path': library,
+            'path': path,
+            'server_relative_url': server_relative,
+        }
+
     # ------------------------------------------------------------------ files
 
     async def get_file_metadata(
         self, drive_id: str, item_id: str, path: str = ''
     ) -> GraphFileItem:
         path_url = decode_id(item_id)
+        prefix = await self._web_for(path_url)
         data = await self._get_json(
-            f"/_api/web/GetFileByServerRelativeUrl('{_quote_path(path_url)}')"
+            f'{prefix}/_api/web/'
+            f"GetFileByServerRelativeUrl('{_quote_path(path_url)}')"
             f'?$select=Name,Length,ServerRelativeUrl,UniqueId'
         )
         name = data.get('Name', '')
@@ -577,6 +1133,9 @@ class SharePointOnPremClient:
         return await self._get_bytes(download_url)
 
     async def download_file_by_id(self, drive_id: str, item_id: str) -> bytes:
+        target = decode_id(item_id)
+        prefix = await self._web_for(target)
         return await self._get_bytes(
-            f"/_api/web/GetFileByServerRelativeUrl('{_quote_path(decode_id(item_id))}')/$value"
+            f'{prefix}/_api/web/'
+            f"GetFileByServerRelativeUrl('{_quote_path(target)}')/$value"
         )

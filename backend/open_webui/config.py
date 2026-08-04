@@ -29,6 +29,7 @@ from open_webui.env import (
     REDIS_SENTINEL_HOSTS,
     REDIS_SENTINEL_PORT,
     REDIS_URL,
+    SHAREPOINT_ONPREM_SITE_ROOTS,
     WEBUI_AUTH,
     WEBUI_FAVICON_URL,
     WEBUI_NAME,
@@ -3212,6 +3213,10 @@ DEFAULT_CONFIG = {
     'ldap.group.enable_management': ENABLE_LDAP_GROUP_MANAGEMENT,
     'ldap.group.enable_creation': ENABLE_LDAP_GROUP_CREATION,
     'ldap.server.attribute_for_groups': LDAP_ATTRIBUTE_FOR_GROUPS,
+    # FORK: entry points for on-prem SharePoint site discovery. A farm refuses to
+    # enumerate its site collections, so they are named here. Runtime-editable
+    # because adding one is an operational change, not a deployment.
+    'sharepoint.onprem.site_roots': SHAREPOINT_ONPREM_SITE_ROOTS,
 }
 
 

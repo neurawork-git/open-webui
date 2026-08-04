@@ -890,6 +890,14 @@ SHAREPOINT_ONPREM_SITE_URL = os.getenv('SHAREPOINT_ONPREM_SITE_URL', '')
 # Off only while the farm's internal CA is missing from the container truststore.
 SHAREPOINT_ONPREM_VERIFY_TLS = os.getenv('SHAREPOINT_ONPREM_VERIFY_TLS', 'True').lower() == 'true'
 
+# Where site discovery starts. A farm's site collections cannot be enumerated -- the REST
+# service answers `Cannot enumerate sites` and the search service is what would otherwise
+# list them. So the collections to walk are named here, comma-separated, server-relative.
+# The startup value only seeds `sharepoint.onprem.site_roots`; the admin panel owns it
+# afterwards, so adding a collection is a config change rather than a redeployment.
+# Default '/' -- an unconfigured instance discovers exactly what it did before.
+SHAREPOINT_ONPREM_SITE_ROOTS = os.getenv('SHAREPOINT_ONPREM_SITE_ROOTS', '/')
+
 # Back-Channel Logout Configuration
 # When enabled, exposes POST /oauth/backchannel-logout for IdP-initiated logout
 # per OpenID Connect Back-Channel Logout 1.0 spec.

@@ -76,7 +76,8 @@ from open_webui.utils.auth import (
 from open_webui.utils.groups import apply_default_group_assignment
 from open_webui.utils.misc import parse_duration, validate_email_format
 from open_webui.utils.rate_limit import RateLimiter
-from open_webui.utils.sharepoint_backend import maybe_store_ldap_credential
+from open_webui.utils.sharepoint_backend import is_onprem, maybe_store_ldap_credential
+from open_webui.utils.sharepoint_onprem_client import parse_site_roots
 from open_webui.utils.redis import get_redis_client
 from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
@@ -150,6 +151,10 @@ LDAP_SERVER_CONFIG_KEYS = {
     'enable_group_management': 'ldap.group.enable_management',
     'enable_group_creation': 'ldap.group.enable_creation',
     'attribute_for_groups': 'ldap.server.attribute_for_groups',
+}
+
+SHAREPOINT_CONFIG_KEYS = {
+    'site_roots': 'sharepoint.onprem.site_roots',
 }
 
 
@@ -1295,6 +1300,44 @@ async def update_ldap_server(request: Request, form_data: LdapServerConfig, user
     updates['ldap.server.app_password'] = form_data.app_dn_password or ''
     await Config.upsert(updates)
     return await get_config_values(LDAP_SERVER_CONFIG_KEYS)
+
+
+class SharePointConfig(BaseModel):
+    site_roots: str = '/'
+
+
+def _assert_sharepoint_configurable() -> None:
+    """Entry points only mean something to the on-prem backend.
+
+    Graph enumerates sites through the Graph API and has no farm to walk, so a Graph
+    instance gets a 404 here rather than a settings field that changes nothing. That 404
+    is also what hides the section in the admin panel -- no extra feature flag needed.
+    """
+    if not is_onprem():
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            detail='SharePoint site discovery is only configurable with SHAREPOINT_BACKEND=onprem.',
+        )
+
+
+@router.get('/admin/config/sharepoint', response_model=SharePointConfig)
+async def get_sharepoint_config(request: Request, user=Depends(get_admin_user)):
+    _assert_sharepoint_configurable()
+    return await get_config_values(SHAREPOINT_CONFIG_KEYS)
+
+
+@router.post('/admin/config/sharepoint')
+async def update_sharepoint_config(request: Request, form_data: SharePointConfig, user=Depends(get_admin_user)):
+    """Site-collection entry points for on-prem discovery.
+
+    Stored normalised so the client never has to guess what a stray value meant, and so
+    the field reads back the way discovery will actually use it. An empty list falls back
+    to '/', which is the pre-feature behaviour rather than "discover nothing".
+    """
+    _assert_sharepoint_configurable()
+    roots = parse_site_roots(form_data.site_roots)
+    await Config.upsert({'sharepoint.onprem.site_roots': ','.join(roots)})
+    return await get_config_values(SHAREPOINT_CONFIG_KEYS)
 
 
 @router.get('/admin/config/ldap')

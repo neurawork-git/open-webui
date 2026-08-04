@@ -29,6 +29,7 @@ from open_webui.env import (
     SHAREPOINT_ONPREM_SITE_URL,
     SHAREPOINT_ONPREM_VERIFY_TLS,
 )
+from open_webui.config import Config
 from open_webui.models.oauth_sessions import OAuthSessions
 from open_webui.utils.graph_client import (
     GraphChildrenListing,
@@ -202,7 +203,10 @@ async def _onprem_backend(user_id: str, db=None) -> SharePointBackend:
     # Imported here, not at module scope: the NTLM stack is only a dependency for
     # deployments that actually talk to an on-prem farm.
     from open_webui.models.user_credentials import get_user_credentials
-    from open_webui.utils.sharepoint_onprem_client import SharePointOnPremClient
+    from open_webui.utils.sharepoint_onprem_client import (
+        SharePointOnPremClient,
+        parse_site_roots,
+    )
 
     credential = await get_user_credentials().get_secret(user_id, db=db)
     if credential is None:
@@ -217,11 +221,15 @@ async def _onprem_backend(user_id: str, db=None) -> SharePointBackend:
         )
 
     account, password = credential
+    # Read per request, not cached on the module: an entry point added in the admin panel
+    # has to take effect on the next call, without a restart.
+    site_roots = parse_site_roots(await Config.get('sharepoint.onprem.site_roots'))
     return SharePointOnPremClient(
         account=account,
         password=password,
         base_url=SHAREPOINT_ONPREM_SITE_URL,
         verify=SHAREPOINT_ONPREM_VERIFY_TLS,
+        site_roots=site_roots,
     )
 
 

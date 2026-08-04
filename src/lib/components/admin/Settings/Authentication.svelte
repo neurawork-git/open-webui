@@ -5,9 +5,11 @@
 		getLdapConfig,
 		getLdapServer,
 		getOAuthConfig,
+		getSharePointConfig,
 		updateLdapConfig,
 		updateLdapServer,
 		updateOAuthConfig,
+		updateSharePointConfig,
 		updateAdminConfig
 	} from '$lib/apis/auths';
 	import { getGroups } from '$lib/apis/groups';
@@ -49,6 +51,9 @@
 	};
 
 	let oauthConfig: any = null;
+	// Null until loaded, so a backend without the endpoint simply hides the section
+	// instead of offering a field that cannot be saved.
+	let sharePointConfig: { site_roots: string } | null = null;
 	const inputClass =
 		'w-full h-7 rounded-lg border border-gray-100/50 bg-gray-50/40 px-2 text-xs text-gray-700 outline-hidden transition-colors placeholder:text-gray-300 focus:border-blue-400 dark:border-white/[0.04] dark:bg-white/[0.03] dark:text-gray-300 dark:placeholder:text-gray-700 dark:focus:border-blue-500';
 	const textareaClass =
@@ -94,12 +99,28 @@
 		return !!res;
 	};
 
+	const updateSharePointHandler = async () => {
+		if (!sharePointConfig) return true;
+		const res = await updateSharePointConfig(localStorage.token, sharePointConfig).catch(
+			(error) => {
+				toast.error(`${error}`);
+				return null;
+			}
+		);
+		if (res) {
+			// The backend normalises the list; show what it actually stored.
+			sharePointConfig = res;
+		}
+		return !!res;
+	};
+
 	const submitHandler = async () => {
 		const adminSaved = await updateAdminHandler();
 		const ldapSaved = await updateLdapServerHandler();
 		const oauthSaved = await updateOAuthHandler();
+		const sharePointSaved = await updateSharePointHandler();
 
-		if (adminSaved && ldapSaved && oauthSaved) {
+		if (adminSaved && ldapSaved && oauthSaved && sharePointSaved) {
 			toast.success($i18n.t('Settings saved successfully!'));
 			await config.set(await getBackendConfig());
 		}
@@ -120,6 +141,9 @@
 			})(),
 			(async () => {
 				oauthConfig = await getOAuthConfig(localStorage.token).catch(() => null);
+			})(),
+			(async () => {
+				sharePointConfig = await getSharePointConfig(localStorage.token).catch(() => null);
 			})()
 		]);
 
@@ -520,6 +544,24 @@
 				{/if}
 			{/if}
 		</AdminSettingSection>
+
+		{#if sharePointConfig}
+			<AdminSettingSection title={$i18n.t('SharePoint')}>
+				<AdminSettingField
+					label={$i18n.t('Site Collections')}
+					description={$i18n.t(
+						'Comma-separated server-relative paths where site discovery starts. A farm does not let its site collections be listed, so each one has to be named here.'
+					)}
+				>
+					<input
+						class={inputClass}
+						type="text"
+						placeholder={`e.g.) /,/wissen,/abteilungen`}
+						bind:value={sharePointConfig.site_roots}
+					/>
+				</AdminSettingField>
+			</AdminSettingSection>
+		{/if}
 
 		{#if oauthConfig}
 			<AdminSettingSection title={$i18n.t('OAuth / OIDC')}>

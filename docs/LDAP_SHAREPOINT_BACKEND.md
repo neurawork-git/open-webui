@@ -82,15 +82,104 @@ bleibt nur für die Site-Aufzählung, wo es belegt trägt.
 | Zweck | Endpunkt |
 |---|---|
 | Identität | `/_api/web/currentUser` → `i:0#.w\|skkiel\<konto>` |
-| Sites | `/_api/v2.0/sites/root` + `/sites/root/sites` |
-| Bibliotheken | `/_api/web/lists?$expand=RootFolder`, gefiltert auf `BaseTemplate == 101` und `Hidden == false` |
-| Ordner + Dateien | `/_api/web/GetFolderByServerRelativeUrl('<pfad>')?$expand=Folders,Files` |
-| Download | `/_api/web/GetFileByServerRelativeUrl('<pfad>')/$value` |
+| Website | `<web>/_api/web?$select=Title,ServerRelativeUrl` |
+| Unterwebsites | `<web>/_api/web/getsubwebsfilteredforcurrentuser(nWebTemplateFilter=-1,nConfigurationFilter=-1)` |
+| Bibliotheken | `<web>/_api/web/lists?$expand=RootFolder`, gefiltert auf `BaseTemplate ∈ {101, 119}` und `Hidden == false` |
+| Ordner + Dateien | `<web>/_api/web/GetFolderByServerRelativeUrl('<pfad>')?$expand=Folders,Files` |
+| Download | `<web>/_api/web/GetFileByServerRelativeUrl('<pfad>')/$value` |
+| Seitentext | `<web>/_api/web/lists(guid'…')/items?$select=…,WikiField` bzw. `…,CanvasContent1` |
+| Termine | `<web>/_api/web/lists(guid'…')/items?$filter=EndDate ge datetime'…Z'` |
+
+`<web>` ist kein Schmuck — siehe § 3.1.
 
 Tot: `/_api/search/query` → 500 (kein Search Service, also **keine Volltextsuche**),
-`/_api/web/webs` und `/_api/web/folders` → 401, `/_api/v2.0/.../pages` → 404.
+`/_api/web/folders` → 401, `/_api/v2.0/.../pages` → 404.
 `/_api/v2.0/.../drives` meldet 8 von 27 Bibliotheken und für jede `quota.used = 0` — Menge
 und Größen beide falsch, deshalb nicht benutzt.
+
+### 3.1 Discovery: warum Websitesammlungen konfiguriert werden (gemessen 2026-08-04)
+
+Die frühere Anbindung sah **2 von 122 Websites**. Sie begann bei `/_api/v2.0/sites/root`
+plus `/sites/root/sites` — das liefert die Root-Websitesammlung und deren *direkte*
+Unterwebsites. `/wissen`, `/abteilungen` und `/teamseiten` sind eigene **Websitesammlungen**
+und können dort nicht auftauchen. 16.188 Listeneinträge (80 %) waren unsichtbar.
+
+Es gibt keinen Aufruf, der Websitesammlungen aufzählt:
+
+| Weg | Ergebnis |
+|---|---|
+| `/_api/v2.0/sites` | 400 `Cannot enumerate sites` |
+| `/_api/v2.0/sites?search=*`, `/_api/search/query?…contentclass:STS_Site` | 500 (Suchdienst) |
+| `/_vti_bin/SiteData.asmx`, `/_vti_bin/Webs.asmx` | 401 |
+| `/_api/web/Navigation/MenuState` | 404 (Managed Navigation nicht in Betrieb) |
+
+Deshalb werden sie **konfiguriert**: `sharepoint.onprem.site_roots` (§ 6). Für KHKI
+`/,/wissen,/abteilungen,/teamseiten,/projekte` — abgelesen aus der Suite-Navigation des
+Portals. `/projekte` gehört mit hinein, obwohl das Dienstkonto dort 401 bekommt: ein Konto
+mit Rechten sieht die Sammlung dann ohne weitere Konfiguration.
+
+**Innerhalb** einer Sammlung dagegen geht es: `/_api/web/webs` ist zwar 401 — das stand als
+„Unterwebsites nicht enumerierbar" im Client-Kommentar und war ein Fehlschluss — aber
+`getsubwebsfilteredforcurrentuser` antwortet 200 und ist permission-getrimmt, also sogar die
+korrektere Quelle. 20 Aufrufe über eine bestehende Verbindung in 1,07 s; ein voller
+Durchlauf über 122 Websites ~7 s.
+
+> **Microsoft dokumentiert diese Methode als „Available in SharePoint Online only".**
+> Auf dieser Farm ist sie gemessen 200. Die Messung schlägt die Doku — wer beim Aufräumen
+> darüber stolpert, darf **nicht** auf `/_api/web/webs` zurückbauen. Das ist 401 und war
+> genau die Ursache der ursprünglichen Blindheit.
+
+Der Durchlauf ist pro AD-Konto gecacht (TTL 15 min) — die Sicht ist rechteabhängig, ein
+gemeinsamer Cache wäre ein Rechteleck. Der Cache liegt modulweit, weil `_onprem_backend`
+pro Request einen neuen Client samt NTLM-Handschlag baut. Grenzen: Tiefe 6, 500 Websites,
+**beide protokolliert, wenn sie greifen** — eine stille Kürzung liest sich wie
+Vollständigkeit.
+
+### 3.2 Website-Kontext: 200 mit leerer Liste ist der gefährlichste Fall
+
+Dieselbe Bibliothek, drei Aufrufkontexte (`/wissen/HygieneInfo/Hygiene Handbuch`, 194 Dateien):
+
+| Aufruf | `/` (Root) | `/wissen` (Sammlung) | `/wissen/HygieneInfo` (Website) |
+|---|---|---|---|
+| `GetFolderByServerRelativeUrl?$expand=Folders,Files` | 401 | **200, 0 Dateien** | 200, **194 Dateien** |
+
+Der mittlere Fall ist der gefährliche: HTTP 200, korrekter Ordnername, leere Dateiliste.
+Wer nur den Statuscode prüft, hält den Ordner für leer. Das gilt **auch innerhalb** einer
+Sammlung: `/blog/SiteAssets` liefert aus dem Root-Kontext 0 statt 334 Dateien — der Defekt
+war also schon vor der Discovery-Erweiterung wirksam.
+
+Deshalb stellt jeder Datei-Aufruf den Website-Pfad voran, ermittelt als **längster bekannter
+Web-Pfad, der Präfix der Ziel-URL ist** (`_web_for`, Segmentgrenzen, case-insensitiv). Ist
+nichts bekannt, wird die Discovery angestossen statt Root geraten. Und ein Listing mit 0
+Dateien *und* 0 Ordnern, dessen Liste `ItemCount > 0` meldet, wird als Kontextverdacht
+gemeldet statt als leerer Ordner.
+
+Nebenbei behoben: `_site_prefix` gab für die v2.0-GUID-IDs `''` zurück, weshalb der Picker
+für **jede** Website die Bibliotheken der Root-Website zeigte. Website-IDs sind jetzt
+server-relative Pfade. Die Datei-IDs (`spo_<base64>`) sind **unverändert**, damit bestehende
+Wissensdatenbank-Importe auflösbar bleiben.
+
+### 3.3 Inhalte jenseits von Dokumentbibliotheken
+
+7.290 der 20.180 Einträge (36 %) liegen nicht in Dokumentbibliotheken.
+
+- Bibliotheks-Filter ist `{101, 119}`. 119 (Websiteseiten) trägt den Portalinhalt und wird
+  im Picker als `drive_type: 'pages'` ausgewiesen. Ein **Website-Volimport überspringt sie**:
+  `.aspx` sind Markup-Hüllen, ihr Text steht in Listenfeldern.
+- `read_page(site_path, page)` liest `WikiField` (klassisch) bzw. `CanvasContent1` (modern).
+  **Zwei getrennte Abfragen, nicht ein `$select` mit beiden Feldern** — auf einer klassischen
+  SP2016-Website existiert `CanvasContent1` womöglich nicht, und ein unbekanntes Feld im
+  `$select` lässt die *ganze* Abfrage mit 400 scheitern. Erkennung über Statuscode, nicht
+  über den (lokalisierten) Meldungstext. Die Bibliothek wird über `BaseTemplate eq 119`
+  gefunden, nicht über `getbytitle('Site Pages')` — die Farm ist deutsch („Websiteseiten").
+- `list_events(site_path, from_date, top)` liest Kalender (106). Das Datumsliteral **muss**
+  `datetime'…Z'` sein (OData v2/v3); ein blosser ISO-String ist ungültig. Serientermine
+  kommen nur als Serienkopf zurück — `DateTimeRangesOverlap` ist in `$filter` ausdrücklich
+  nicht unterstützt — und werden als `recurring` markiert statt stillschweigend für alle
+  Termine zu stehen.
+- `read_page`, `list_events`, `resolve_url` und `list_webs` sind **nicht** im
+  `SharePointBackend`-Protokoll. Jede Methode dort wäre eine Pflicht für `GraphClient`.
+  Aufrufer greifen direkt auf den On-Prem-Client zu und prüfen mit `hasattr`.
 
 ## 4. Fallstricke, die Geld kosten
 
@@ -165,9 +254,24 @@ openwebui:
     SHAREPOINT_BACKEND: "onprem"
     SHAREPOINT_ONPREM_SITE_URL: "https://portal.skkiel.intern"
     SHAREPOINT_ONPREM_VERIFY_TLS: "false"  # bis die interne CA im Pod-Truststore liegt
+    SHAREPOINT_ONPREM_SITE_ROOTS: "/,/wissen,/abteilungen,/teamseiten,/projekte"
     # LDAP_CREDENTIAL_ENCRYPTION_KEY kommt aus einem Secret, nicht aus den Values.
     # Erzeugen: python -c "import os,base64;print(base64.urlsafe_b64encode(os.urandom(32)).decode())"
 ```
+
+`SHAREPOINT_ONPREM_SITE_ROOTS` ist nur der **Startwert**. Gepflegt wird die Liste danach
+unter **Admin → Authentifizierung → SharePoint → Websitesammlungen**
+(`sharepoint.onprem.site_roots`, `GET`/`POST /api/v1/auths/admin/config/sharepoint`). Kommt
+eine Websitesammlung dazu, ist das damit eine Betriebsänderung von Minuten statt eines
+Deployments mit Pod-Neustart — und die Änderung greift beim nächsten Aufruf, ohne auf den
+Discovery-Cache zu warten (der Cache-Schlüssel enthält die Einstiegspunkte).
+
+Der Abschnitt erscheint im Admin-Panel **nur bei `SHAREPOINT_BACKEND=onprem`**: die
+Endpunkte antworten sonst 404, und dieses 404 ist das Gate. Ein zusätzliches Feature-Flag
+gibt es dafür bewusst nicht.
+
+Default ohne jede Konfiguration ist `/` — eine ungepflegte Instanz verhält sich damit exakt
+wie vor der Discovery-Erweiterung.
 
 Schlüsselrotation: Es gibt einen aktiven Schlüssel. Eine Rotation entwertet alle
 Datensätze; jeder Nutzer legt sein Credential beim nächsten Login neu an. Das wird
@@ -182,6 +286,12 @@ Domänencontroller.
 | `test/sharepoint/test_sharepoint_onprem_client.py` | NTLM-Legs, Endpunkt-Mapping, Systemordner-Filter, Apostroph-Escaping, 401-Unterscheidung, Protokoll-Konformität beider Clients |
 | `test/sharepoint/test_sharepoint_import_onprem.py` | Die **KB-Import-Endpunkte** über das On-Prem-Backend: Ordner-Import, Einzeldatei, Listing, `backend`-Feld in `sharepoint_source`, 409 beim Re-Import gegen das falsche Backend, und dass ein echter 401 das Credential genau einmal verwirft |
 | `test/sharepoint/test_sharepoint_import.py` | Bestehende Import-Tests (Graph-Pfad), auf den Resolver umgezogen |
+| `test/sharepoint/test_sharepoint_onprem_discovery.py` | Normalisierung der Einstiegspunkte, rekursive Discovery über mehrere Sammlungen, übersprungene 401-Zweige, beide OData-Verbositäten, Tiefen-/Anzahlgrenze samt Log, Cache (Treffer, fremdes Konto, geänderte Einstiegspunkte, Ablauf), Kontextauflösung inkl. `/wissen` vs. `/wissenschaft`, Kontextverdacht, navigierbare Liste, `_site_prefix` |
+| `test/sharepoint/test_sharepoint_onprem_pages_events.py` | `read_page` (Wiki, modern, fehlendes `CanvasContent1`, WebPart-Hinweis, Template-statt-Titel), `list_events` (Datumsliteral, Serienkopf, `$top`, unlesbarer Kalender), `resolve_url`, und dass Seitenbibliotheken sichtbar aber nicht importierbar sind |
+
+`conftest.py` leert den modulweiten Discovery-Cache um jeden Test. Ohne das liest ein
+späterer Test die Farm des früheren, sein eigener Mock-Transport wird nie befragt — und er
+wird grün aus dem falschen Grund.
 
 ## 8. Rückwärtskompatibilität
 

@@ -5,6 +5,7 @@ three-leg NTLM handshake and the v2.0 endpoint mapping are exercised without a n
 """
 
 import base64
+import time
 
 import httpx
 import pytest
@@ -12,6 +13,8 @@ import pytest
 from open_webui.utils.graph_client import GraphClient
 from open_webui.utils.sharepoint_backend import SharePointBackend
 from open_webui.utils.sharepoint_onprem_client import (
+    _DISCOVERY_CACHE,
+    DISCOVERY_TTL_SECONDS,
     NtlmAuth,
     SharePointOnPremClient,
     _parse_ntlm_challenge,
@@ -23,17 +26,38 @@ BASE = 'https://portal.example.intern'
 DRIVE = 'drive-1'
 
 
-def _make_client(handler, with_auth: bool = False) -> SharePointOnPremClient:
+def _make_client(
+    handler,
+    with_auth: bool = False,
+    site_roots: list[str] | None = None,
+    known_webs: list[str] | None = ('/',),
+) -> SharePointOnPremClient:
     """Client with a mocked transport. NTLM is off by default so endpoint tests are not
-    obscured by handshake bookkeeping."""
+    obscured by handshake bookkeeping.
+
+    `known_webs` pre-seeds the discovery cache, which is what a second call against a
+    real farm sees. Without it every file operation would first walk the farm to find its
+    web context, drowning the endpoint assertions in discovery traffic. Pass None to let
+    discovery actually run -- that is what test_sharepoint_onprem_discovery.py does.
+    """
     transport = httpx.MockTransport(handler)
     kwargs = {'transport': transport, 'headers': {'Accept': 'application/json'}}
     if with_auth:
         kwargs['auth'] = NtlmAuth('DOMAIN\\user', 'pw')
     http_client = httpx.AsyncClient(**kwargs)
-    return SharePointOnPremClient(
-        account='DOMAIN\\user', password='pw', base_url=BASE, http_client=http_client
+    client = SharePointOnPremClient(
+        account='DOMAIN\\user',
+        password='pw',
+        base_url=BASE,
+        http_client=http_client,
+        site_roots=site_roots,
     )
+    if known_webs is not None:
+        _DISCOVERY_CACHE[client._cache_key()] = (
+            time.monotonic() + DISCOVERY_TTL_SECONDS,
+            [{'path': p, 'title': p, 'depth': 0, 'root': p} for p in known_webs],
+        )
+    return client
 
 
 LIB_PATH = '/Dokumente zur Befragung'
@@ -193,7 +217,7 @@ class TestEndpoints:
             seen['accept'] = request.headers.get('accept')
             return httpx.Response(200, json={'value': []})
 
-        await _make_client(handler).search_sites('x')
+        await _make_client(handler, known_webs=None).search_sites('x')
         assert seen['accept'] == 'application/json'
 
     @pytest.mark.asyncio
@@ -404,22 +428,25 @@ class TestEndpoints:
 
         def handler(request: httpx.Request) -> httpx.Response:
             url = str(request.url)
-            if url.endswith('/sites/root'):
-                return httpx.Response(
-                    200, json={'id': 'root', 'name': 'Portal', 'webUrl': BASE}
-                )
+            if 'getsubwebsfilteredforcurrentuser' in url:
+                if url.startswith(f'{BASE}/_api'):
+                    return httpx.Response(
+                        200,
+                        json={
+                            'value': [
+                                {'Title': 'Hygiene', 'ServerRelativeUrl': '/hygiene'},
+                                {'Title': 'Technik', 'ServerRelativeUrl': '/technik'},
+                            ]
+                        },
+                    )
+                return httpx.Response(200, json={'value': []})
+            path = url.split('/_api/web')[0][len(BASE) :] or '/'
             return httpx.Response(
-                200,
-                json={
-                    'value': [
-                        {'id': 's1', 'name': 'Hygiene', 'webUrl': f'{BASE}/hygiene'},
-                        {'id': 's2', 'name': 'Technik', 'webUrl': f'{BASE}/technik'},
-                    ]
-                },
+                200, json={'Title': 'Portal', 'ServerRelativeUrl': path}
             )
 
-        client = _make_client(handler)
-        assert [s['name'] for s in await client.search_sites('hyg')] == ['Hygiene']
+        client = _make_client(handler, known_webs=None)
+        assert [s['name'] for s in await client.search_sites('hyg')] == ['/hygiene']
         assert len(await client.search_sites('*')) == 3
 
 
