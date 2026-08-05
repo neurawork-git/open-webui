@@ -209,6 +209,13 @@ Wissensdatenbank-Importe auflösbar bleiben.
    Ausweg: viele Reverse-Proxies normalisieren oder verwerfen `%2F`.
    Darunter sind es weiterhin Pfade, also **brechen sie beim Umbenennen und Verschieben**;
    ein Re-Import meldet die Datei dann als fehlend. Ausweg wäre `(Listen-GUID, Item-ID)`.
+   `site_id` ist die Ausnahme: das ist ein **roher** serverrelativer Pfad (`/wissen/…`), also
+   reist es als **Query**-Parameter (`/sharepoint/site-drives?site_id=…`) statt als
+   Pfadsegment. Die alte Route `/sharepoint/sites/{site_id}/drives` war ab dem Moment tot,
+   in dem die IDs von GUIDs auf Pfade wechselten: uvicorn dekodiert `%2F` **vor** dem
+   Routing, keine Route matcht, und der 404 kommt als `index.html` der SPA zurück — im
+   Frontend sichtbar als `Unexpected token '<'`. Ein Guard-Test in
+   `test_sharepoint_import.py` verbietet `{site_id}` in jedem Routen-Pfad.
 8. **Keine Paginierung.** Die klassischen Collections liefern alles in einer Antwort;
    `next_link` ist immer `None`. Grenze ist der List View Threshold (5000). Grösste
    KHKI-Bibliothek: 350 Elemente.
@@ -339,7 +346,7 @@ Metadaten-Roundtrip.
 
 Zusätzlich end-to-end über die **echten HTTP-Routen** (ASGI, Session-Nutzer gemockt):
 `/users/user/credentials/status`, `/knowledge/sharepoint/sites`,
-`/sharepoint/sites/{id}/drives`, `/sharepoint/drives/{id}/items/{iid}/children` — letzterer
+`/sharepoint/site-drives?site_id=…`, `/sharepoint/drives/{id}/items/{iid}/children` — letzterer
 liefert die drei echten PDFs. Ebenso geprüft: Opt-out hält über den nächsten Login hinweg,
 und ohne Credential kommt ein sprechender 401.
 
