@@ -1114,13 +1114,14 @@ export const listSharePointSiteDrives = async (
 	token: string,
 	siteId: string
 ): Promise<SharePointSiteDrives> => {
-	const res = await fetch(
-		`${WEBUI_API_BASE_URL}/knowledge/sharepoint/sites/${encodeURIComponent(siteId)}/drives`,
-		{
-			method: 'GET',
-			headers: { Accept: 'application/json', authorization: `Bearer ${token}` }
-		}
-	).then(async (r) => {
+	// site_id travels as a query parameter, not a path segment: on-prem site ids are
+	// server-relative paths ('/wissen/KIS Trainingsvideos') and uvicorn unquotes %2F
+	// before routing, so a path segment cannot carry them.
+	const params = new URLSearchParams({ site_id: siteId });
+	const res = await fetch(`${WEBUI_API_BASE_URL}/knowledge/sharepoint/site-drives?${params}`, {
+		method: 'GET',
+		headers: { Accept: 'application/json', authorization: `Bearer ${token}` }
+	}).then(async (r) => {
 		if (!r.ok) throw await r.json();
 		return r.json();
 	});

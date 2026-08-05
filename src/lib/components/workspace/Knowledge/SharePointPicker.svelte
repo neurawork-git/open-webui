@@ -67,16 +67,18 @@
 		return `${v.toFixed(v < 10 && u > 0 ? 1 : 0)} ${units[u]}`;
 	};
 
-	const filteredSites = () => {
-		const q = sitesFilter.trim().toLowerCase();
-		if (!q) return sites;
-		return sites.filter(
-			(s) =>
-				(s.display_name || '').toLowerCase().includes(q) ||
-				(s.name || '').toLowerCase().includes(q) ||
-				(s.web_url || '').toLowerCase().includes(q)
-		);
-	};
+	// Reactive statement, not a function called from the template: Svelte tracks the
+	// variables an expression *names*, and `filteredSites()` names neither `sites` nor
+	// `sitesFilter` -- so typing in the filter re-ran nothing and the list never changed.
+	$: q = sitesFilter.trim().toLowerCase();
+	$: filteredSites = q
+		? sites.filter(
+				(s) =>
+					(s.display_name || '').toLowerCase().includes(q) ||
+					(s.name || '').toLowerCase().includes(q) ||
+					(s.web_url || '').toLowerCase().includes(q)
+			)
+		: sites;
 
 	const loadSitesInitial = async () => {
 		sitesLoading = true;
@@ -369,7 +371,7 @@
 					{:else if sitesError}
 						<div class="text-sm text-red-500 p-2">{sitesError}</div>
 					{:else}
-						{#each filteredSites() as site (site.id)}
+						{#each filteredSites as site (site.id)}
 							<button
 								class="w-full text-left px-2 py-1.5 rounded-lg text-sm hover:bg-gray-50 dark:hover:bg-gray-800 {selectedSite?.id ===
 								site.id
@@ -383,7 +385,7 @@
 								{/if}
 							</button>
 						{/each}
-						{#if filteredSites().length === 0 && sites.length > 0}
+						{#if filteredSites.length === 0 && sites.length > 0}
 							<div class="text-sm text-gray-500 p-2">
 								{$i18n.t('No sites match the filter.')}
 							</div>

@@ -3039,14 +3039,21 @@ class SharePointSiteDrivesResponse(BaseModel):
     drives: list[SharePointDriveSummary]
 
 
-@router.get('/sharepoint/sites/{site_id}/drives', response_model=SharePointSiteDrivesResponse)
+@router.get('/sharepoint/site-drives', response_model=SharePointSiteDrivesResponse)
 async def list_sharepoint_site_drives(
     request: Request,
-    site_id: str,
+    site_id: str = Query(...),
     user=Depends(get_verified_user),
     db: AsyncSession = Depends(get_async_session),
 ):
-    """List all document libraries (drives) of a SharePoint site with size."""
+    """List all document libraries (drives) of a SharePoint site with size.
+
+    `site_id` is a query parameter, not a path segment. On-prem site ids are
+    server-relative paths (`/wissen/KIS Trainingsvideos`); uvicorn percent-decodes the
+    path before routing, so `%2F` turns back into `/` and no path route can match. The
+    symptom was a 404 answered with the SPA's index.html -- reported by the frontend as
+    `Unexpected token '<'`. Graph ids have no slashes and are unaffected either way.
+    """
     graph = await get_sharepoint_backend(request, user, db)
     try:
         summary = await graph.list_site_drives_summary(site_id)

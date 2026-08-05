@@ -1466,3 +1466,24 @@ class TestMicrosoftAccessTokenHelper:
 
         assert exc_info.value.status_code == 401
         assert "log in with Microsoft SSO" in exc_info.value.detail
+
+
+class TestPickerRouteShapes:
+    """On-prem ids that may contain '/' must never travel as FastAPI path parameters.
+
+    uvicorn percent-decodes the request path before routing, so an id encoded as
+    `%2Fwissen%2FKIS Trainingsvideos` is back to `/wissen/KIS Trainingsvideos` by the time
+    the router looks at it and no route matches. The 404 is answered with the SPA's
+    index.html, which the frontend reports as `Unexpected token '<'`.
+    """
+
+    def test_no_route_takes_site_id_as_path_parameter(self):
+        from open_webui.routers.knowledge import router
+
+        offenders = [r.path for r in router.routes if "{site_id}" in r.path]
+        assert offenders == [], f"site_id must be a query parameter, not a path segment: {offenders}"
+
+    def test_site_drives_route_exists(self):
+        from open_webui.routers.knowledge import router
+
+        assert "/sharepoint/site-drives" in [r.path for r in router.routes]
