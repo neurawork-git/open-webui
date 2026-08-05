@@ -213,9 +213,13 @@ Wissensdatenbank-Importe auflösbar bleiben.
    reist es als **Query**-Parameter (`/sharepoint/site-drives?site_id=…`) statt als
    Pfadsegment. Die alte Route `/sharepoint/sites/{site_id}/drives` war ab dem Moment tot,
    in dem die IDs von GUIDs auf Pfade wechselten: uvicorn dekodiert `%2F` **vor** dem
-   Routing, keine Route matcht, und der 404 kommt als `index.html` der SPA zurück — im
-   Frontend sichtbar als `Unexpected token '<'`. Ein Guard-Test in
-   `test_sharepoint_import.py` verbietet `{site_id}` in jedem Routen-Pfad.
+   Routing, also matcht keine Route mehr. Die Anfrage fällt dann auf den SPA-Mount durch,
+   und der antwortet **HTTP 200 mit `index.html`** — am Pod gemessen, *kein* 404. Genau
+   deshalb lief das Frontend nicht in seinen Fehlerzweig: `r.ok` war wahr, `r.json()`
+   lief auf Markup, der Nutzer sah `Unexpected token '<'`. Merke: eine tote Fork-Route
+   meldet sich hier nicht als 404, sondern als HTML mit 200 — wer nach 404 sucht, sucht
+   falsch. Ein Guard-Test in `test_sharepoint_import.py` verbietet `{site_id}` in jedem
+   Routen-Pfad.
 8. **Keine Paginierung.** Die klassischen Collections liefern alles in einer Antwort;
    `next_link` ist immer `None`. Grenze ist der List View Threshold (5000). Grösste
    KHKI-Bibliothek: 350 Elemente.

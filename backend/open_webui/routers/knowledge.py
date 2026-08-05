@@ -3050,9 +3050,13 @@ async def list_sharepoint_site_drives(
 
     `site_id` is a query parameter, not a path segment. On-prem site ids are
     server-relative paths (`/wissen/KIS Trainingsvideos`); uvicorn percent-decodes the
-    path before routing, so `%2F` turns back into `/` and no path route can match. The
-    symptom was a 404 answered with the SPA's index.html -- reported by the frontend as
-    `Unexpected token '<'`. Graph ids have no slashes and are unaffected either way.
+    path before routing, so `%2F` turns back into `/` and no path route can match.
+
+    The unmatched request then falls through to the SPA mount, which answers **HTTP 200
+    with index.html** -- measured against the deployed pod, not a 404. That is why the
+    frontend never reached its error branch: `r.ok` was true, `r.json()` ran on markup,
+    and the user saw `Unexpected token '<'`. Graph ids carry no slashes and would have
+    kept working under either shape, which is what hid this until an on-prem farm.
     """
     graph = await get_sharepoint_backend(request, user, db)
     try:
